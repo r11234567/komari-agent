@@ -34,7 +34,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Verify pinned protocol dependency
-        run: go list -m github.com/r11234567/komari-proto | grep -Fx 'github.com/r11234567/komari-proto v0.1.4'
+        run: go list -m github.com/r11234567/komari-proto | grep -Fx 'github.com/r11234567/komari-proto v0.1.7'
 
       - name: Run transport and runtime contract tests
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
@@ -53,11 +53,19 @@ jobs:
           fi
           go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}" -o $BINARY_NAME
 
+          RESCUE_BINARY_NAME=komari-agent-rescue-${{ matrix.goos }}-${{ matrix.goarch }}
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            RESCUE_BINARY_NAME=${RESCUE_BINARY_NAME}.exe
+          fi
+          go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}" -o $RESCUE_BINARY_NAME ./cmd/komari-agent-rescue
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}*
+          path: |
+            komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}*
+            komari-agent-rescue-${{ matrix.goos }}-${{ matrix.goarch }}*
 
   capability-fixtures:
     strategy:

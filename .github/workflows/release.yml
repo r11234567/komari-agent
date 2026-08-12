@@ -52,6 +52,12 @@ jobs:
           fi
             go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}" -o $BINARY_NAME
 
+          RESCUE_BINARY_NAME=komari-agent-rescue-${{ matrix.goos }}-${{ matrix.goarch }}
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            RESCUE_BINARY_NAME=${RESCUE_BINARY_NAME}.exe
+          fi
+          go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}" -o $RESCUE_BINARY_NAME ./cmd/komari-agent-rescue
+
       - name: Upload binary to release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -63,4 +69,9 @@ jobs:
             true
           fi
           gh release upload ${{ github.event.release.tag_name }} $BINARY_NAME --repo ${{ github.repository }}
+          RESCUE_BINARY_NAME=komari-agent-rescue-${{ matrix.goos }}-${{ matrix.goarch }}
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            RESCUE_BINARY_NAME=${RESCUE_BINARY_NAME}.exe
+          fi
+          gh release upload ${{ github.event.release.tag_name }} $RESCUE_BINARY_NAME --repo ${{ github.repository }}
         shell: bash

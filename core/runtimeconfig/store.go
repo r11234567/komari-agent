@@ -208,7 +208,39 @@ func (s *Store) persist(state persistedState) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
+	if existing, err := os.ReadFile(s.path); err == nil {
+		if err := writeBackup(s.path+".bak", existing); err != nil {
+			return fmt.Errorf("backup runtime config: %w", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read runtime config for backup: %w", err)
+	}
 	return os.Rename(tmpName, s.path)
+}
+
+func writeBackup(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".runtime-backup-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, path)
 }
 
 func fromProto(base Snapshot, revision uint64, value *configv1.RuntimeConfig) (Snapshot, error) {
@@ -218,7 +250,7 @@ func fromProto(base Snapshot, revision uint64, value *configv1.RuntimeConfig) (S
 		result.MemoryIncludeCache = *value.MemoryIncludeCache
 	}
 	if value.EnableGpu != nil {
-		result.EnableGPU = *value.EnableGpu
+		return Snapshot{}, errors.New("GPU enablement is install-only and requires reinstalling the Agent")
 	}
 	if value.DetailedGpu != nil {
 		result.DetailedGPU = *value.DetailedGpu
@@ -231,7 +263,7 @@ func fromProto(base Snapshot, revision uint64, value *configv1.RuntimeConfig) (S
 		result.TrafficResetDay = *value.TrafficResetDay
 	}
 	if value.RemoteControlEnabled != nil {
-		result.RemoteControlEnabled = *value.RemoteControlEnabled
+		return Snapshot{}, errors.New("remote control is install-only and requires reinstalling the Agent")
 	}
 	if value.ReportInterval != nil {
 		if err := value.ReportInterval.CheckValid(); err != nil {

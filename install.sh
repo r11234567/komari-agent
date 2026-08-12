@@ -42,7 +42,14 @@ github_proxy=""
 release_repository="r11234567/komari-agent"
 install_version="" # New parameter for specifying version
 install_dir_specified=false
-service_user="${SUDO_USER:-$(id -un)}"
+runtime_identity="root-or-administrator"
+rescue_enabled=false
+rescue_configure_firewall=false
+rescue_endpoint=""
+rescue_token=""
+ignore_unsafe_cert=false
+invoking_user="${SUDO_USER:-$(id -un)}"
+service_user="root"
 user_service=false
  
 
@@ -95,6 +102,33 @@ while [[ $# -gt 0 ]]; do
             install_version="$2"
             shift 2
             ;;
+        --install-runtime-identity)
+            runtime_identity="$2"
+            shift 2
+            ;;
+        --install-rescue)
+            rescue_enabled=true
+            shift
+            ;;
+        --install-rescue-firewall)
+            rescue_configure_firewall=true
+            shift
+            ;;
+        -e|--endpoint)
+            rescue_endpoint="$2"
+            komari_args="$komari_args $1 $2"
+            shift 2
+            ;;
+        -t|--token)
+            rescue_token="$2"
+            komari_args="$komari_args $1 $2"
+            shift 2
+            ;;
+        -u|--ignore-unsafe-cert)
+            ignore_unsafe_cert=true
+            komari_args="$komari_args $1"
+            shift
+            ;;
         --install*)
             log_warning "Unknown install parameter: $1"
             shift
@@ -107,27 +141,86 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+case "$runtime_identity" in
+    root-or-administrator)
+        service_user="root"
+        ;;
+    current-user)
+        service_user="$invoking_user"
+        ;;
+    *)
+        log_error "--install-runtime-identity must be root-or-administrator or current-user"
+        exit 1
+        ;;
+esac
+
+if [ "$EUID" -ne 0 ] && [ "$runtime_identity" = "root-or-administrator" ]; then
+    log_error "root-or-administrator runtime requires running the installer as root"
+    exit 1
+fi
+if [ "$rescue_configure_firewall" = true ] && [ "$rescue_enabled" != true ]; then
+    log_error "--install-rescue-firewall requires --install-rescue"
+    exit 1
+fi
+if [ "$rescue_enabled" = true ]; then
+    if [ "$os_name" != "linux" ]; then
+        log_error "The privileged rescue helper is currently supported by this installer only on Linux"
+        exit 1
+    fi
+    if [ "$EUID" -ne 0 ]; then
+        log_error "The rescue helper must be installed by root even when the ordinary Agent runs as the current user"
+        exit 1
+    fi
+    case " $komari_args " in
+        *" --disable-remote-control "*|*" --disable-web-ssh "*) ;;
+        *)
+            log_error "The rescue helper is available only when normal remote control is disabled"
+            exit 1
+            ;;
+    esac
+    if [ -z "$rescue_endpoint" ] || [ -z "$rescue_token" ]; then
+        log_error "The rescue helper requires explicit --endpoint and --token Agent arguments"
+        exit 1
+    fi
+fi
+
 # Remove leading space from komari_args if present
 komari_args="${komari_args# }"
 
 # A direct, unprivileged installation belongs entirely to the invoking user.
-if [ "$EUID" -ne 0 ] && [ "$install_dir_specified" = false ]; then
+if [ "$runtime_identity" = "current-user" ] && [ "$install_dir_specified" = false ]; then
+    user_home=$(getent passwd "$service_user" 2>/dev/null | cut -d: -f6)
+    if [ -z "$user_home" ]; then
+        user_home="$HOME"
+    fi
     case "$os_name" in
         linux|freebsd)
-            target_dir="${XDG_DATA_HOME:-$HOME/.local/share}/komari"
+            target_dir="${user_home}/.local/share/komari"
             ;;
     esac
 fi
 
 komari_agent_path="${target_dir}/agent"
+runtime_state_path="${target_dir}/runtime-config.json"
 
 # User services are the only service type a non-root Linux installation can manage.
-if [ "$EUID" -ne 0 ] && [ "$os_name" = "linux" ]; then
-    if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+if [ "$runtime_identity" = "current-user" ] && [ "$os_name" = "linux" ]; then
+    user_uid=$(id -u "$service_user")
+    run_user_systemctl() {
+        if [ "$(id -un)" = "$service_user" ]; then
+            env XDG_RUNTIME_DIR="/run/user/${user_uid}" systemctl --user "$@"
+        elif command -v runuser >/dev/null 2>&1; then
+            runuser -u "$service_user" -- env XDG_RUNTIME_DIR="/run/user/${user_uid}" systemctl --user "$@"
+        else
+            log_error "runuser is required to configure the ${service_user} systemd user service"
+            return 1
+        fi
+    }
+    if command -v systemctl >/dev/null 2>&1 && run_user_systemctl show-environment >/dev/null 2>&1; then
         user_service=true
     else
-        log_error "A non-root Linux installation requires a running systemd user session"
-        log_info "Log in through systemd or install with elevated privileges."
+        log_error "current-user runtime requires a running systemd user session for ${service_user}"
+        log_info "Enable lingering for that user or install the ordinary Agent with root-or-administrator runtime."
         exit 1
     fi
 fi
@@ -139,6 +232,8 @@ echo ""
 log_config "Installation configuration:"
 log_config "  Service name: ${GREEN}$service_name${NC}"
 log_config "  Service user: ${GREEN}$service_user${NC}"
+log_config "  Runtime identity: ${GREEN}$runtime_identity${NC}"
+log_config "  Rescue helper: ${GREEN}$rescue_enabled${NC}"
 log_config "  Install directory: ${GREEN}$target_dir${NC}"
 log_config "  GitHub proxy: ${GREEN}${github_proxy:-"(direct)"}${NC}"
 log_config "  Binary arguments: ${GREEN}$komari_args${NC}"
@@ -155,12 +250,14 @@ uninstall_previous() {
     
     # Stop and disable service if it exists
     if [ "$user_service" = true ]; then
-        if systemctl --user list-unit-files | grep -q "${service_name}.service"; then
+        user_uid=$(id -u "$service_user")
+        user_home=$(getent passwd "$service_user" | cut -d: -f6)
+        if run_user_systemctl list-unit-files | grep -q "${service_name}.service"; then
             log_info "Stopping and disabling existing systemd user service..."
-            systemctl --user stop "${service_name}.service" || true
-            systemctl --user disable "${service_name}.service" || true
-            rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/${service_name}.service"
-            systemctl --user daemon-reload
+            run_user_systemctl stop "${service_name}.service" || true
+            run_user_systemctl disable "${service_name}.service" || true
+            rm -f "${user_home}/.config/systemd/user/${service_name}.service"
+            run_user_systemctl daemon-reload
         fi
     elif command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files | grep -q "${service_name}.service"; then
         log_info "Stopping and disabling existing systemd service..."
@@ -204,6 +301,21 @@ uninstall_previous() {
     if [ -f "$komari_agent_path" ]; then
         log_info "Removing old binary..."
         rm -f "$komari_agent_path"
+    fi
+    rescue_service_name="${service_name}-rescue"
+    if [ "$EUID" -eq 0 ] && command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files | grep -q "${rescue_service_name}.service"; then
+        systemctl disable --now "${rescue_service_name}.service" || true
+        rm -f "/etc/systemd/system/${rescue_service_name}.service"
+        systemctl daemon-reload
+    fi
+    rescue_env_dir="/etc/komari-agent"
+    rescue_marker="${rescue_env_dir}/${rescue_service_name}.firewall-managed"
+    if [ "$EUID" -eq 0 ] && [ -f "$rescue_marker" ] && command -v ufw >/dev/null 2>&1; then
+        ufw --force delete allow out 443/tcp comment 'komari-rescue' || true
+    fi
+    if [ "$EUID" -eq 0 ]; then
+        rm -f "${rescue_env_dir}/${rescue_service_name}.env" "${rescue_env_dir}/${rescue_service_name}.instance" "$rescue_marker"
+        rm -f "/usr/local/lib/komari-agent/komari-agent-rescue"
     fi
 }
 
@@ -358,6 +470,13 @@ if [ "$EUID" -eq 0 ] && [ "$service_user" != "root" ]; then
 fi
 log_success "Komari-agent installed to ${GREEN}$komari_agent_path${NC}"
 
+# Keep the online-dispatch snapshot alongside this installation so the
+# separately privileged helper can roll it back without reading a user home.
+case " $komari_args " in
+    *" --runtime-state-file "*) ;;
+    *) komari_args="$komari_args --runtime-state-file ${runtime_state_path}" ;;
+esac
+
 # Detect init system and configure service
 log_step "Configuring system service..."
 
@@ -455,6 +574,10 @@ if [ "$user_service" = true ]; then
     init_system="systemd-user"
 fi
 log_info "Detected init system: ${GREEN}$init_system${NC}"
+if [ "$rescue_enabled" = true ] && [ "$init_system" != "systemd" ]; then
+    log_error "The rescue helper requires Linux systemd to keep its privileged guardian separate from the ordinary Agent service"
+    exit 1
+fi
 
 # Handle each init system
 if [ "$init_system" = "nixos" ]; then
@@ -506,7 +629,8 @@ EOF
     log_success "OpenRC service configured and started"
 elif [ "$init_system" = "systemd-user" ]; then
     log_info "Using systemd user service management"
-    service_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+    user_home=$(getent passwd "$service_user" | cut -d: -f6)
+    service_dir="${user_home}/.config/systemd/user"
     service_file="${service_dir}/${service_name}.service"
     mkdir -p "$service_dir"
     cat > "$service_file" << EOF
@@ -523,8 +647,11 @@ Restart=always
 [Install]
 WantedBy=default.target
 EOF
-    systemctl --user daemon-reload
-    systemctl --user enable --now "${service_name}.service"
+    if [ "$EUID" -eq 0 ]; then
+        chown -R "$service_user" "$service_dir" "$target_dir"
+    fi
+    run_user_systemctl daemon-reload
+    run_user_systemctl enable --now "${service_name}.service"
     log_success "Systemd user service configured and started"
 elif [ "$init_system" = "systemd" ]; then
     # Systemd service configuration
@@ -704,6 +831,114 @@ else
     log_error "Supported init systems: systemd, openrc, procd, launchd"
     exit 1
 fi
+
+install_rescue_helper() {
+    [ "$rescue_enabled" = true ] || return 0
+    rescue_dir="/usr/local/lib/komari-agent"
+    rescue_path="${rescue_dir}/komari-agent-rescue"
+    rescue_service_name="${service_name}-rescue"
+    rescue_env_dir="/etc/komari-agent"
+    rescue_env_file="${rescue_env_dir}/${rescue_service_name}.env"
+    rescue_marker="${rescue_env_dir}/${rescue_service_name}.firewall-managed"
+    rescue_file="komari-agent-rescue-linux-${arch}"
+    if [ "$version_to_install" = "latest" ]; then
+        rescue_download_path="latest/download"
+    else
+        rescue_download_path="download/${version_to_install}"
+    fi
+    if [ -n "$github_proxy" ]; then
+        rescue_download_url="${github_proxy}/https://github.com/${release_repository}/releases/${rescue_download_path}/${rescue_file}"
+    else
+        rescue_download_url="https://github.com/${release_repository}/releases/${rescue_download_path}/${rescue_file}"
+    fi
+    case "${rescue_endpoint}${rescue_token}" in
+    *$'\n'*|*$'\r'*)
+        log_error "Rescue endpoint or token contains unsupported control characters"
+        exit 1
+        ;;
+    esac
+    mkdir -p "$rescue_dir" "$rescue_env_dir"
+    chmod 700 "$rescue_dir" "$rescue_env_dir"
+    log_step "Downloading separately privileged rescue helper..."
+    if ! curl -L -o "$rescue_path" "$rescue_download_url"; then
+        log_error "Failed to download rescue helper"
+        exit 1
+    fi
+    chmod 700 "$rescue_path"
+    systemd_env_value() {
+        local value="$1"
+        value="${value//\\/\\\\}"
+        value="${value//\"/\\\"}"
+        printf '"%s"' "$value"
+    }
+    {
+		printf 'KOMARI_RESCUE_ENDPOINT=%s\n' "$(systemd_env_value "$rescue_endpoint")"
+		printf 'KOMARI_RESCUE_TOKEN=%s\n' "$(systemd_env_value "$rescue_token")"
+		printf 'KOMARI_RESCUE_AGENT_PATH=%s\n' "$(systemd_env_value "$komari_agent_path")"
+		printf 'KOMARI_RESCUE_RUNTIME_STATE_FILE=%s\n' "$(systemd_env_value "$runtime_state_path")"
+		printf 'KOMARI_RESCUE_AGENT_SERVICE_NAME=%s\n' "$(systemd_env_value "$service_name")"
+		printf 'KOMARI_RESCUE_AGENT_RUNTIME_IDENTITY=%s\n' "$(systemd_env_value "$runtime_identity")"
+		printf 'KOMARI_RESCUE_AGENT_RUNTIME_USER=%s\n' "$(systemd_env_value "$service_user")"
+		printf 'KOMARI_RESCUE_INSTANCE_ID_FILE=%s\n' "$(systemd_env_value "${rescue_env_dir}/${rescue_service_name}.instance")"
+		printf 'KOMARI_RESCUE_FIREWALL_MARKER=%s\n' "$(systemd_env_value "$rescue_marker")"
+        if [ "$ignore_unsafe_cert" = true ]; then
+            printf 'KOMARI_RESCUE_IGNORE_UNSAFE_CERT=true\n'
+        fi
+        if [ "$rescue_configure_firewall" = true ]; then
+            printf 'KOMARI_RESCUE_FIREWALL_CONFIGURED=true\n'
+        fi
+    } > "$rescue_env_file"
+    chmod 600 "$rescue_env_file"
+    if [ "$rescue_configure_firewall" = true ]; then
+        if ! command -v ufw >/dev/null 2>&1; then
+            if command -v apt-get >/dev/null 2>&1; then
+                apt-get update && apt-get install -y ufw
+            elif command -v dnf >/dev/null 2>&1; then
+                dnf install -y ufw
+            elif command -v yum >/dev/null 2>&1; then
+                yum install -y ufw
+            else
+                log_error "Cannot install the requested rescue firewall manager: ufw package manager not found"
+                exit 1
+            fi
+        fi
+        if ! ufw allow out 443/tcp comment 'komari-rescue'; then
+            log_error "Failed to configure the installer-managed rescue firewall rule"
+            exit 1
+        fi
+        : > "$rescue_marker"
+        chmod 600 "$rescue_marker"
+    else
+        rm -f "$rescue_marker"
+    fi
+    cat > "/etc/systemd/system/${rescue_service_name}.service" << EOF
+[Unit]
+Description=Komari Rescue Helper
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=${rescue_env_file}
+ExecStart=${rescue_path}
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=${target_dir} ${rescue_env_dir}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now "${rescue_service_name}.service"
+    log_success "Privileged rescue helper installed separately as ${rescue_service_name}.service"
+}
+
+install_rescue_helper
 
 echo ""
 echo -e "${WHITE}===========================================${NC}"

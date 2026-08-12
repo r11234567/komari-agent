@@ -1,263 +1,235 @@
-# Windows PowerShell installation script for Komari Agent
+# Windows PowerShell installation script for Komari Agent.
 
-# Logging functions with colors
-function Log-Info { param([string]$Message) Write-Host "$Message"    -ForegroundColor Cyan }
-function Log-Success { param([string]$Message) Write-Host "$Message"    -ForegroundColor Green }
-function Log-Warning { param([string]$Message) Write-Host "[WARNING] $Message"    -ForegroundColor Yellow }
-function Log-Error { param([string]$Message) Write-Host "[ERROR] $Message"    -ForegroundColor Red }
-function Log-Step { param([string]$Message) Write-Host "$Message"    -ForegroundColor Magenta }
-function Log-Config { param([string]$Message) Write-Host "- $Message"    -ForegroundColor White }
+function Log-Info { param([string]$Message) Write-Host $Message -ForegroundColor Cyan }
+function Log-Success { param([string]$Message) Write-Host $Message -ForegroundColor Green }
+function Log-Error { param([string]$Message) Write-Host "[ERROR] $Message" -ForegroundColor Red }
 
-# Default parameters
-$InstallDir = Join-Path $Env:ProgramFiles "Komari"
 $ServiceName = "komari-agent"
 $GitHubProxy = ""
-$KomariArgs = @()
 $InstallVersion = ""
 $ReleaseRepository = "r11234567/komari-agent"
+$RuntimeIdentity = "root-or-administrator"
+$InstallRescue = $false
+$InstallRescueFirewall = $false
+$InstallDir = ""
+$KomariArgs = @()
+$AgentEndpoint = ""
+$AgentToken = ""
+$IgnoreUnsafeCert = $false
+$RemoteControlDisabled = $false
 
-# Parse script arguments
 for ($i = 0; $i -lt $args.Count; $i++) {
     switch ($args[$i]) {
-        "--install-dir" { $InstallDir = $args[$i + 1]; $i++; continue }
-        "--install-service-name" { $ServiceName = $args[$i + 1]; $i++; continue }
-        "--install-ghproxy" { $GitHubProxy = $args[$i + 1]; $i++; continue }
-        "--install-version" { $InstallVersion = $args[$i + 1]; $i++; continue }
+        "--install-dir" { $InstallDir = $args[++$i]; continue }
+        "--install-service-name" { $ServiceName = $args[++$i]; continue }
+        "--install-ghproxy" { $GitHubProxy = $args[++$i]; continue }
+        "--install-version" { $InstallVersion = $args[++$i]; continue }
+        "--install-runtime-identity" { $RuntimeIdentity = $args[++$i]; continue }
+        "--install-rescue" { $InstallRescue = $true; continue }
+        "--install-rescue-firewall" { $InstallRescueFirewall = $true; continue }
+        { $_ -in @("-e", "--endpoint") } {
+            $AgentEndpoint = $args[$i + 1]
+            $KomariArgs += $args[$i]
+            $KomariArgs += $args[++$i]
+            continue
+        }
+        { $_ -in @("-t", "--token") } {
+            $AgentToken = $args[$i + 1]
+            $KomariArgs += $args[$i]
+            $KomariArgs += $args[++$i]
+            continue
+        }
+        { $_ -in @("-u", "--ignore-unsafe-cert") } {
+            $IgnoreUnsafeCert = $true
+            $KomariArgs += $args[$i]
+            continue
+        }
+        { $_ -in @("--disable-remote-control", "--disable-web-ssh") } {
+            $RemoteControlDisabled = $true
+            $KomariArgs += $args[$i]
+            continue
+        }
         Default { $KomariArgs += $args[$i] }
     }
 }
 
-# Ensure running as Administrator
-if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
-    ).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)) {
-    Log-Error "Please run this script as Administrator."
+$IsAdministrator = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltinRole]::Administrator
+)
+if ($RuntimeIdentity -notin @("root-or-administrator", "current-user")) {
+    Log-Error "--install-runtime-identity must be root-or-administrator or current-user"
     exit 1
 }
+if ($RuntimeIdentity -eq "root-or-administrator" -and -not $IsAdministrator) {
+    Log-Error "Administrator privileges are required for root-or-administrator runtime."
+    exit 1
+}
+if ($InstallRescueFirewall -and -not $InstallRescue) {
+    Log-Error "--install-rescue-firewall requires --install-rescue."
+    exit 1
+}
+if ($InstallRescue) {
+    if (-not $IsAdministrator) {
+        Log-Error "Administrator privileges are required to install the independent rescue helper."
+        exit 1
+    }
+    if (-not $RemoteControlDisabled) {
+        Log-Error "The rescue helper is available only when normal remote control is disabled."
+        exit 1
+    }
+    if ([string]::IsNullOrWhiteSpace($AgentEndpoint) -or [string]::IsNullOrWhiteSpace($AgentToken)) {
+        Log-Error "The rescue helper requires explicit --endpoint and --token Agent arguments."
+        exit 1
+    }
+}
 
-# Prepare GitHub proxy display
-if ($GitHubProxy -ne '') { $ProxyDisplay = $GitHubProxy } else { $ProxyDisplay = '(direct)' }
+if ([string]::IsNullOrWhiteSpace($InstallDir)) {
+    if ($RuntimeIdentity -eq "current-user") {
+        $InstallDir = Join-Path $env:LOCALAPPDATA "Komari"
+    }
+    else {
+        $InstallDir = Join-Path $env:ProgramFiles "Komari"
+    }
+}
 
-# Detect architecture early for constructing binary name
 switch ($env:PROCESSOR_ARCHITECTURE) {
-    'AMD64' { $arch = 'amd64' }
-    'ARM64' { $arch = 'arm64' }
-    'x86' { $arch = '386' }
+    "AMD64" { $Arch = "amd64" }
+    "ARM64" { $Arch = "arm64" }
+    "x86" { $Arch = "386" }
     Default { Log-Error "Unsupported architecture: $env:PROCESSOR_ARCHITECTURE"; exit 1 }
 }
 
-# Ensure installation directory exists for nssm and agent
-Log-Step "Ensuring installation directory exists: $InstallDir"
-New-Item -ItemType Directory -Path $InstallDir -Force -ErrorAction SilentlyContinue | Out-Null # Ensure $InstallDir exists
-
-# Check for nssm and download if not present
-$nssmExeToUse = Join-Path $InstallDir "nssm.exe"
-
-# First, check if nssm is in PATH and is functional
-$nssmCmd = Get-Command nssm -ErrorAction SilentlyContinue
-if ($nssmCmd) {
-    Log-Info "nssm found in PATH at $($nssmCmd.Source)."
-    try {
-        $nssmVersionOutput = nssm version 2>&1
-        Log-Info "Detected nssm version: $nssmVersionOutput"
-    }
-    catch {
-        Log-Warning "nssm found in PATH failed to execute 'nssm version'. Will attempt to use/download local copy. Error: $_"
-        $nssmCmd = $null # Force re-evaluation for local copy or download
-    }
+function Get-ReleaseVersion {
+    if (-not [string]::IsNullOrWhiteSpace($InstallVersion)) { return $InstallVersion }
+    return (Invoke-RestMethod -Uri "https://api.github.com/repos/$ReleaseRepository/releases/latest" -UseBasicParsing).tag_name
 }
 
-# If nssm not found in PATH or the one in PATH failed, check local $InstallDir
-if (-not $nssmCmd) {
-    if (Test-Path $nssmExeToUse) {
-        Log-Info "nssm found at $nssmExeToUse. Attempting to use it by adding $InstallDir to PATH."
-        $env:Path = "$($InstallDir);$($env:Path)"
-        $nssmCmd = Get-Command nssm -ErrorAction SilentlyContinue
-        if ($nssmCmd) {
-            try {
-                $nssmVersionOutput = nssm version 2>&1
-            }
-            catch {
-                Log-Warning "nssm from $InstallDir failed to execute 'nssm version'. Error: $_"
-                $nssmCmd = $null # Mark as unusable
-            }
-        }
-        else {
-            Log-Warning "Failed to make nssm from $nssmExeToUse available via PATH. Will attempt download."
-        }
+function Get-ReleaseUrl([string]$Version, [string]$FileName) {
+    $Url = "https://github.com/$ReleaseRepository/releases/download/$Version/$FileName"
+    if (-not [string]::IsNullOrWhiteSpace($GitHubProxy)) {
+        return "$($GitHubProxy.TrimEnd('/'))/$Url"
     }
+    return $Url
 }
 
-# If still no usable nssm command, proceed to download
-if (-not $nssmCmd) {
-    Log-Info "nssm not found or not usable. Attempting to download to $InstallDir..."
-    $NssmVersion = "2.24"
-    $NssmZipUrl = "https://nssm.cc/release/nssm-$NssmVersion.zip"
-    $TempNssmZipPath = Join-Path $env:TEMP "nssm-$NssmVersion.zip"
-    $TempExtractDir = Join-Path $env:TEMP "nssm_extract_temp"
-
-    try {
-        Log-Info "Downloading nssm from $NssmZipUrl..."
-        Invoke-WebRequest -Uri $NssmZipUrl -OutFile $TempNssmZipPath -UseBasicParsing
-
-        if (Test-Path $TempExtractDir) { Remove-Item -Recurse -Force $TempExtractDir }
-        New-Item -ItemType Directory -Path $TempExtractDir -Force | Out-Null
-        Expand-Archive -Path $TempNssmZipPath -DestinationPath $TempExtractDir -Force
-        
-        $NssmSourceDirInsideZip = "nssm-$NssmVersion" # Used for Get-ChildItem search path
-        # The path part within the extracted nssm folder, e.g., "nssm-2.24\win32"
-        # 'win32' nssm is used for both 'amd64' and 'arm64' PowerShell architectures.
-        $NssmArchSubDir = Join-Path "nssm-$NssmVersion" "win32"
-        $NssmSourceExePath = Join-Path (Join-Path $TempExtractDir $NssmArchSubDir) "nssm.exe"
-
-        if (-not (Test-Path $NssmSourceExePath)) {
-            Log-Error "Could not find nssm.exe at expected path: $NssmSourceExePath after extraction."
-            # Fallback search for nssm.exe within the extracted directory
-            $foundNssmFallback = Get-ChildItem -Path $TempExtractDir -Recurse -Filter "nssm.exe" | 
-            Where-Object { $_.FullName -like "*$NssmArchSubDir\nssm.exe" } | 
-            Select-Object -First 1
-            if ($foundNssmFallback) {
-                Log-Warning "Found nssm.exe at $($foundNssmFallback.FullName) using fallback search. Using this."
-                $NssmSourceExePath = $foundNssmFallback.FullName
-            }
-            else {
-                Log-Error "nssm.exe ($NssmArchSubDir) still not found in $TempExtractDir. Please install nssm manually (from https://nssm.cc) and ensure it's in your PATH."
-                exit 1
-            }
-        }
-        
-        Copy-Item -Path $NssmSourceExePath -Destination $nssmExeToUse -Force
-
-        $env:Path = "$($InstallDir);$($env:Path)"
-        $nssmCmd = Get-Command nssm -ErrorAction SilentlyContinue # Re-check after adding to PATH
-        if ($nssmCmd) {
-            Log-Success "Downloaded nssm is now configured and available in PATH."
-        }
-        else {
-            Log-Error "Failed to configure downloaded nssm in PATH from $nssmExeToUse. Please ensure $InstallDir is in your system PATH or nssm is installed globally."
-            exit 1
-        }
-    }
-    catch {
-        Log-Error "Failed to download or configure nssm: $_"
-        Log-Error "Please install nssm manually from https://nssm.cc and ensure nssm.exe is in your PATH."
-        exit 1
-    }
-    finally {
-        if (Test-Path $TempNssmZipPath) { Remove-Item $TempNssmZipPath -Force -ErrorAction SilentlyContinue }
-        if (Test-Path $TempExtractDir) { Remove-Item $TempExtractDir -Recurse -Force -ErrorAction SilentlyContinue }
-    }
+function Quote-Argument([string]$Value) {
+    if ($Value -notmatch '[\s"]') { return $Value }
+    return '"' + ($Value -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1') + '"'
 }
 
-# Final check that nssm is operational
-try {
-    $nssmVersionOutput = nssm version 2>&1
-}
-catch {
-    Log-Error "nssm command failed to execute even after setup attempts. Please check the nssm installation and PATH. Error: $_"
-    exit 1
+function Join-Arguments([string[]]$Values) {
+    return (($Values | ForEach-Object { Quote-Argument $_ }) -join ' ')
 }
 
-Log-Step "Installation configuration:"
-Log-Config "Service name: $ServiceName"
-Log-Config "Install directory: $InstallDir"
-Log-Config "GitHub proxy: $ProxyDisplay"
-Log-Config "Agent arguments: $($KomariArgs -join ' ')"
-if ($InstallVersion -ne "") {
-    Log-Config "Specified agent version: $InstallVersion"
-} else {
-    Log-Config "Agent version: Latest"
+function Ensure-Nssm {
+    $Existing = Get-Command nssm.exe -ErrorAction SilentlyContinue
+    if ($Existing) { return $Existing.Source }
+    $NssmPath = Join-Path $InstallDir "nssm.exe"
+    if (Test-Path $NssmPath) { return $NssmPath }
+    $ZipPath = Join-Path $env:TEMP "komari-nssm.zip"
+    $ExtractPath = Join-Path $env:TEMP "komari-nssm"
+    Invoke-WebRequest -Uri "https://nssm.cc/release/nssm-2.24.zip" -OutFile $ZipPath -UseBasicParsing
+    Remove-Item $ExtractPath -Recurse -Force -ErrorAction SilentlyContinue
+    Expand-Archive -Path $ZipPath -DestinationPath $ExtractPath -Force
+    $Source = Get-ChildItem -Path $ExtractPath -Recurse -Filter nssm.exe |
+        Where-Object { $_.FullName -match '\\win(32|64)\\nssm.exe$' } |
+        Select-Object -First 1
+    if (-not $Source) { throw "nssm.exe was not found in the downloaded archive" }
+    Copy-Item $Source.FullName $NssmPath -Force
+    Remove-Item $ZipPath -Force -ErrorAction SilentlyContinue
+    Remove-Item $ExtractPath -Recurse -Force -ErrorAction SilentlyContinue
+    return $NssmPath
 }
 
-# Paths
-$BinaryName = "komari-agent-windows-$arch.exe"
+$Version = Get-ReleaseVersion
 $AgentPath = Join-Path $InstallDir "komari-agent.exe"
+$RuntimeStatePath = Join-Path $InstallDir "runtime-config.json"
+$UserTaskName = "$ServiceName-CurrentUser"
+$RescueServiceName = "$ServiceName-rescue"
+New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 
-# Uninstall previous service and binary
-function Uninstall-Previous {
-    Log-Step "Checking for existing service..."
-    # Check if service exists using nssm status, as Get-Service might not work for nssm services if not properly registered
-    $serviceStatus = nssm status $ServiceName 2>&1
-    if ($serviceStatus -notmatch "SERVICE_STOPPED" -and $serviceStatus -notmatch "does not exist") {
-        Log-Info "Stopping service $ServiceName..."
-        nssm stop $ServiceName 2>&1 | Out-Null
-    }
-    # Attempt to remove the service using nssm
-    # We check if it exists first by trying to get its status.
-    # nssm remove will succeed if the service exists, and fail otherwise.
-    # We add confirm to avoid interactive prompts.
-    $removeOutput = nssm remove $ServiceName confirm 2>&1
-    if ($LASTEXITCODE -eq 0) {
-    }
-    elseif ($removeOutput -match "Can't open service! (The specified service does not exist as an installed service.)" -or $removeOutput -match "No such service" -or $removeOutput -match "does not exist") {
-        Log-Info "Service $ServiceName does not exist or was already removed."
-    }
-    else {
-        # If nssm remove fails for other reasons, try sc.exe delete as a fallback for older installations
-        $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-        if ($svc) {
-            Stop-Service $ServiceName -Force -ErrorAction SilentlyContinue
-            sc.exe delete $ServiceName | Out-Null
+$ExistingTask = Get-ScheduledTask -TaskName $UserTaskName -ErrorAction SilentlyContinue
+if ($ExistingTask) { Unregister-ScheduledTask -TaskName $UserTaskName -Confirm:$false }
+if ($IsAdministrator) {
+    foreach ($Name in @($ServiceName, $RescueServiceName)) {
+        $ExistingService = Get-Service -Name $Name -ErrorAction SilentlyContinue
+        if ($ExistingService) {
+            Stop-Service -Name $Name -Force -ErrorAction SilentlyContinue
+            & (Ensure-Nssm) remove $Name confirm | Out-Null
         }
     }
-
-    if (Test-Path $AgentPath) {
-        Log-Warning "Removing old binary..."
-        Remove-Item $AgentPath -Force
-    }
+    Get-NetFirewallRule -DisplayName "Komari Rescue Helper" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+    $PreviousRescueDir = Join-Path $env:ProgramData "Komari\Rescue\$RescueServiceName"
+    Remove-Item $PreviousRescueDir -Recurse -Force -ErrorAction SilentlyContinue
 }
-Uninstall-Previous
 
-$versionToInstall = ""
-if ($InstallVersion -ne "") {
-    Log-Info "Attempting to install specified version: $InstallVersion"
-    $versionToInstall = $InstallVersion
+$AgentFile = "komari-agent-windows-$Arch.exe"
+Invoke-WebRequest -Uri (Get-ReleaseUrl $Version $AgentFile) -OutFile $AgentPath -UseBasicParsing
+if ($KomariArgs -notcontains "--runtime-state-file") {
+    $KomariArgs += "--runtime-state-file"
+    $KomariArgs += $RuntimeStatePath
+}
+$AgentArgumentLine = Join-Arguments $KomariArgs
+
+if ($RuntimeIdentity -eq "current-user") {
+    $Action = New-ScheduledTaskAction -Execute $AgentPath -Argument $AgentArgumentLine -WorkingDirectory $InstallDir
+    $Trigger = New-ScheduledTaskTrigger -AtLogOn -User ([Security.Principal.WindowsIdentity]::GetCurrent().Name)
+    $Principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
+    $Settings = New-ScheduledTaskSettingsSet -RestartCount 99 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
+    Register-ScheduledTask -TaskName $UserTaskName -Action $Action -Trigger $Trigger -Principal $Principal -Settings $Settings | Out-Null
+    Start-ScheduledTask -TaskName $UserTaskName
+    Log-Success "Ordinary Agent installed for the current non-administrator user."
 }
 else {
-    $ApiUrl = "https://api.github.com/repos/$ReleaseRepository/releases/latest"
-    try {
-        Log-Step "Fetching latest release version from GitHub API..."
-        $release = Invoke-RestMethod -Uri $ApiUrl -UseBasicParsing
-        $versionToInstall = $release.tag_name
-        Log-Success "Latest version fetched: $versionToInstall"
+    $Nssm = Ensure-Nssm
+    & $Nssm install $ServiceName $AgentPath $AgentArgumentLine | Out-Null
+    & $Nssm set $ServiceName ObjectName LocalSystem | Out-Null
+    & $Nssm set $ServiceName Start SERVICE_AUTO_START | Out-Null
+    & $Nssm set $ServiceName AppExit Default Restart | Out-Null
+    & $Nssm start $ServiceName | Out-Null
+    Log-Success "Ordinary Agent installed as a LocalSystem service."
+}
+
+if ($InstallRescue) {
+    $Nssm = Ensure-Nssm
+    $RescueDir = Join-Path $env:ProgramData "Komari\Rescue\$RescueServiceName"
+    New-Item -ItemType Directory -Path $RescueDir -Force | Out-Null
+    $RescuePath = Join-Path $RescueDir "komari-agent-rescue.exe"
+    $RescueConfigPath = Join-Path $RescueDir "rescue-helper.json"
+    $FirewallMarker = Join-Path $RescueDir "rescue-firewall-managed"
+    $RescueFile = "komari-agent-rescue-windows-$Arch.exe"
+    Invoke-WebRequest -Uri (Get-ReleaseUrl $Version $RescueFile) -OutFile $RescuePath -UseBasicParsing
+    $RescueConfig = @{
+        Endpoint = $AgentEndpoint
+        Token = $AgentToken
+        IgnoreUnsafeCert = $IgnoreUnsafeCert
+        FirewallConfigured = $InstallRescueFirewall
+        InstanceIDPath = (Join-Path $RescueDir "rescue-instance")
+        Action = @{
+            AgentPath = $AgentPath
+            RuntimeStatePath = $RuntimeStatePath
+            ServiceName = $(if ($RuntimeIdentity -eq "current-user") { $UserTaskName } else { $ServiceName })
+            RuntimeIdentity = $RuntimeIdentity
+            RuntimeUser = ([Security.Principal.WindowsIdentity]::GetCurrent().Name)
+            FirewallMarker = $FirewallMarker
+        }
     }
-    catch {
-        Log-Error "Failed to fetch latest version: $_"
-        exit 1
+    [IO.File]::WriteAllText($RescueConfigPath, ($RescueConfig | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding($false)))
+    & icacls.exe $RescueDir /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" | Out-Null
+    if ($InstallRescueFirewall) {
+        Get-NetFirewallRule -DisplayName "Komari Rescue Helper" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+        New-NetFirewallRule -DisplayName "Komari Rescue Helper" -Direction Outbound -Action Allow -Program $RescuePath -Protocol TCP -RemotePort 443 | Out-Null
+        New-Item -ItemType File -Path $FirewallMarker -Force | Out-Null
     }
+    $RescueArguments = Join-Arguments @("--config", $RescueConfigPath)
+    & $Nssm install $RescueServiceName $RescuePath $RescueArguments | Out-Null
+    & $Nssm set $RescueServiceName ObjectName LocalSystem | Out-Null
+    & $Nssm set $RescueServiceName Start SERVICE_AUTO_START | Out-Null
+    & $Nssm set $RescueServiceName AppExit Default Restart | Out-Null
+    & $Nssm start $RescueServiceName | Out-Null
+    Log-Success "Independent rescue helper installed as a LocalSystem service."
 }
-Log-Success "Installing Komari Agent version: $versionToInstall"
 
-# Construct download URL
-$BinaryName = "komari-agent-windows-$arch.exe"
-$DownloadUrl = if ($GitHubProxy) { "$GitHubProxy/https://github.com/$ReleaseRepository/releases/download/$versionToInstall/$BinaryName" } else { "https://github.com/$ReleaseRepository/releases/download/$versionToInstall/$BinaryName" }
-
-# Download and install
-New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-Log-Info "URL: $DownloadUrl"
-try {
-    Invoke-WebRequest -Uri $DownloadUrl -OutFile $AgentPath -UseBasicParsing
-}
-catch {
-    Log-Error "Download failed: $_"
-    exit 1
-}
-Log-Success "Downloaded and saved to $AgentPath"
-
-# Register and start service
-Log-Step "Configuring Windows service with nssm..."
-$argString = $KomariArgs -join ' '
-# Ensure InstallDir and AgentPath are quoted if they contain spaces
-$quotedAgentPath = "`"$AgentPath`""
-nssm install $ServiceName $quotedAgentPath $argString
-# Set display name and startup type using nssm
-nssm set $ServiceName DisplayName "Komari Agent Service"
-nssm set $ServiceName Start SERVICE_AUTO_START
-nssm set $ServiceName AppExit Default Restart
-nssm set $ServiceName AppRestartDelay 5000
-# Start the service using nssm
-nssm start $ServiceName
-Log-Success "Service $ServiceName installed and started using nssm."
-
-Log-Success "Komari Agent installation completed!"
-Log-Config "Service name: $ServiceName"
-Log-Config "Arguments: $argString"
+Log-Success "Komari Agent $Version installation completed."
+Log-Info "Runtime identity: $RuntimeIdentity"
+Log-Info "Install directory: $InstallDir"

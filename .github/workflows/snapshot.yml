@@ -99,11 +99,19 @@ jobs:
           fi
           go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}" -o $BINARY_NAME
 
+          RESCUE_BINARY_NAME=komari-agent-rescue-${{ matrix.goos }}-${{ matrix.goarch }}
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            RESCUE_BINARY_NAME=${RESCUE_BINARY_NAME}.exe
+          fi
+          go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}" -o $RESCUE_BINARY_NAME ./cmd/komari-agent-rescue
+
       - name: Upload binary as artifact
         uses: actions/upload-artifact@v4
         with:
           name: komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}*
+          path: |
+            komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}*
+            komari-agent-rescue-${{ matrix.goos }}-${{ matrix.goarch }}*
 
   publish-snapshot-release:
     needs: [prepare, build-and-attach-binaries]
