@@ -104,6 +104,7 @@ func (h *Helper) Run(ctx context.Context) error {
 			continue
 		}
 		if assignment == nil || assignment.Session == nil {
+			_ = h.reportStatus(ctx, nil)
 			continue
 		}
 		afterAssignmentID = assignment.AssignmentId
