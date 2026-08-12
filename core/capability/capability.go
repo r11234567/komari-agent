@@ -19,14 +19,32 @@ func Detect(remoteControlEnabled bool) *reportv1.AgentCapabilities {
 	return detect(remoteControlEnabled, privilege, privileged, privilegeLimitation)
 }
 
+// RemoteControlAllowed is the enforcement point for execution and terminal
+// access. Remote control always runs commands with the Agent process identity,
+// so a non-root/non-administrator Agent must never expose it.
+func RemoteControlAllowed(remoteControlEnabled bool) (bool, string) {
+	_, privileged, limitation := privilegeState()
+	return remoteControlAllowed(remoteControlEnabled, privileged, limitation)
+}
+
+func remoteControlAllowed(remoteControlEnabled, privileged bool, limitation string) (bool, string) {
+	if !remoteControlEnabled {
+		return false, "remote control is disabled by the applied runtime configuration"
+	}
+	if !privileged {
+		return false, "remote control requires root or administrator privileges; " + limitation
+	}
+	return true, ""
+}
+
 func detect(remoteControlEnabled bool, privilege reportv1.PrivilegeMode, privileged bool, privilegeLimitation string) *reportv1.AgentCapabilities {
 	remote := available()
 	execution := available()
 	webssh := available()
-	if !remoteControlEnabled {
-		remote = limited("disabled by the applied runtime configuration")
-		execution = limited("remote control is disabled by the applied runtime configuration")
-		webssh = limited("remote control is disabled by the applied runtime configuration")
+	if allowed, reason := remoteControlAllowed(remoteControlEnabled, privileged, privilegeLimitation); !allowed {
+		remote = limited(reason)
+		execution = limited(reason)
+		webssh = limited(reason)
 	}
 	service := available()
 	if !privileged {

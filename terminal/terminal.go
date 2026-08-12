@@ -7,11 +7,9 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
+	"github.com/komari-monitor/komari-agent/core/capability"
 	"github.com/komari-monitor/komari-agent/core/runtimeconfig"
 )
-
-var flags = pkg_flags.GlobalConfig
 
 // Terminal 接口定义平台特定的终端操作
 type Terminal interface {
@@ -31,8 +29,8 @@ type terminalImpl struct {
 
 // StartTerminal 启动终端并处理 WebSocket 通信
 func StartTerminal(conn *websocket.Conn) {
-	if flags.DisableWebSsh || !runtimeconfig.RemoteControlEnabled() {
-		conn.WriteMessage(websocket.TextMessage, []byte("\n\nWeb SSH is disabled. Enable it by running without the --disable-web-ssh flag."))
+	if allowed, reason := capability.RemoteControlAllowed(runtimeconfig.RemoteControlEnabled()); !allowed {
+		conn.WriteMessage(websocket.TextMessage, []byte("\n\nRemote control is unavailable: "+reason))
 		conn.Close()
 		return
 	}

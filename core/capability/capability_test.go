@@ -16,6 +16,13 @@ func TestRemoteControlCapabilityRespectsRuntimeSetting(t *testing.T) {
 	}
 }
 
+func TestNonPrivilegedCapabilityRejectsRemoteControl(t *testing.T) {
+	capabilities := detect(true, reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_NON_ROOT, false, "fixture limitation")
+	if capabilities.RemoteControl.Available || capabilities.Execution.Available || capabilities.Webssh.Available {
+		t.Fatalf("non-privileged agent advertised remote control: %+v", capabilities)
+	}
+}
+
 func TestPrivilegeFixturesDeclareLimitedCapabilities(t *testing.T) {
 	fixtures := []struct {
 		name       string

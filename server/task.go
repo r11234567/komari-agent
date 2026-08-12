@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/komari-monitor/komari-agent/core/capability"
 	"github.com/komari-monitor/komari-agent/core/runtimeconfig"
 	"github.com/komari-monitor/komari-agent/dnsresolver"
 	v2 "github.com/komari-monitor/komari-agent/protocol/v2"
@@ -31,8 +32,8 @@ func NewTask(task_id, command string) {
 		uploadTaskResult(task_id, "No command provided", 0, time.Now())
 		return
 	}
-	if flags.DisableWebSsh || !runtimeconfig.RemoteControlEnabled() {
-		uploadTaskResult(task_id, "Remote control is disabled.", -1, time.Now())
+	if allowed, reason := capability.RemoteControlAllowed(runtimeconfig.RemoteControlEnabled()); !allowed {
+		uploadTaskResult(task_id, reason, -1, time.Now())
 		return
 	}
 	log.Printf("Executing task %s with command: %s", task_id, command)

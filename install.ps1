@@ -64,6 +64,10 @@ if ($RuntimeIdentity -eq "root-or-administrator" -and -not $IsAdministrator) {
     Log-Error "Administrator privileges are required for root-or-administrator runtime."
     exit 1
 }
+if ($RuntimeIdentity -eq "current-user" -and -not $RemoteControlDisabled) {
+    $RemoteControlDisabled = $true
+    $KomariArgs += "--disable-remote-control"
+}
 if ($InstallRescueFirewall -and -not $InstallRescue) {
     Log-Error "--install-rescue-firewall requires --install-rescue."
     exit 1

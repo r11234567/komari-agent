@@ -154,6 +154,41 @@ case "$runtime_identity" in
         ;;
 esac
 
+# A root-run Linux installation can create a dedicated unprivileged service
+# account. A direct, non-root installation has no authority to do that and
+# therefore runs as the invoking user through that user's systemd session.
+if [ "$runtime_identity" = "current-user" ] && [ "$os_name" = "linux" ] && [ "$EUID" -eq 0 ]; then
+    service_user="komari"
+    if ! id -u "$service_user" >/dev/null 2>&1; then
+        log_info "Creating the unprivileged ${service_user} service user..."
+        if command -v useradd >/dev/null 2>&1; then
+            nologin_shell=$(command -v nologin || printf '/usr/sbin/nologin')
+            useradd --system --create-home --home-dir "/var/lib/${service_user}" --shell "$nologin_shell" "$service_user"
+        elif command -v adduser >/dev/null 2>&1; then
+            adduser -S -D -H -h "/var/lib/${service_user}" -s /sbin/nologin "$service_user"
+            mkdir -p "/var/lib/${service_user}"
+            chown "$service_user" "/var/lib/${service_user}"
+        else
+            log_error "Cannot create the unprivileged komari user: useradd/adduser is unavailable"
+            exit 1
+        fi
+    elif [ "$(id -u "$service_user")" -eq 0 ]; then
+        log_error "The existing komari account is privileged; refusing a non-privileged installation"
+        exit 1
+    fi
+fi
+
+# Remote command execution and terminal access run with the Agent process
+# identity and therefore require root/administrator privileges. Keep the old
+# --disable-web-ssh spelling as an accepted alias, but persist the canonical
+# all-remote-control switch for every unprivileged installation.
+if [ "$runtime_identity" = "current-user" ]; then
+    case " $komari_args " in
+        *" --disable-remote-control "*|*" --disable-web-ssh "*) ;;
+        *) komari_args="$komari_args --disable-remote-control" ;;
+    esac
+fi
+
 if [ "$EUID" -ne 0 ] && [ "$runtime_identity" = "root-or-administrator" ]; then
     log_error "root-or-administrator runtime requires running the installer as root"
     exit 1
@@ -188,7 +223,7 @@ fi
 komari_args="${komari_args# }"
 
 # A direct, unprivileged installation belongs entirely to the invoking user.
-if [ "$runtime_identity" = "current-user" ] && [ "$install_dir_specified" = false ]; then
+if [ "$runtime_identity" = "current-user" ] && [ "$EUID" -ne 0 ] && [ "$install_dir_specified" = false ]; then
     user_home=$(getent passwd "$service_user" 2>/dev/null | cut -d: -f6)
     if [ -z "$user_home" ]; then
         user_home="$HOME"
@@ -203,8 +238,9 @@ fi
 komari_agent_path="${target_dir}/agent"
 runtime_state_path="${target_dir}/runtime-config.json"
 
-# User services are the only service type a non-root Linux installation can manage.
-if [ "$runtime_identity" = "current-user" ] && [ "$os_name" = "linux" ]; then
+# User services are required only when the installer itself is non-root. A
+# root-run current-user installation is a normal system service with User=komari.
+if [ "$runtime_identity" = "current-user" ] && [ "$os_name" = "linux" ] && [ "$EUID" -ne 0 ]; then
     user_uid=$(id -u "$service_user")
     run_user_systemctl() {
         if [ "$(id -un)" = "$service_user" ]; then

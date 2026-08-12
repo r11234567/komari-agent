@@ -25,6 +25,7 @@ import (
 
 	"github.com/komari-monitor/komari-agent/clientcore"
 	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
+	"github.com/komari-monitor/komari-agent/core/capability"
 	"github.com/komari-monitor/komari-agent/core/runtimeconfig"
 )
 
@@ -72,7 +73,7 @@ var RootCmd = &cobra.Command{
 			os.Exit(0)
 		}
 
-		if !flags.DisableWebSsh && !flags.DisableRemoteControl {
+		if allowed, _ := capability.RemoteControlAllowed(runtimeconfig.RemoteControlEnabled()); allowed {
 			go WarnKomariRunning()
 		}
 
