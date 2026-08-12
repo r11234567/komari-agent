@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/komari-monitor/komari-agent/core/runtimeconfig"
 	"github.com/komari-monitor/komari-agent/monitoring/netstatic"
 	"github.com/komari-monitor/komari-agent/utils"
 	"github.com/shirou/gopsutil/v4/net"
@@ -217,14 +218,15 @@ type VnstatOutput struct {
 }
 
 func NetworkSpeed() (totalUp, totalDown, upSpeed, downSpeed uint64, err error) {
-	includeNics := parseNics(flags.IncludeNics)
-	excludeNics := parseNics(flags.ExcludeNics)
+	config := runtimeconfig.Current()
+	includeNics := nicPatterns(config.IncludeNics)
+	excludeNics := nicPatterns(config.ExcludeNics)
 
 	// 如果设置了月重置（非0），统计totalUp、totalDown
-	if flags.MonthRotate != 0 {
+	if config.TrafficResetDay != 0 {
 		netstatic.StartOrContinue() // 确保netstatic在运行
 		now := uint64(time.Now().Unix())
-		resetDay := uint64(utils.GetLastResetDate(flags.MonthRotate, time.Now()).Unix())
+		resetDay := uint64(utils.GetLastResetDate(int(config.TrafficResetDay), time.Now()).Unix())
 		nicStatics, err := netstatic.GetTotalTrafficBetween(resetDay, now)
 		if err != nil {
 			// 如果netstatic失败，回退到原来的方法，并返回额外的错误信息
@@ -338,6 +340,16 @@ func parseNics(nics string) map[string]struct{} {
 	return nicSet
 }
 
+func nicPatterns(values []string) map[string]struct{} {
+	result := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			result[value] = struct{}{}
+		}
+	}
+	return result
+}
+
 func shouldInclude(nicName string, includeNics, excludeNics map[string]struct{}) bool {
 	// 默认排除回环接口
 	for loopbackName := range loopbackNames {
@@ -364,8 +376,9 @@ func shouldInclude(nicName string, includeNics, excludeNics map[string]struct{})
 }
 
 func InterfaceList() ([]string, error) {
-	includeNics := parseNics(flags.IncludeNics)
-	excludeNics := parseNics(flags.ExcludeNics)
+	config := runtimeconfig.Current()
+	includeNics := nicPatterns(config.IncludeNics)
+	excludeNics := nicPatterns(config.ExcludeNics)
 	interfaces := []string{}
 
 	ioCounters, err := net.IOCounters(true)

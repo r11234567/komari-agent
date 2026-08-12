@@ -132,6 +132,10 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Generate checksums
+        working-directory: artifacts
+        run: sha256sum komari-agent-* > SHA256SUMS
+
       - name: Create snapshot prerelease and upload binaries
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -152,7 +156,8 @@ jobs:
             --title "${VERSION}" \
             --notes "Automated snapshot build (${VERSION}) from commit ${{ github.sha }}." \
             --prerelease \
-            artifacts/komari-agent-*
+            artifacts/komari-agent-* \
+            artifacts/SHA256SUMS
 
           gh release list \
             --repo "${{ github.repository }}" \

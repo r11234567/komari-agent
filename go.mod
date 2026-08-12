@@ -3,6 +3,7 @@ module github.com/komari-monitor/komari-agent
 go 1.24.0
 
 require (
+	connectrpc.com/connect v1.19.1
 	github.com/UserExistsError/conpty v0.1.4
 	github.com/blang/semver v3.5.1+incompatible
 	github.com/creack/pty v1.1.24
@@ -10,11 +11,13 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/klauspost/cpuid/v2 v2.3.0
 	github.com/prometheus-community/pro-bing v0.7.0
+	github.com/r11234567/komari-proto v0.1.2
 	github.com/rhysd/go-github-selfupdate v1.2.3
 	github.com/shirou/gopsutil/v4 v4.26.4
 	github.com/spf13/cobra v1.9.1
 	golang.org/x/net v0.38.0
 	golang.org/x/sys v0.41.0
+	google.golang.org/protobuf v1.36.10
 	gopkg.in/toast.v1 v1.0.0-20180812000517-0a84660828b2
 )
 

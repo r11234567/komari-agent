@@ -4,14 +4,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"runtime"
+	"strconv"
+	"time"
 
-	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
+	"github.com/komari-monitor/komari-agent/core/capability"
+	"github.com/komari-monitor/komari-agent/core/runtimeconfig"
 	unit "github.com/komari-monitor/komari-agent/monitoring/unit"
+	"github.com/komari-monitor/komari-agent/update"
+	metricsv1 "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1"
+	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
+	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-var flags = pkg_flags.GlobalConfig
-
-type report struct {
+type Report struct {
 	CPU         cpuReport         `json:"cpu"`
 	Ram         usageReport       `json:"ram"`
 	Swap        usageReport       `json:"swap"`
@@ -23,6 +31,7 @@ type report struct {
 	Uptime      uint64            `json:"uptime"`
 	Process     int               `json:"process"`
 	Message     string            `json:"message"`
+	GPUs        []GPUDevice       `json:"-"`
 }
 
 type cpuReport struct {
@@ -57,12 +66,12 @@ type gpuModelsReport struct {
 }
 
 type gpuReport struct {
-	Count        int               `json:"count"`
-	AverageUsage float64           `json:"average_usage"`
-	DetailedInfo []gpuDeviceReport `json:"detailed_info"`
+	Count        int         `json:"count"`
+	AverageUsage float64     `json:"average_usage"`
+	DetailedInfo []GPUDevice `json:"detailed_info"`
 }
 
-type gpuDeviceReport struct {
+type GPUDevice struct {
 	Name        string  `json:"name"`
 	MemoryTotal uint64  `json:"memory_total"`
 	MemoryUsed  uint64  `json:"memory_used"`
@@ -70,9 +79,10 @@ type gpuDeviceReport struct {
 	Temperature uint64  `json:"temperature"`
 }
 
-func GenerateReport() []byte {
+func CollectReport() Report {
 	message := ""
-	data := report{}
+	data := Report{}
+	config := runtimeconfig.Current()
 
 	cpu := unit.Cpu()
 	cpuUsage := cpu.CPUUsage
@@ -113,7 +123,7 @@ func GenerateReport() []byte {
 	data.Process = unit.ProcessCount()
 
 	// GPU监控 - 根据标志决定详细程度
-	if flags.EnableGPU {
+	if config.EnableGPU && config.DetailedGPU {
 		// 详细GPU监控模式
 		gpuInfo, err := unit.GetDetailedGPUInfo()
 		if err != nil {
@@ -125,11 +135,11 @@ func GenerateReport() []byte {
 			}
 		} else if len(gpuInfo) > 0 {
 			// 成功获取详细信息
-			gpuData := make([]gpuDeviceReport, len(gpuInfo))
+			gpuData := make([]GPUDevice, len(gpuInfo))
 			totalGPUUsage := 0.0
 
 			for i, info := range gpuInfo {
-				gpuData[i] = gpuDeviceReport{
+				gpuData[i] = GPUDevice{
 					Name:        info.Name,
 					MemoryTotal: info.MemoryTotal,
 					MemoryUsed:  info.MemoryUsed,
@@ -141,15 +151,127 @@ func GenerateReport() []byte {
 
 			avgGPUUsage := totalGPUUsage / float64(len(gpuInfo))
 			data.GPU = gpuReport{Count: len(gpuInfo), AverageUsage: avgGPUUsage, DetailedInfo: gpuData}
+			data.GPUs = gpuData
+		}
+	} else if config.EnableGPU {
+		if names, err := unit.GetDetailedGPUHost(); err == nil {
+			data.GPU = gpuModelsReport{Models: names}
+			for index, name := range names {
+				data.GPUs = append(data.GPUs, GPUDevice{Name: name, Utilization: -1, Temperature: ^uint64(0), MemoryUsed: ^uint64(0), MemoryTotal: ^uint64(0)})
+				_ = index
+			}
+		} else {
+			message += fmt.Sprintf("failed to get GPU models: %v\n", err)
 		}
 	}
 	// 基础模式下，GPU信息已在basicInfo中处理
 
 	data.Message = message
+	return data
+}
 
+func GenerateReport() []byte {
+	data := CollectReport()
 	s, err := json.Marshal(data)
 	if err != nil {
 		log.Println("Failed to marshal data:", err)
 	}
 	return s
+}
+
+func (data Report) Proto(agentID string, sequence uint64) *reportv1.AgentReport {
+	config := runtimeconfig.Current()
+	cpu := unit.CpuStaticInfo()
+	hostname, _ := os.Hostname()
+	resources := &reportv1.ResourceUsage{
+		CpuPercent:           data.CPU.Usage,
+		MemoryUsedBytes:      data.Ram.Used,
+		MemoryAvailableBytes: saturatingSubtract(data.Ram.Total, data.Ram.Used),
+		SwapUsedBytes:        data.Swap.Used,
+		SwapTotalBytes:       data.Swap.Total,
+		LoadAverage:          []float64{data.Load.Load1, data.Load.Load5, data.Load.Load15},
+	}
+	if data.Ram.Total > 0 {
+		resources.MemoryPercent = float64(data.Ram.Used) * 100 / float64(data.Ram.Total)
+	}
+	for index, gpu := range data.GPUs {
+		item := &reportv1.GpuUsage{Id: strconv.Itoa(index), Name: gpu.Name}
+		if gpu.Utilization >= 0 {
+			item.UtilizationPercent = &gpu.Utilization
+		}
+		if gpu.MemoryUsed != ^uint64(0) {
+			item.MemoryUsedBytes = &gpu.MemoryUsed
+		}
+		if gpu.MemoryTotal != ^uint64(0) {
+			item.MemoryTotalBytes = &gpu.MemoryTotal
+		}
+		if gpu.Temperature != ^uint64(0) {
+			temperature := float64(gpu.Temperature)
+			item.TemperatureCelsius = &temperature
+		}
+		resources.Gpus = append(resources.Gpus, item)
+	}
+	return &reportv1.AgentReport{
+		AgentId:    agentID,
+		Sequence:   sequence,
+		ObservedAt: timestamppb.Now(),
+		System: &reportv1.SystemInfo{
+			Hostname: hostname, Os: unit.OSName(), Platform: runtime.GOOS,
+			KernelVersion: unit.KernelVersion(), Architecture: runtime.GOARCH,
+			CpuCount: uint32(max(cpu.CPUCores, 0)), MemoryTotalBytes: data.Ram.Total,
+			Uptime: durationpb.New(time.Duration(data.Uptime) * time.Second),
+		},
+		Resources: resources,
+		NetworkInterfaces: []*reportv1.NetworkInterface{{
+			Name: "aggregate", BytesSent: data.Network.TotalUp, BytesReceived: data.Network.TotalDown,
+		}},
+		Disks: []*reportv1.DiskInfo{{
+			MountPoint: "aggregate", TotalBytes: data.Disk.Total, UsedBytes: data.Disk.Used,
+		}},
+		Metadata: &reportv1.AgentMetadata{
+			Version: update.CurrentVersion, Capabilities: capability.Detect(config.RemoteControlEnabled),
+			AppliedConfigRevision: config.Revision,
+		},
+		DiagnosticMessage: data.Message,
+	}
+}
+
+func saturatingSubtract(total, used uint64) uint64 {
+	if used >= total {
+		return 0
+	}
+	return total - used
+}
+
+// Metrics maps the complete legacy sampling surface to the typed metric inventory.
+func (data Report) Metrics(observedAt time.Time) []*metricsv1.MetricsPoint {
+	point := func(metric string, value float64, labels map[string]string) *metricsv1.MetricsPoint {
+		return &metricsv1.MetricsPoint{Metric: metric, Value: value, ObservedAt: timestamppb.New(observedAt), Labels: labels}
+	}
+	points := []*metricsv1.MetricsPoint{
+		point("cpu.usage_percent", data.CPU.Usage, nil), point("memory.total_bytes", float64(data.Ram.Total), nil), point("memory.used_bytes", float64(data.Ram.Used), nil),
+		point("swap.total_bytes", float64(data.Swap.Total), nil), point("swap.used_bytes", float64(data.Swap.Used), nil),
+		point("load.1", data.Load.Load1, nil), point("load.5", data.Load.Load5, nil), point("load.15", data.Load.Load15, nil),
+		point("disk.total_bytes", float64(data.Disk.Total), nil), point("disk.used_bytes", float64(data.Disk.Used), nil),
+		point("network.up_bytes_per_second", float64(data.Network.Up), nil), point("network.down_bytes_per_second", float64(data.Network.Down), nil),
+		point("network.total_up_bytes", float64(data.Network.TotalUp), nil), point("network.total_down_bytes", float64(data.Network.TotalDown), nil),
+		point("connections.tcp", float64(data.Connections.TCP), nil), point("connections.udp", float64(data.Connections.UDP), nil),
+		point("system.uptime_seconds", float64(data.Uptime), nil), point("system.process_count", float64(data.Process), nil),
+	}
+	for index, gpu := range data.GPUs {
+		labels := map[string]string{"id": strconv.Itoa(index), "name": gpu.Name}
+		if gpu.Utilization >= 0 {
+			points = append(points, point("gpu.utilization_percent", gpu.Utilization, labels))
+		}
+		if gpu.MemoryUsed != ^uint64(0) {
+			points = append(points, point("gpu.memory_used_bytes", float64(gpu.MemoryUsed), labels))
+		}
+		if gpu.MemoryTotal != ^uint64(0) {
+			points = append(points, point("gpu.memory_total_bytes", float64(gpu.MemoryTotal), labels))
+		}
+		if gpu.Temperature != ^uint64(0) {
+			points = append(points, point("gpu.temperature_celsius", float64(gpu.Temperature), labels))
+		}
+	}
+	return points
 }

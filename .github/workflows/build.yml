@@ -31,7 +31,14 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version-file: go.mod
+
+      - name: Verify pinned protocol dependency
+        run: go list -m github.com/r11234567/komari-proto | grep -Fx 'github.com/r11234567/komari-proto v0.1.2'
+
+      - name: Run transport and runtime contract tests
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: go test ./core/... ./clientcore ./monitoring/unit ./terminal ./cmd
 
       - name: Build binary
         env:
@@ -51,3 +58,27 @@ jobs:
         with:
           name: komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}
           path: komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}*
+
+  capability-fixtures:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            fixture: linux-non-root
+          - os: windows-latest
+            fixture: windows-standard-user
+          - os: windows-latest
+            fixture: windows-administrator
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build capability packages
+        run: go test ./core/capability -run TestPrivilegeFixturesDeclareLimitedCapabilities && go test ./core/runtimeconfig ./clientcore
+      - name: Validate recovery entrypoint
+        shell: bash
+        run: |
+          go build -o komari-agent${{ runner.os == 'Windows' && '.exe' || '' }} .
+          ./komari-agent${{ runner.os == 'Windows' && '.exe' || '' }} recover diagnostics

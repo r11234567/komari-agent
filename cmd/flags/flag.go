@@ -29,6 +29,7 @@ type Config struct {
 	ProtocolVersion     int     `json:"protocol_version" env:"AGENT_PROTOCOL_VERSION"`             // 上报协议版本，默认2
 	DisableCompression  bool    `json:"disable_compression" env:"AGENT_DISABLE_COMPRESSION"`       // 禁用v2传输压缩
 	PreferIPVersion     string  `json:"prefer_ip_version" env:"AGENT_PREFER_IP_VERSION"`           // 面板连接优先使用的 IP 版本：4 或 6
+	RuntimeStateFile    string  `json:"runtime_state_file" env:"AGENT_RUNTIME_STATE_FILE"`         // 在线配置快照持久化路径
 
 }
 

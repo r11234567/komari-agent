@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/komari-monitor/komari-agent/dnsresolver"
 	"github.com/komari-monitor/komari-agent/monitoring/netstatic"
@@ -21,7 +23,9 @@ import (
 	"github.com/komari-monitor/komari-agent/update"
 	"github.com/spf13/cobra"
 
+	"github.com/komari-monitor/komari-agent/clientcore"
 	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
+	"github.com/komari-monitor/komari-agent/core/runtimeconfig"
 )
 
 var flags = pkg_flags.GlobalConfig
@@ -48,6 +52,11 @@ var RootCmd = &cobra.Command{
 		if flags.PreferIPVersion != "" && flags.PreferIPVersion != "4" && flags.PreferIPVersion != "6" {
 			return fmt.Errorf("invalid --prefer-ip-version value %q: expected 4 or 6", flags.PreferIPVersion)
 		}
+		runtimeStore, err := runtimeconfig.New(runtimeconfig.FromFlags(flags), flags.RuntimeStateFile)
+		if err != nil {
+			return fmt.Errorf("failed to initialize runtime config: %w", err)
+		}
+		runtimeconfig.SetActive(runtimeStore)
 		// 捕获中止信号，优雅退出
 		stopCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
@@ -128,8 +137,24 @@ var RootCmd = &cobra.Command{
 		}
 		go server.DoUploadBasicInfoWorks()
 		for {
-			server.UpdateBasicInfo()
-			server.EstablishWebSocketConnection()
+			connectClient, err := clientcore.New(flags, runtimeStore)
+			if err == nil {
+				err = connectClient.Run(stopCtx)
+			}
+			if errors.Is(err, clientcore.ErrLegacyFallback) {
+				log.Printf("Connect endpoint unavailable; entering legacy v1/v2 compatibility transport: %v", err)
+				server.UpdateBasicInfo()
+				server.EstablishWebSocketConnection()
+				continue
+			}
+			if err != nil {
+				log.Printf("Connect agent transport stopped: %v", err)
+			}
+			select {
+			case <-stopCtx.Done():
+				return nil
+			case <-time.After(time.Duration(max(flags.ReconnectInterval, 1)) * time.Second):
+			}
 		}
 	},
 }
@@ -185,6 +210,7 @@ func init() {
 	RootCmd.PersistentFlags().IntVar(&flags.ProtocolVersion, "protocol-version", 2, "Report protocol version (1 or 2)")
 	RootCmd.PersistentFlags().BoolVar(&flags.DisableCompression, "disable-compression", false, "Disable v2 gzip/permessage-deflate compression")
 	RootCmd.PersistentFlags().StringVar(&flags.PreferIPVersion, "prefer-ip-version", "", "Prefer IP version for dashboard connections: 4 or 6")
+	RootCmd.PersistentFlags().StringVar(&flags.RuntimeStateFile, "runtime-state-file", "", "Path for persisted online runtime configuration snapshots")
 	RootCmd.PersistentFlags().ParseErrorsWhitelist.UnknownFlags = true
 }
 
