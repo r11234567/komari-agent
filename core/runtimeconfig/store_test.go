@@ -16,9 +16,8 @@ func TestApplyPersistsAndRollsBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	remote := false
 	_, err = store.Apply(&configv1.DesiredConfig{Revision: 7, Runtime: &configv1.RuntimeConfig{
-		ReportInterval: durationpb.New(5 * time.Second), RemoteControlEnabled: &remote,
+		ReportInterval: durationpb.New(5 * time.Second),
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -27,7 +26,7 @@ func TestApplyPersistsAndRollsBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := loaded.Current(); got.Revision != 7 || got.RemoteControlEnabled || got.ReportInterval != 5*time.Second {
+	if got := loaded.Current(); got.Revision != 7 || !got.RemoteControlEnabled || got.ReportInterval != 5*time.Second {
 		t.Fatalf("unexpected loaded snapshot: %+v", got)
 	}
 	rolledBack, err := loaded.Rollback()
