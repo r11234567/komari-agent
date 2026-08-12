@@ -56,14 +56,14 @@ func FromFlags(config *flags_pkg.Config) Snapshot {
 	}
 	return Snapshot{
 		MemoryIncludeCache:   config.MemoryIncludeCache,
-		EnableGPU:            config.EnableGPU,
-		DetailedGPU:          config.EnableGPU,
+		EnableGPU:            config.EnableGPU || config.LegacyDetailedGPU,
+		DetailedGPU:          config.DetailedGPU || config.LegacyDetailedGPU,
 		IncludeNics:          split(config.IncludeNics, ","),
 		ExcludeNics:          split(config.ExcludeNics, ","),
 		IncludeMountpoints:   split(config.IncludeMountpoints, ";"),
 		ReportInterval:       interval,
 		TrafficResetDay:      uint32(max(config.MonthRotate, 0)),
-		RemoteControlEnabled: !config.DisableWebSsh,
+		RemoteControlEnabled: !config.DisableWebSsh && !config.DisableRemoteControl,
 	}
 }
 

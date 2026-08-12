@@ -39,6 +39,7 @@ log_config() {
 service_name="komari-agent"
 target_dir="/opt/komari"
 github_proxy=""
+release_repository="r11234567/komari-agent"
 install_version="" # New parameter for specifying version
 install_dir_specified=false
 service_user="${SUDO_USER:-$(id -un)}"
@@ -325,10 +326,10 @@ fi
 
 if [ -n "$github_proxy" ]; then
     # Use proxy for GitHub releases
-    download_url="${github_proxy}/https://github.com/komari-monitor/komari-agent/releases/${download_path}/${file_name}"
+    download_url="${github_proxy}/https://github.com/${release_repository}/releases/${download_path}/${file_name}"
 else
     # Direct access to GitHub releases
-    download_url="https://github.com/komari-monitor/komari-agent/releases/${download_path}/${file_name}"
+    download_url="https://github.com/${release_repository}/releases/${download_path}/${file_name}"
 fi
 
 log_step "Creating installation directory: ${GREEN}$target_dir${NC}"
