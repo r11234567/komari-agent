@@ -157,6 +157,22 @@ function Start-ServiceAndWait([string]$Name) {
     }
 }
 
+function Get-ServiceFailureDetails([string]$Name, [string]$ErrorLogPath) {
+    $details = @()
+    if (Test-Path $ErrorLogPath) {
+        $details += (Get-Content $ErrorLogPath -Raw -ErrorAction SilentlyContinue)
+    }
+    try {
+        $details += (Get-WinEvent -FilterHashtable @{ LogName = "System"; ProviderName = "Service Control Manager" } -MaxEvents 30 -ErrorAction Stop |
+            Where-Object { $_.Message -like "*$Name*" } |
+            Select-Object -First 1 -ExpandProperty Message)
+    }
+    catch {
+        # Event log access is optional; the NSSM stderr file remains the primary diagnostic.
+    }
+    return (($details | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join [Environment]::NewLine).Trim()
+}
+
 if ($UninstallOnly) {
     foreach ($Name in @($ServiceName, "$ServiceName-rescue")) {
         Stop-Service -Name $Name -Force -ErrorAction SilentlyContinue
@@ -193,11 +209,15 @@ function Ensure-Nssm {
 $Version = Get-ReleaseVersion
 $AgentPath = Join-Path $InstallDir "komari-agent.exe"
 $RuntimeStatePath = Join-Path $InstallDir "runtime-config.json"
+$LogDir = Join-Path $InstallDir "logs"
+$AgentOutputLog = Join-Path $LogDir "agent-stdout.log"
+$AgentErrorLog = Join-Path $LogDir "agent-stderr.log"
 $UserTaskName = "$ServiceName-CurrentUser"
 $RescueServiceName = "$ServiceName-rescue"
 $ServiceAccount = "NT AUTHORITY\LocalService"
 $ServiceAccountSid = "*S-1-5-19"
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 
 $ExistingTask = Get-ScheduledTask -TaskName $UserTaskName -ErrorAction SilentlyContinue
 if ($ExistingTask) { Unregister-ScheduledTask -TaskName $UserTaskName -Confirm:$false }
@@ -225,6 +245,14 @@ $AgentArgumentLine = Join-Arguments $KomariArgs
 $Nssm = Ensure-Nssm
 & $Nssm install $ServiceName $AgentPath $AgentArgumentLine | Out-Null
 Assert-NativeCommand "Installing service $ServiceName"
+& $Nssm set $ServiceName AppDirectory $InstallDir | Out-Null
+Assert-NativeCommand "Configuring the working directory for $ServiceName"
+& $Nssm set $ServiceName AppStdout $AgentOutputLog | Out-Null
+Assert-NativeCommand "Configuring stdout logging for $ServiceName"
+& $Nssm set $ServiceName AppStderr $AgentErrorLog | Out-Null
+Assert-NativeCommand "Configuring stderr logging for $ServiceName"
+& $Nssm set $ServiceName AppRotateFiles 1 | Out-Null
+Assert-NativeCommand "Configuring log rotation for $ServiceName"
 if ($RuntimeIdentity -eq "service-account") {
     & $Nssm set $ServiceName ObjectName LocalService | Out-Null
     Assert-NativeCommand "Configuring the $ServiceAccount service identity"
@@ -241,7 +269,16 @@ else {
 Assert-NativeCommand "Configuring automatic startup for $ServiceName"
 & $Nssm set $ServiceName AppExit Default Restart | Out-Null
 Assert-NativeCommand "Configuring restart behavior for $ServiceName"
-Start-ServiceAndWait $ServiceName
+try {
+    Start-ServiceAndWait $ServiceName
+}
+catch {
+    $failureDetails = Get-ServiceFailureDetails $ServiceName $AgentErrorLog
+    if ($failureDetails) {
+        throw "Starting service $ServiceName failed: $failureDetails"
+    }
+    throw
+}
 
 if ($InstallRescue) {
     $Nssm = Ensure-Nssm
