@@ -17,7 +17,7 @@ import (
 func isPrivileged() bool { return os.Geteuid() == 0 }
 
 func ensureRuntimeOwnership(path string, config ActionConfig) error {
-	if config.RuntimeIdentity != "current-user" || strings.TrimSpace(config.RuntimeUser) == "" {
+	if (config.RuntimeIdentity != "current-user" && config.RuntimeIdentity != "service-account") || strings.TrimSpace(config.RuntimeUser) == "" {
 		return nil
 	}
 	account, err := user.Lookup(config.RuntimeUser)

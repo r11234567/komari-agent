@@ -187,6 +187,7 @@ func init() {
 	RootCmd.PersistentFlags().StringVarP(&flags.Endpoint, "endpoint", "e", "", "API endpoint")
 	//RootCmd.MarkPersistentFlagRequired("endpoint")
 	RootCmd.PersistentFlags().StringVar(&flags.AutoDiscoveryKey, "auto-discovery", "", "Auto discovery key for the agent")
+	RootCmd.PersistentFlags().StringVar(&flags.ServerName, "server-name", "", "Server display name used for the first auto-discovery registration")
 	RootCmd.PersistentFlags().BoolVar(&flags.DisableAutoUpdate, "disable-auto-update", false, "Disable automatic updates")
 	RootCmd.PersistentFlags().BoolVar(&flags.DisableWebSsh, "disable-web-ssh", false, "Deprecated: disable remote control (use --disable-remote-control)")
 	RootCmd.PersistentFlags().BoolVar(&flags.DisableRemoteControl, "disable-remote-control", false, "Disable remote control (WebSSH and remote execution)")

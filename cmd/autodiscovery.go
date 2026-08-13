@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -10,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/komari-monitor/komari-agent/dnsresolver"
@@ -39,6 +41,9 @@ type RegisterResponse struct {
 
 // getAutoDiscoveryFilePath 获取自动发现配置文件路径
 func getAutoDiscoveryFilePath() string {
+	if configured := strings.TrimSpace(os.Getenv("AGENT_AUTO_DISCOVERY_FILE")); configured != "" {
+		return configured
+	}
 	// 获取程序运行目录
 	execPath, err := os.Executable()
 	if err != nil {
@@ -100,6 +105,10 @@ func registerWithAutoDiscovery() error {
 	}
 
 	hostname, _ := os.Hostname()
+	serverName, err := autoDiscoveryServerName(flags.ServerName, hostname)
+	if err != nil {
+		return err
+	}
 
 	jsonData, err := json.Marshal(requestData)
 	if err != nil {
@@ -119,7 +128,7 @@ func registerWithAutoDiscovery() error {
 		// 继续使用原始 endpoint，可能在某些情况下仍能工作
 	}
 
-	registerURL := fmt.Sprintf("%s/api/clients/register?name=%s", endpoint, url.QueryEscape(hostname))
+	registerURL := fmt.Sprintf("%s/api/clients/register?name=%s", endpoint, url.QueryEscape(serverName))
 
 	// 创建HTTP请求
 	req, err := http.NewRequest("POST", registerURL, bytes.NewBuffer(jsonData))
@@ -171,6 +180,16 @@ func registerWithAutoDiscovery() error {
 	log.Printf("Successfully registered with auto-discovery. UUID: %s", registerResp.Data.UUID)
 
 	return nil
+}
+
+func autoDiscoveryServerName(configured, hostname string) (string, error) {
+	if serverName := strings.TrimSpace(configured); serverName != "" {
+		return serverName, nil
+	}
+	if serverName := strings.TrimSpace(hostname); serverName != "" {
+		return serverName, nil
+	}
+	return "", errors.New("server name is empty and the system hostname is unavailable")
 }
 
 // handleAutoDiscovery 处理自动发现逻辑

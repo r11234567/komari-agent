@@ -56,6 +56,7 @@ export AGENT_TOKEN="your-token"
 | `include_mountpoints` | `AGENT_INCLUDE_MOUNTPOINTS` | `--include-mountpoint` | 仅统计指定挂载点，分号分隔 | `0.1.0` |
 | `month_rotate` | `AGENT_MONTH_ROTATE` | `--month-rotate` | 流量统计每月重置日期，`0` 为禁用 | `0.1.0` |
 | `auto_discovery_key` | `AGENT_AUTO_DISCOVERY_KEY` | `--auto-discovery` | 自动发现密钥 | `1.0.40` |
+| `server_name` | `AGENT_SERVER_NAME` | `--server-name` | 首次使用自动发现密钥注册时显示的服务器名称；未设置时使用系统主机名 | 未发布 |
 | `custom_dns` | `AGENT_CUSTOM_DNS` | `--custom-dns` | 自定义 DNS 服务器 | `1.0.80` |
 | `enable_gpu` | `AGENT_ENABLE_GPU` | `--gpu` | 启用详细 GPU 监控 | `1.0.80` |
 | `protocol_version` | `AGENT_PROTOCOL_VERSION` | `--protocol-version` | 上报协议版本，默认 `2` | `1.2.10` |
@@ -69,3 +70,28 @@ export AGENT_TOKEN="your-token"
 ```
 
 详见 `cmd/flags/flags.go` 及 `cmd/root.go`
+
+## 服务账号与卸载
+
+Linux 默认创建不可登录的专用 `komari` 服务账号，macOS 默认创建隐藏且不可登录的 `_komari` 服务账号；Windows 默认使用不可交互登录的 `NT SERVICE\\komari-agent` 虚拟服务账号。Docker 镜像固定以容器内的非 root `komari` 用户运行。专用服务账号无法执行需要 root 或管理员权限的远程控制操作；只有显式指定 `--install-runtime-identity root-or-administrator` 才以特权账号运行。
+
+Linux/macOS 卸载：
+
+```bash
+curl -fsSL 'https://raw.githubusercontent.com/r11234567/komari-agent/main/install.sh' | sudo bash -s -- --uninstall
+```
+
+Windows（管理员 PowerShell）卸载：
+
+```powershell
+$script = irm 'https://raw.githubusercontent.com/r11234567/komari-agent/main/install.ps1'
+& ([scriptblock]::Create($script)) '--uninstall'
+```
+
+Docker 卸载只需删除对应容器、数据卷和按需删除镜像：
+
+```bash
+docker rm -f komari-agent
+docker volume rm komari-agent-data
+docker image rm ghcr.io/r11234567/komari-agent:latest
+```

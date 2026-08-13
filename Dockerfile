@@ -6,9 +6,18 @@ WORKDIR /app
 ARG TARGETOS
 ARG TARGETARCH
 
-COPY --chmod=755 komari-agent-${TARGETOS}-${TARGETARCH} /app/komari-agent
+RUN addgroup -S komari \
+    && adduser -S -D -H -h /app -s /sbin/nologin -G komari komari \
+    && mkdir -p /var/lib/komari \
+    && chown komari:komari /app /var/lib/komari
+
+COPY --chmod=755 --chown=komari:komari komari-agent-${TARGETOS}-${TARGETARCH} /app/komari-agent
 
 RUN touch /.komari-agent-container
+
+ENV AGENT_AUTO_DISCOVERY_FILE=/var/lib/komari/auto-discovery.json
+
+USER komari
 
 ENTRYPOINT ["/app/komari-agent"]
 # 运行时请指定参数

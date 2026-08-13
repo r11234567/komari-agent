@@ -41,16 +41,14 @@ target_dir="/opt/komari"
 github_proxy=""
 release_repository="r11234567/komari-agent"
 install_version="" # New parameter for specifying version
-install_dir_specified=false
-runtime_identity="root-or-administrator"
+runtime_identity="service-account"
+uninstall_only=false
 rescue_enabled=false
 rescue_configure_firewall=false
 rescue_endpoint=""
 rescue_token=""
 ignore_unsafe_cert=false
-invoking_user="${SUDO_USER:-$(id -un)}"
 service_user="root"
-user_service=false
  
 
 # Detect OS
@@ -87,7 +85,6 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --install-dir)
             target_dir="$2"
-            install_dir_specified=true
             shift 2
             ;;
         --install-service-name)
@@ -105,6 +102,10 @@ while [[ $# -gt 0 ]]; do
         --install-runtime-identity)
             runtime_identity="$2"
             shift 2
+            ;;
+        --uninstall)
+            uninstall_only=true
+            shift
             ;;
         --install-rescue)
             rescue_enabled=true
@@ -145,20 +146,32 @@ case "$runtime_identity" in
     root-or-administrator)
         service_user="root"
         ;;
-    current-user)
-        service_user="$invoking_user"
+    current-user|service-account)
+        runtime_identity="service-account"
+        if [ "$os_name" = "darwin" ]; then
+            service_user="_komari"
+        else
+            service_user="komari"
+        fi
         ;;
     *)
-        log_error "--install-runtime-identity must be root-or-administrator or current-user"
+        log_error "--install-runtime-identity must be root-or-administrator or service-account"
         exit 1
         ;;
 esac
 
-# A root-run Linux installation can create a dedicated unprivileged service
-# account. A direct, non-root installation has no authority to do that and
-# therefore runs as the invoking user through that user's systemd session.
-if [ "$runtime_identity" = "current-user" ] && [ "$os_name" = "linux" ] && [ "$EUID" -eq 0 ]; then
-    service_user="komari"
+# A dedicated service account must be created by an administrator. The legacy
+# current-user spelling is accepted above, but no longer runs as the invoking
+# interactive user.
+if [ "$uninstall_only" != true ] && [ "$runtime_identity" = "service-account" ] && [ "$os_name" = "freebsd" ]; then
+    log_error "service-account runtime is not yet supported by this installer on FreeBSD"
+    exit 1
+fi
+if [ "$runtime_identity" = "service-account" ] && [ "$EUID" -ne 0 ]; then
+    log_error "service-account runtime requires running the installer as root"
+    exit 1
+fi
+if [ "$uninstall_only" != true ] && [ "$runtime_identity" = "service-account" ] && [ "$os_name" = "linux" ]; then
     if ! id -u "$service_user" >/dev/null 2>&1; then
         log_info "Creating the unprivileged ${service_user} service user..."
         if command -v useradd >/dev/null 2>&1; then
@@ -175,6 +188,48 @@ if [ "$runtime_identity" = "current-user" ] && [ "$os_name" = "linux" ] && [ "$E
     elif [ "$(id -u "$service_user")" -eq 0 ]; then
         log_error "The existing komari account is privileged; refusing a non-privileged installation"
         exit 1
+    elif id -nG "$service_user" | tr ' ' '\n' | grep -Eq '^(sudo|wheel|admin)$'; then
+        log_error "The existing komari account belongs to an administrative group; refusing installation"
+        exit 1
+    elif user_shell=$(getent passwd "$service_user" | cut -d: -f7) && [ "$user_shell" != "/usr/sbin/nologin" ] && [ "$user_shell" != "/sbin/nologin" ] && [ "$user_shell" != "/bin/false" ]; then
+        log_error "The existing komari account has a login shell; refusing installation"
+        exit 1
+    fi
+elif [ "$uninstall_only" != true ] && [ "$runtime_identity" = "service-account" ] && [ "$os_name" = "darwin" ]; then
+    if ! id -u "$service_user" >/dev/null 2>&1; then
+		service_group="_komari"
+		if ! dscl . -read "/Groups/${service_group}" >/dev/null 2>&1; then
+			service_gid=$(dscl . -list /Groups PrimaryGroupID | awk '$2 >= 200 && $2 < 500 { used[$2] = 1 } END { for (id = 499; id >= 200; id--) if (!used[id]) { print id; exit } }')
+			if [ -z "$service_gid" ]; then
+				log_error "Cannot allocate a system GID for ${service_group}"
+				exit 1
+			fi
+			dscl . -create "/Groups/${service_group}"
+			dscl . -create "/Groups/${service_group}" PrimaryGroupID "$service_gid"
+		else
+			service_gid=$(dscl . -read "/Groups/${service_group}" PrimaryGroupID | awk '{print $2}')
+		fi
+        service_uid=$(dscl . -list /Users UniqueID | awk '$2 >= 200 && $2 < 500 { used[$2] = 1 } END { for (id = 499; id >= 200; id--) if (!used[id]) { print id; exit } }')
+        if [ -z "$service_uid" ]; then
+            log_error "Cannot allocate a system UID for ${service_user}"
+            exit 1
+        fi
+        log_info "Creating the non-login ${service_user} service user..."
+        dscl . -create "/Users/${service_user}"
+        dscl . -create "/Users/${service_user}" UniqueID "$service_uid"
+        dscl . -create "/Users/${service_user}" PrimaryGroupID "$service_gid"
+        dscl . -create "/Users/${service_user}" UserShell /usr/bin/false
+        dscl . -create "/Users/${service_user}" NFSHomeDirectory /var/empty
+        dscl . -create "/Users/${service_user}" IsHidden 1
+    elif [ "$(id -u "$service_user")" -eq 0 ]; then
+        log_error "The existing ${service_user} account is privileged; refusing installation"
+        exit 1
+    elif id -nG "$service_user" | tr ' ' '\n' | grep -Eq '^(admin|wheel)$'; then
+        log_error "The existing ${service_user} account belongs to an administrative group; refusing installation"
+        exit 1
+    elif user_shell=$(dscl . -read "/Users/${service_user}" UserShell | awk '{print $2}') && [ "$user_shell" != "/usr/bin/false" ] && [ "$user_shell" != "/usr/sbin/nologin" ]; then
+        log_error "The existing ${service_user} account has a login shell; refusing installation"
+        exit 1
     fi
 fi
 
@@ -182,7 +237,7 @@ fi
 # identity and therefore require root/administrator privileges. Keep the old
 # --disable-web-ssh spelling as an accepted alias, but persist the canonical
 # all-remote-control switch for every unprivileged installation.
-if [ "$runtime_identity" = "current-user" ]; then
+if [ "$runtime_identity" = "service-account" ]; then
     case " $komari_args " in
         *" --disable-remote-control "*|*" --disable-web-ssh "*) ;;
         *) komari_args="$komari_args --disable-remote-control" ;;
@@ -222,44 +277,8 @@ fi
 # Remove leading space from komari_args if present
 komari_args="${komari_args# }"
 
-# A direct, unprivileged installation belongs entirely to the invoking user.
-if [ "$runtime_identity" = "current-user" ] && [ "$EUID" -ne 0 ] && [ "$install_dir_specified" = false ]; then
-    user_home=$(getent passwd "$service_user" 2>/dev/null | cut -d: -f6)
-    if [ -z "$user_home" ]; then
-        user_home="$HOME"
-    fi
-    case "$os_name" in
-        linux|freebsd)
-            target_dir="${user_home}/.local/share/komari"
-            ;;
-    esac
-fi
-
 komari_agent_path="${target_dir}/agent"
 runtime_state_path="${target_dir}/runtime-config.json"
-
-# User services are required only when the installer itself is non-root. A
-# root-run current-user installation is a normal system service with User=komari.
-if [ "$runtime_identity" = "current-user" ] && [ "$os_name" = "linux" ] && [ "$EUID" -ne 0 ]; then
-    user_uid=$(id -u "$service_user")
-    run_user_systemctl() {
-        if [ "$(id -un)" = "$service_user" ]; then
-            env XDG_RUNTIME_DIR="/run/user/${user_uid}" systemctl --user "$@"
-        elif command -v runuser >/dev/null 2>&1; then
-            runuser -u "$service_user" -- env XDG_RUNTIME_DIR="/run/user/${user_uid}" systemctl --user "$@"
-        else
-            log_error "runuser is required to configure the ${service_user} systemd user service"
-            return 1
-        fi
-    }
-    if command -v systemctl >/dev/null 2>&1 && run_user_systemctl show-environment >/dev/null 2>&1; then
-        user_service=true
-    else
-        log_error "current-user runtime requires a running systemd user session for ${service_user}"
-        log_info "Enable lingering for that user or install the ordinary Agent with root-or-administrator runtime."
-        exit 1
-    fi
-fi
 
 echo -e "${WHITE}===========================================${NC}"
 echo -e "${WHITE}    Komari Agent Installation Script     ${NC}"
@@ -285,17 +304,7 @@ uninstall_previous() {
     log_step "Checking for previous installation..."
     
     # Stop and disable service if it exists
-    if [ "$user_service" = true ]; then
-        user_uid=$(id -u "$service_user")
-        user_home=$(getent passwd "$service_user" | cut -d: -f6)
-        if run_user_systemctl list-unit-files | grep -q "${service_name}.service"; then
-            log_info "Stopping and disabling existing systemd user service..."
-            run_user_systemctl stop "${service_name}.service" || true
-            run_user_systemctl disable "${service_name}.service" || true
-            rm -f "${user_home}/.config/systemd/user/${service_name}.service"
-            run_user_systemctl daemon-reload
-        fi
-    elif command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files | grep -q "${service_name}.service"; then
+    if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files | grep -q "${service_name}.service"; then
         log_info "Stopping and disabling existing systemd service..."
         systemctl stop ${service_name}.service
         systemctl disable ${service_name}.service
@@ -357,6 +366,18 @@ uninstall_previous() {
 
 # Uninstall previous installation
 uninstall_previous
+if [ "$uninstall_only" = true ]; then
+    case "$target_dir" in
+        /opt/komari|/usr/local/komari|/c/komari|"$HOME/.komari")
+            rm -rf -- "$target_dir"
+            ;;
+        *)
+            log_warning "Custom install directory was not removed automatically: $target_dir"
+            ;;
+    esac
+    log_success "Komari Agent uninstalled. The dedicated service account was retained."
+    exit 0
+fi
 
 install_dependencies() {
     log_step "Checking and installing dependencies..."
@@ -483,7 +504,7 @@ fi
 log_step "Creating installation directory: ${GREEN}$target_dir${NC}"
 mkdir -p "$target_dir"
 if [ "$EUID" -eq 0 ] && [ "$service_user" != "root" ]; then
-    chown "$service_user" "$target_dir"
+    chown -R "$service_user" "$target_dir"
 fi
 
 # Download binary
@@ -606,9 +627,6 @@ detect_init_system() {
 }
 
 init_system=$(detect_init_system)
-if [ "$user_service" = true ]; then
-    init_system="systemd-user"
-fi
 log_info "Detected init system: ${GREEN}$init_system${NC}"
 if [ "$rescue_enabled" = true ] && [ "$init_system" != "systemd" ]; then
     log_error "The rescue helper requires Linux systemd to keep its privileged guardian separate from the ordinary Agent service"
@@ -663,32 +681,6 @@ EOF
     rc-update add ${service_name} default
     rc-service ${service_name} start
     log_success "OpenRC service configured and started"
-elif [ "$init_system" = "systemd-user" ]; then
-    log_info "Using systemd user service management"
-    user_home=$(getent passwd "$service_user" | cut -d: -f6)
-    service_dir="${user_home}/.config/systemd/user"
-    service_file="${service_dir}/${service_name}.service"
-    mkdir -p "$service_dir"
-    cat > "$service_file" << EOF
-[Unit]
-Description=Komari Agent Service
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=${komari_agent_path} ${komari_args}
-WorkingDirectory=${target_dir}
-Restart=always
-
-[Install]
-WantedBy=default.target
-EOF
-    if [ "$EUID" -eq 0 ]; then
-        chown -R "$service_user" "$service_dir" "$target_dir"
-    fi
-    run_user_systemctl daemon-reload
-    run_user_systemctl enable --now "${service_name}.service"
-    log_success "Systemd user service configured and started"
 elif [ "$init_system" = "systemd" ]; then
     # Systemd service configuration
     log_info "Using systemd for service management"
@@ -758,22 +750,10 @@ elif [ "$init_system" = "launchd" ]; then
     # macOS launchd service configuration
     log_info "Using launchd for service management"
     
-    # Determine if this should be a system or user service based on installation directory
-    if [[ "$target_dir" =~ ^/Users/.* ]] || [ "$EUID" -ne 0 ]; then
-        # User-level service (LaunchAgent)
-        plist_dir="$HOME/Library/LaunchAgents"
-        plist_file="$plist_dir/com.komari.${service_name}.plist"
-        log_info "Installing as user-level service (LaunchAgent)"
-        mkdir -p "$plist_dir"
-        service_user="$(whoami)"
-        log_dir="$HOME/Library/Logs"
-    else
-        # System-level service (LaunchDaemon)
-        plist_dir="/Library/LaunchDaemons"
-        plist_file="$plist_dir/com.komari.${service_name}.plist"
-        log_info "Installing as system-level service (LaunchDaemon)"
-        log_dir="/var/log"
-    fi
+    plist_dir="/Library/LaunchDaemons"
+    plist_file="$plist_dir/com.komari.${service_name}.plist"
+    log_info "Installing as system-level service (LaunchDaemon)"
+    log_dir="/var/log"
     
     # Create the launchd plist file
     cat > "$plist_file" << EOF
@@ -812,22 +792,11 @@ EOF
 EOF
     
     # Load and start the service
-    if [[ "$target_dir" =~ ^/Users/.* ]] || [ "$EUID" -ne 0 ]; then
-        # User-level service
-        if launchctl bootstrap gui/$(id -u) "$plist_file"; then
-            log_success "User-level launchd service configured and started"
-        else
-            log_error "Failed to load user-level launchd service"
-            exit 1
-        fi
+    if launchctl bootstrap system "$plist_file"; then
+        log_success "System launchd service configured and started as ${service_user}"
     else
-        # System-level service
-        if launchctl bootstrap system "$plist_file"; then
-            log_success "System-level launchd service configured and started"
-        else
-            log_error "Failed to load system-level launchd service"
-            exit 1
-        fi
+        log_error "Failed to load system-level launchd service"
+        exit 1
     fi
 elif [ "$init_system" = "upstart" ]; then
     # Upstart service configuration

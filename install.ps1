@@ -8,7 +8,8 @@ $ServiceName = "komari-agent"
 $GitHubProxy = ""
 $InstallVersion = ""
 $ReleaseRepository = "r11234567/komari-agent"
-$RuntimeIdentity = "root-or-administrator"
+$RuntimeIdentity = "service-account"
+$UninstallOnly = $false
 $InstallRescue = $false
 $InstallRescueFirewall = $false
 $InstallDir = ""
@@ -25,6 +26,7 @@ for ($i = 0; $i -lt $args.Count; $i++) {
         "--install-ghproxy" { $GitHubProxy = $args[++$i]; continue }
         "--install-version" { $InstallVersion = $args[++$i]; continue }
         "--install-runtime-identity" { $RuntimeIdentity = $args[++$i]; continue }
+        "--uninstall" { $UninstallOnly = $true; continue }
         "--install-rescue" { $InstallRescue = $true; continue }
         "--install-rescue-firewall" { $InstallRescueFirewall = $true; continue }
         { $_ -in @("-e", "--endpoint") } {
@@ -56,15 +58,16 @@ for ($i = 0; $i -lt $args.Count; $i++) {
 $IsAdministrator = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltinRole]::Administrator
 )
-if ($RuntimeIdentity -notin @("root-or-administrator", "current-user")) {
-    Log-Error "--install-runtime-identity must be root-or-administrator or current-user"
+if ($RuntimeIdentity -eq "current-user") { $RuntimeIdentity = "service-account" }
+if ($RuntimeIdentity -notin @("root-or-administrator", "service-account")) {
+    Log-Error "--install-runtime-identity must be root-or-administrator or service-account"
     exit 1
 }
-if ($RuntimeIdentity -eq "root-or-administrator" -and -not $IsAdministrator) {
-    Log-Error "Administrator privileges are required for root-or-administrator runtime."
+if (-not $IsAdministrator) {
+    Log-Error "Administrator privileges are required to install or uninstall the Agent service."
     exit 1
 }
-if ($RuntimeIdentity -eq "current-user" -and -not $RemoteControlDisabled) {
+if ($RuntimeIdentity -eq "service-account" -and -not $RemoteControlDisabled) {
     $RemoteControlDisabled = $true
     $KomariArgs += "--disable-remote-control"
 }
@@ -88,12 +91,7 @@ if ($InstallRescue) {
 }
 
 if ([string]::IsNullOrWhiteSpace($InstallDir)) {
-    if ($RuntimeIdentity -eq "current-user") {
-        $InstallDir = Join-Path $env:LOCALAPPDATA "Komari"
-    }
-    else {
-        $InstallDir = Join-Path $env:ProgramFiles "Komari"
-    }
+    $InstallDir = Join-Path $env:ProgramFiles "Komari"
 }
 
 switch ($env:PROCESSOR_ARCHITECTURE) {
@@ -125,6 +123,19 @@ function Join-Arguments([string[]]$Values) {
     return (($Values | ForEach-Object { Quote-Argument $_ }) -join ' ')
 }
 
+if ($UninstallOnly) {
+    foreach ($Name in @($ServiceName, "$ServiceName-rescue")) {
+        Stop-Service -Name $Name -Force -ErrorAction SilentlyContinue
+        & sc.exe delete $Name | Out-Null
+    }
+    Unregister-ScheduledTask -TaskName "$ServiceName-CurrentUser" -Confirm:$false -ErrorAction SilentlyContinue
+    Get-NetFirewallRule -DisplayName "Komari Rescue Helper" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+    Remove-Item $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item (Join-Path $env:ProgramData "Komari\Rescue\$ServiceName-rescue") -Recurse -Force -ErrorAction SilentlyContinue
+    Log-Success "Komari Agent uninstalled."
+    exit 0
+}
+
 function Ensure-Nssm {
     $Existing = Get-Command nssm.exe -ErrorAction SilentlyContinue
     if ($Existing) { return $Existing.Source }
@@ -150,6 +161,7 @@ $AgentPath = Join-Path $InstallDir "komari-agent.exe"
 $RuntimeStatePath = Join-Path $InstallDir "runtime-config.json"
 $UserTaskName = "$ServiceName-CurrentUser"
 $RescueServiceName = "$ServiceName-rescue"
+$ServiceAccount = "NT SERVICE\$ServiceName"
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 
 $ExistingTask = Get-ScheduledTask -TaskName $UserTaskName -ErrorAction SilentlyContinue
@@ -175,24 +187,20 @@ if ($KomariArgs -notcontains "--runtime-state-file") {
 }
 $AgentArgumentLine = Join-Arguments $KomariArgs
 
-if ($RuntimeIdentity -eq "current-user") {
-    $Action = New-ScheduledTaskAction -Execute $AgentPath -Argument $AgentArgumentLine -WorkingDirectory $InstallDir
-    $Trigger = New-ScheduledTaskTrigger -AtLogOn -User ([Security.Principal.WindowsIdentity]::GetCurrent().Name)
-    $Principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
-    $Settings = New-ScheduledTaskSettingsSet -RestartCount 99 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
-    Register-ScheduledTask -TaskName $UserTaskName -Action $Action -Trigger $Trigger -Principal $Principal -Settings $Settings | Out-Null
-    Start-ScheduledTask -TaskName $UserTaskName
-    Log-Success "Ordinary Agent installed for the current non-administrator user."
+$Nssm = Ensure-Nssm
+& $Nssm install $ServiceName $AgentPath $AgentArgumentLine | Out-Null
+if ($RuntimeIdentity -eq "service-account") {
+    & $Nssm set $ServiceName ObjectName $ServiceAccount "" | Out-Null
+    & icacls.exe $InstallDir /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" "${ServiceAccount}:(OI)(CI)M" | Out-Null
+    Log-Success "Ordinary Agent installed as the non-login $ServiceAccount service account."
 }
 else {
-    $Nssm = Ensure-Nssm
-    & $Nssm install $ServiceName $AgentPath $AgentArgumentLine | Out-Null
     & $Nssm set $ServiceName ObjectName LocalSystem | Out-Null
-    & $Nssm set $ServiceName Start SERVICE_AUTO_START | Out-Null
-    & $Nssm set $ServiceName AppExit Default Restart | Out-Null
-    & $Nssm start $ServiceName | Out-Null
     Log-Success "Ordinary Agent installed as a LocalSystem service."
 }
+& $Nssm set $ServiceName Start SERVICE_AUTO_START | Out-Null
+& $Nssm set $ServiceName AppExit Default Restart | Out-Null
+& $Nssm start $ServiceName | Out-Null
 
 if ($InstallRescue) {
     $Nssm = Ensure-Nssm
@@ -212,9 +220,9 @@ if ($InstallRescue) {
         Action = @{
             AgentPath = $AgentPath
             RuntimeStatePath = $RuntimeStatePath
-            ServiceName = $(if ($RuntimeIdentity -eq "current-user") { $UserTaskName } else { $ServiceName })
+            ServiceName = $ServiceName
             RuntimeIdentity = $RuntimeIdentity
-            RuntimeUser = ([Security.Principal.WindowsIdentity]::GetCurrent().Name)
+            RuntimeUser = $(if ($RuntimeIdentity -eq "service-account") { $ServiceAccount } else { "LocalSystem" })
             FirewallMarker = $FirewallMarker
         }
     }
