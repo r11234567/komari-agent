@@ -361,7 +361,7 @@ func NewPingTask(conn *ws.SafeConn, protocolVersion int, taskID uint, pingType, 
 	}
 
 	if err != nil {
-		log.Printf("Ping task %d failed", taskID)
+		log.Print("Ping task failed")
 		pingResult = -1 // 如果有错误，设置结果为 -1
 	} else {
 		pingResult = int(latency)
