@@ -38,7 +38,7 @@ func NewTask(task_id, command string) {
 		uploadTaskResult(task_id, reason, -1, time.Now())
 		return
 	}
-	log.Printf("Executing task %s with command: %s", task_id, command)
+	log.Print("Executing remote task")
 	result, exitCode := runTaskCommand(command)
 	uploadTaskResult(task_id, result, exitCode, time.Now())
 }
@@ -361,7 +361,7 @@ func NewPingTask(conn *ws.SafeConn, protocolVersion int, taskID uint, pingType, 
 	}
 
 	if err != nil {
-		log.Printf("Ping task %d failed: %v", taskID, err)
+		log.Printf("Ping task %d failed", taskID)
 		pingResult = -1 // 如果有错误，设置结果为 -1
 	} else {
 		pingResult = int(latency)

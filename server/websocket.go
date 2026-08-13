@@ -462,10 +462,10 @@ func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventI
 			log.Printf("bad v2 terminal params: %v", err)
 		}
 	case v2.MethodAgentMessage, v2.MethodAgentEvent:
-		log.Printf("received v2 %s: %+v", method, params)
+		log.Print("received legacy v2 message or event")
 		return true
 	default:
-		log.Printf("unknown v2 event method %s", method)
+		log.Print("received unknown legacy v2 event method")
 	}
 	return false
 }
