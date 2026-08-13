@@ -2,12 +2,10 @@ package cmd
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"reflect"
@@ -124,10 +122,6 @@ var RootCmd = &cobra.Command{
 		}
 		log.Println("Monitoring Interfaces:", interfaceList)
 
-		// 忽略不安全的证书
-		if flags.IgnoreUnsafeCert {
-			http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-		}
 		// 自动更新
 		if !flags.DisableAutoUpdate {
 			err := update.CheckAndUpdate()

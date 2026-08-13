@@ -1,6 +1,7 @@
 package server
 
 import (
+	"net/url"
 	"testing"
 	"time"
 )
@@ -57,6 +58,47 @@ func TestHTTPPing(t *testing.T) {
 			}
 			if err != nil {
 				t.Errorf("HTTP ping %s error: %v", tt.target, err)
+			}
+		})
+	}
+}
+
+func TestNormalizeHTTPPingTarget(t *testing.T) {
+	tests := []struct {
+		name   string
+		target string
+		want   string
+	}{
+		{name: "hostname", target: "example.com", want: "http://example.com"},
+		{name: "HTTPS path", target: "https://example.com/health", want: "https://example.com/health"},
+		{name: "IPv6", target: "2001:db8::1", want: "http://[2001:db8::1]"},
+		{name: "private target", target: "http://10.0.0.1:8080/status", want: "http://10.0.0.1:8080/status"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := normalizeHTTPPingTarget(tt.target)
+			if err != nil {
+				t.Fatalf("normalize target: %v", err)
+			}
+			if got.String() != tt.want {
+				t.Fatalf("normalized target = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeHTTPPingTargetRejectsUnsafeInput(t *testing.T) {
+	tests := []string{
+		"",
+		"ftp://example.com/file",
+		"http://user:password@example.com",
+		"http://example.com:invalid",
+		"http://example.com/path#fragment",
+	}
+	for _, target := range tests {
+		t.Run(url.PathEscape(target), func(t *testing.T) {
+			if _, err := normalizeHTTPPingTarget(target); err == nil {
+				t.Fatalf("expected target %q to be rejected", target)
 			}
 		})
 	}

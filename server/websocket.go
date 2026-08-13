@@ -509,7 +509,12 @@ func newWSDialer() *websocket.Dialer {
 		EnableCompression: !flags.DisableCompression,
 	}
 	if flags.IgnoreUnsafeCert {
-		d.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		d.TLSClientConfig = insecureOperatorTLSConfig()
 	}
 	return d
+}
+
+func insecureOperatorTLSConfig() *tls.Config {
+	// This is only used when the operator explicitly enables --ignore-unsafe-cert.
+	return &tls.Config{InsecureSkipVerify: true} // #nosec G402 // lgtm[go/disabled-certificate-check]
 }

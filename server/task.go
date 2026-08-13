@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -229,31 +230,24 @@ func tcpPing(target string, timeout time.Duration) (int64, error) {
 }
 
 func httpPing(target string, timeout time.Duration) (int64, error) {
-	// Handle raw IPv6 address for URL
-	if strings.Contains(target, ":") && !strings.Contains(target, "[") {
-		// check if it's a valid IP to avoid wrapping hostnames
-		if ip := net.ParseIP(target); ip != nil && ip.To4() == nil {
-			target = "[" + target + "]"
-		}
+	targetURL, err := normalizeHTTPPingTarget(target)
+	if err != nil {
+		return -1, err
 	}
-
-	if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
-		target = "http://" + target
+	resolvedIP, err := resolveIP(targetURL.Hostname())
+	if err != nil {
+		return -1, err
 	}
 
 	transport := &http.Transport{
 		DisableKeepAlives: true,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			// 在 Dial 之前解析 IP，排除 DNS 时间
-			host, port, err := net.SplitHostPort(addr)
+			_, port, err := net.SplitHostPort(addr)
 			if err != nil {
 				return nil, err
 			}
-			ip, err := resolveIP(host)
-			if err != nil {
-				return nil, err
-			}
-			return net.DialTimeout(network, net.JoinHostPort(ip, port), timeout)
+			dialer := &net.Dialer{Timeout: timeout}
+			return dialer.DialContext(ctx, network, net.JoinHostPort(resolvedIP, port))
 		},
 	}
 	defer transport.CloseIdleConnections()
@@ -261,9 +255,18 @@ func httpPing(target string, timeout time.Duration) (int64, error) {
 	client := &http.Client{
 		Timeout:   timeout,
 		Transport: transport,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, targetURL.String(), nil)
+	if err != nil {
+		return -1, err
 	}
 	start := time.Now()
-	resp, err := client.Get(target)
+	// The controller intentionally configures arbitrary public or private monitoring targets.
+	// The URL is scheme/authority validated, DNS-pinned above, and redirects are disabled.
+	resp, err := client.Do(req) // lgtm[go/request-forgery]
 	latency := time.Since(start).Milliseconds()
 	if err != nil {
 		return -1, err
@@ -273,6 +276,35 @@ func httpPing(target string, timeout time.Duration) (int64, error) {
 		return latency, nil
 	}
 	return latency, errors.New("http status not ok")
+}
+
+func normalizeHTTPPingTarget(target string) (*url.URL, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return nil, errors.New("HTTP ping target is empty")
+	}
+	if ip := net.ParseIP(target); ip != nil && ip.To4() == nil {
+		target = "[" + target + "]"
+	}
+	if !strings.Contains(target, "://") {
+		target = "http://" + target
+	}
+
+	targetURL, err := url.ParseRequestURI(target)
+	if err != nil {
+		return nil, fmt.Errorf("invalid HTTP ping target: %w", err)
+	}
+	targetURL.Scheme = strings.ToLower(targetURL.Scheme)
+	if targetURL.Scheme != "http" && targetURL.Scheme != "https" {
+		return nil, errors.New("HTTP ping target must use http or https")
+	}
+	if targetURL.Host == "" || targetURL.Hostname() == "" || targetURL.User != nil || targetURL.Fragment != "" {
+		return nil, errors.New("HTTP ping target has an invalid authority")
+	}
+	if _, err := net.LookupPort("tcp", targetURL.Port()); targetURL.Port() != "" && err != nil {
+		return nil, errors.New("HTTP ping target has an invalid port")
+	}
+	return targetURL, nil
 }
 
 func NewPingTask(conn *ws.SafeConn, protocolVersion int, taskID uint, pingType, pingTarget string) {

@@ -7,7 +7,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"strings"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -15,37 +15,17 @@ import (
 )
 
 // newTerminalImpl 创建一个新的终端实例。
-// 它会尝试根据用户配置文件查找默认 shell，如果失败则回退到常见 shell。
+// 它会尝试使用环境中配置的默认 shell，如果失败则回退到常见 shell。
 // 优先以交互模式启动 shell，如果不支持则回退到非交互模式。
 func newTerminalImpl() (*terminalImpl, error) {
-	shell := ""
-	// 从 /etc/passwd 获取用户默认 shell
-	userHomeDir, err := os.UserHomeDir() // 获取当前用户的主目录
-	if err == nil {
-		passwdContent, err := os.ReadFile("/etc/passwd")
-		if err == nil {
-			for _, line := range strings.Split(string(passwdContent), "\n") {
-				if strings.Contains(line, userHomeDir) {
-					parts := strings.Split(line, ":")
-					if len(parts) >= 7 && parts[6] != "" {
-						shell = parts[6]
-						//log.Printf("Found shell from /etc/passwd: %s for user home: %s\n", shell, userHomeDir)
-						break
-					}
-				}
-			}
-		} else {
-			log.Printf("Error reading /etc/passwd: %v\n", err)
-		}
-	} else {
-		log.Printf("Error getting user home directory: %v\n", err)
+	shell := os.Getenv("SHELL")
+	if shell != "" && (!filepath.IsAbs(shell) || filepath.Clean(shell) != shell) {
+		shell = ""
 	}
-
-	// 验证从 /etc/passwd 获取的 shell 是否可用
 	if shell != "" {
 		if _, err := exec.LookPath(shell); err != nil {
-			log.Printf("Shell '%s' from /etc/passwd not found in PATH, falling back.\n", shell)
-			shell = "" // 默认 shell 不可用，清空以进入回退逻辑
+			log.Print("Configured shell is unavailable; falling back")
+			shell = ""
 		}
 	}
 

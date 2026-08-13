@@ -67,7 +67,8 @@ func New(config Config) (*Helper, error) {
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.ForceAttemptHTTP2 = true
-	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: config.IgnoreUnsafeCert}
+	// This is controlled by the explicit --ignore-unsafe-cert compatibility option.
+	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: config.IgnoreUnsafeCert} // #nosec G402 // lgtm[go/disabled-certificate-check]
 	return &Helper{
 		client: rescuev1connect.NewRescueServiceClient(&http.Client{Transport: transport}, baseURL),
 		token:  strings.TrimSpace(config.Token), agentID: strings.TrimSpace(config.AgentID),

@@ -188,7 +188,8 @@ func getHTTPClient(timeout time.Duration, preferIPVersion string) *http.Client {
 	}
 	client := &http.Client{
 		Transport: buildTransportWithPreference(timeout, &tls.Config{
-			InsecureSkipVerify: flags.IgnoreUnsafeCert,
+			// This is controlled by the explicit --ignore-unsafe-cert compatibility option.
+			InsecureSkipVerify: flags.IgnoreUnsafeCert, // #nosec G402 // lgtm[go/disabled-certificate-check]
 		}, preferIPVersion),
 		Timeout: timeout,
 	}
