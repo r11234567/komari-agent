@@ -173,6 +173,15 @@ function Get-ServiceFailureDetails([string]$Name, [string]$ErrorLogPath) {
     return (($details | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join [Environment]::NewLine).Trim()
 }
 
+function Wait-ServiceAbsent([string]$Name) {
+    $deadline = (Get-Date).AddSeconds(30)
+    do {
+        if (-not (Get-Service -Name $Name -ErrorAction SilentlyContinue)) { return }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+    throw "Service $Name could not be removed before reinstalling it"
+}
+
 if ($UninstallOnly) {
     foreach ($Name in @($ServiceName, "$ServiceName-rescue")) {
         Stop-Service -Name $Name -Force -ErrorAction SilentlyContinue
@@ -208,7 +217,9 @@ function Ensure-Nssm {
 
 $Version = Get-ReleaseVersion
 $AgentPath = Join-Path $InstallDir "komari-agent.exe"
-$RuntimeStatePath = Join-Path $InstallDir "runtime-config.json"
+$RuntimeStateDir = Join-Path $env:ProgramData "Komari"
+$RuntimeStatePath = Join-Path $RuntimeStateDir "runtime-config.json"
+$LegacyRuntimeStatePath = Join-Path $InstallDir "runtime-config.json"
 $LogDir = Join-Path $InstallDir "logs"
 $AgentOutputLog = Join-Path $LogDir "agent-stdout.log"
 $AgentErrorLog = Join-Path $LogDir "agent-stderr.log"
@@ -218,6 +229,10 @@ $ServiceAccount = "NT AUTHORITY\LocalService"
 $ServiceAccountSid = "*S-1-5-19"
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+New-Item -ItemType Directory -Path $RuntimeStateDir -Force | Out-Null
+if (-not (Test-Path $RuntimeStatePath) -and (Test-Path $LegacyRuntimeStatePath)) {
+    Copy-Item $LegacyRuntimeStatePath $RuntimeStatePath -Force
+}
 
 $ExistingTask = Get-ScheduledTask -TaskName $UserTaskName -ErrorAction SilentlyContinue
 if ($ExistingTask) { Unregister-ScheduledTask -TaskName $UserTaskName -Confirm:$false }
@@ -227,6 +242,7 @@ if ($IsAdministrator) {
         if ($ExistingService) {
             Stop-Service -Name $Name -Force -ErrorAction SilentlyContinue
             & (Ensure-Nssm) remove $Name confirm | Out-Null
+            Wait-ServiceAbsent $Name
         }
     }
     Get-NetFirewallRule -DisplayName "Komari Rescue Helper" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
@@ -243,8 +259,10 @@ if ($KomariArgs -notcontains "--runtime-state-file") {
 $AgentArgumentLine = Join-Arguments $KomariArgs
 
 $Nssm = Ensure-Nssm
-& $Nssm install $ServiceName $AgentPath $AgentArgumentLine | Out-Null
+& $Nssm install $ServiceName $AgentPath | Out-Null
 Assert-NativeCommand "Installing service $ServiceName"
+& $Nssm set $ServiceName AppParameters $AgentArgumentLine | Out-Null
+Assert-NativeCommand "Configuring Agent arguments"
 & $Nssm set $ServiceName AppDirectory $InstallDir | Out-Null
 Assert-NativeCommand "Configuring the working directory for $ServiceName"
 & $Nssm set $ServiceName AppStdout $AgentOutputLog | Out-Null
@@ -254,14 +272,16 @@ Assert-NativeCommand "Configuring stderr logging for $ServiceName"
 & $Nssm set $ServiceName AppRotateFiles 1 | Out-Null
 Assert-NativeCommand "Configuring log rotation for $ServiceName"
 if ($RuntimeIdentity -eq "service-account") {
-    & $Nssm set $ServiceName ObjectName LocalService | Out-Null
+    & sc.exe config $ServiceName obj= $ServiceAccount password= "" | Out-Null
     Assert-NativeCommand "Configuring the $ServiceAccount service identity"
     & icacls.exe $InstallDir /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "${ServiceAccountSid}:(OI)(CI)M" | Out-Null
     Assert-NativeCommand "Granting the service account access to $InstallDir"
+    & icacls.exe $RuntimeStateDir /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "${ServiceAccountSid}:(OI)(CI)M" | Out-Null
+    Assert-NativeCommand "Granting the service account access to $RuntimeStateDir"
     Log-Success "Ordinary Agent installed as the non-login $ServiceAccount service account."
 }
 else {
-    & $Nssm set $ServiceName ObjectName LocalSystem | Out-Null
+    & sc.exe config $ServiceName obj= LocalSystem password= "" | Out-Null
     Assert-NativeCommand "Configuring the LocalSystem service identity"
     Log-Success "Ordinary Agent installed as a LocalSystem service."
 }
@@ -313,9 +333,11 @@ if ($InstallRescue) {
         New-Item -ItemType File -Path $FirewallMarker -Force | Out-Null
     }
     $RescueArguments = Join-Arguments @("--config", $RescueConfigPath)
-    & $Nssm install $RescueServiceName $RescuePath $RescueArguments | Out-Null
+    & $Nssm install $RescueServiceName $RescuePath | Out-Null
     Assert-NativeCommand "Installing service $RescueServiceName"
-    & $Nssm set $RescueServiceName ObjectName LocalSystem | Out-Null
+    & $Nssm set $RescueServiceName AppParameters $RescueArguments | Out-Null
+    Assert-NativeCommand "Configuring rescue helper arguments"
+    & sc.exe config $RescueServiceName obj= LocalSystem password= "" | Out-Null
     Assert-NativeCommand "Configuring the rescue service identity"
     & $Nssm set $RescueServiceName Start SERVICE_AUTO_START | Out-Null
     Assert-NativeCommand "Configuring automatic startup for $RescueServiceName"
