@@ -26,14 +26,14 @@ func main() {
 	flag.StringVar(&config.AgentID, "agent-id", env("KOMARI_RESCUE_AGENT_ID", config.AgentID), "Expected Agent ID (optional; authentication remains authoritative)")
 	flag.StringVar(&config.InstanceIDPath, "instance-id-file", env("KOMARI_RESCUE_INSTANCE_ID_FILE", config.InstanceIDPath), "Persistent helper instance ID path")
 	flag.BoolVar(&config.IgnoreUnsafeCert, "ignore-unsafe-cert", config.IgnoreUnsafeCert || envBool("KOMARI_RESCUE_IGNORE_UNSAFE_CERT"), "Ignore unsafe certificate errors")
-	flag.BoolVar(&config.FirewallConfigured, "firewall-configured", config.FirewallConfigured || envBool("KOMARI_RESCUE_FIREWALL_CONFIGURED"), "Declare installer-managed rescue firewall configuration")
 	flag.StringVar(&config.Action.AgentPath, "agent-path", env("KOMARI_RESCUE_AGENT_PATH", config.Action.AgentPath), "Installed Agent binary path")
 	flag.StringVar(&config.Action.ConfigPath, "agent-config", env("KOMARI_RESCUE_AGENT_CONFIG", config.Action.ConfigPath), "Installed Agent JSON config path")
 	flag.StringVar(&config.Action.RuntimeStatePath, "runtime-state-file", env("KOMARI_RESCUE_RUNTIME_STATE_FILE", config.Action.RuntimeStatePath), "Agent runtime snapshot path")
 	flag.StringVar(&config.Action.ServiceName, "agent-service-name", env("KOMARI_RESCUE_AGENT_SERVICE_NAME", fallback(config.Action.ServiceName, "komari-agent")), "Installed Agent service name")
 	flag.StringVar(&config.Action.RuntimeIdentity, "agent-runtime-identity", env("KOMARI_RESCUE_AGENT_RUNTIME_IDENTITY", config.Action.RuntimeIdentity), "Installed Agent runtime identity")
 	flag.StringVar(&config.Action.RuntimeUser, "agent-runtime-user", env("KOMARI_RESCUE_AGENT_RUNTIME_USER", config.Action.RuntimeUser), "Installed Agent runtime user")
-	flag.StringVar(&config.Action.FirewallMarker, "firewall-marker", env("KOMARI_RESCUE_FIREWALL_MARKER", config.Action.FirewallMarker), "Installer-managed firewall marker path")
+	flag.StringVar(&config.Action.ControlPlaneURL, "control-plane-url", env("KOMARI_RESCUE_CONTROL_PLANE_URL", fallback(config.Action.ControlPlaneURL, config.Endpoint)), "Control plane URL retained during network isolation")
+	flag.StringVar(&config.Action.IsolationStatePath, "isolation-state-file", env("KOMARI_RESCUE_ISOLATION_STATE_FILE", config.Action.IsolationStatePath), "Komari-managed network isolation state path")
 	flag.Parse()
 	config.Version = update.CurrentVersion
 	if err := run(config); err != nil {

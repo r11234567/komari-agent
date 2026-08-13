@@ -44,7 +44,6 @@ install_version="" # New parameter for specifying version
 runtime_identity="service-account"
 uninstall_only=false
 rescue_enabled=false
-rescue_configure_firewall=false
 rescue_endpoint=""
 rescue_token=""
 ignore_unsafe_cert=false
@@ -109,10 +108,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --install-rescue)
             rescue_enabled=true
-            shift
-            ;;
-        --install-rescue-firewall)
-            rescue_configure_firewall=true
             shift
             ;;
         -e|--endpoint)
@@ -248,10 +243,6 @@ if [ "$EUID" -ne 0 ] && [ "$runtime_identity" = "root-or-administrator" ]; then
     log_error "root-or-administrator runtime requires running the installer as root"
     exit 1
 fi
-if [ "$rescue_configure_firewall" = true ] && [ "$rescue_enabled" != true ]; then
-    log_error "--install-rescue-firewall requires --install-rescue"
-    exit 1
-fi
 if [ "$rescue_enabled" = true ]; then
     if [ "$os_name" != "linux" ]; then
         log_error "The privileged rescue helper is currently supported by this installer only on Linux"
@@ -353,13 +344,16 @@ uninstall_previous() {
         rm -f "/etc/systemd/system/${rescue_service_name}.service"
         systemctl daemon-reload
     fi
-    rescue_env_dir="/etc/komari-agent"
-    rescue_marker="${rescue_env_dir}/${rescue_service_name}.firewall-managed"
+	rescue_env_dir="/etc/komari-agent"
+	# Remove the marker/rule created by older installers. New installations do
+	# not install a firewall package or change firewall policy.
+	rescue_marker="${rescue_env_dir}/${rescue_service_name}.firewall-managed"
     if [ "$EUID" -eq 0 ] && [ -f "$rescue_marker" ] && command -v ufw >/dev/null 2>&1; then
         ufw --force delete allow out 443/tcp comment 'komari-rescue' || true
     fi
     if [ "$EUID" -eq 0 ]; then
-        rm -f "${rescue_env_dir}/${rescue_service_name}.env" "${rescue_env_dir}/${rescue_service_name}.instance" "$rescue_marker"
+		rm -f "${rescue_env_dir}/${rescue_service_name}.env" "${rescue_env_dir}/${rescue_service_name}.instance" \
+			"${rescue_env_dir}/${rescue_service_name}.network-isolation.json" "$rescue_marker"
         rm -f "/usr/local/lib/komari-agent/komari-agent-rescue"
     fi
 }
@@ -850,6 +844,12 @@ install_rescue_helper() {
     rescue_env_dir="/etc/komari-agent"
     rescue_env_file="${rescue_env_dir}/${rescue_service_name}.env"
     rescue_marker="${rescue_env_dir}/${rescue_service_name}.firewall-managed"
+	if [ "$EUID" -eq 0 ] && command -v nft >/dev/null 2>&1 && nft list table inet komari_rescue >/dev/null 2>&1; then
+		if ! nft delete table inet komari_rescue; then
+			log_error "Failed to remove active Komari network isolation; restore it before reinstalling or uninstalling"
+			exit 1
+		fi
+	fi
     rescue_file="komari-agent-rescue-linux-${arch}"
     if [ "$version_to_install" = "latest" ]; then
         rescue_download_path="latest/download"
@@ -890,37 +890,13 @@ install_rescue_helper() {
 		printf 'KOMARI_RESCUE_AGENT_RUNTIME_IDENTITY=%s\n' "$(systemd_env_value "$runtime_identity")"
 		printf 'KOMARI_RESCUE_AGENT_RUNTIME_USER=%s\n' "$(systemd_env_value "$service_user")"
 		printf 'KOMARI_RESCUE_INSTANCE_ID_FILE=%s\n' "$(systemd_env_value "${rescue_env_dir}/${rescue_service_name}.instance")"
-		printf 'KOMARI_RESCUE_FIREWALL_MARKER=%s\n' "$(systemd_env_value "$rescue_marker")"
+		printf 'KOMARI_RESCUE_CONTROL_PLANE_URL=%s\n' "$(systemd_env_value "$rescue_endpoint")"
+		printf 'KOMARI_RESCUE_ISOLATION_STATE_FILE=%s\n' "$(systemd_env_value "${rescue_env_dir}/${rescue_service_name}.network-isolation.json")"
         if [ "$ignore_unsafe_cert" = true ]; then
             printf 'KOMARI_RESCUE_IGNORE_UNSAFE_CERT=true\n'
         fi
-        if [ "$rescue_configure_firewall" = true ]; then
-            printf 'KOMARI_RESCUE_FIREWALL_CONFIGURED=true\n'
-        fi
     } > "$rescue_env_file"
     chmod 600 "$rescue_env_file"
-    if [ "$rescue_configure_firewall" = true ]; then
-        if ! command -v ufw >/dev/null 2>&1; then
-            if command -v apt-get >/dev/null 2>&1; then
-                apt-get update && apt-get install -y ufw
-            elif command -v dnf >/dev/null 2>&1; then
-                dnf install -y ufw
-            elif command -v yum >/dev/null 2>&1; then
-                yum install -y ufw
-            else
-                log_error "Cannot install the requested rescue firewall manager: ufw package manager not found"
-                exit 1
-            fi
-        fi
-        if ! ufw allow out 443/tcp comment 'komari-rescue'; then
-            log_error "Failed to configure the installer-managed rescue firewall rule"
-            exit 1
-        fi
-        : > "$rescue_marker"
-        chmod 600 "$rescue_marker"
-    else
-        rm -f "$rescue_marker"
-    fi
     cat > "/etc/systemd/system/${rescue_service_name}.service" << EOF
 [Unit]
 Description=Komari Rescue Helper

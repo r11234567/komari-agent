@@ -13,7 +13,6 @@ $ReleaseRepository = "r11234567/komari-agent"
 $RuntimeIdentity = "service-account"
 $UninstallOnly = $false
 $InstallRescue = $false
-$InstallRescueFirewall = $false
 $InstallDir = ""
 $KomariArgs = @()
 $AgentEndpoint = ""
@@ -30,7 +29,6 @@ for ($i = 0; $i -lt $args.Count; $i++) {
         "--install-runtime-identity" { $RuntimeIdentity = $args[++$i]; continue }
         "--uninstall" { $UninstallOnly = $true; continue }
         "--install-rescue" { $InstallRescue = $true; continue }
-        "--install-rescue-firewall" { $InstallRescueFirewall = $true; continue }
         { $_ -in @("-e", "--endpoint") } {
             $AgentEndpoint = $args[$i + 1]
             $KomariArgs += $args[$i]
@@ -72,10 +70,6 @@ if (-not $IsAdministrator) {
 if ($RuntimeIdentity -eq "service-account" -and -not $RemoteControlDisabled) {
     $RemoteControlDisabled = $true
     $KomariArgs += "--disable-remote-control"
-}
-if ($InstallRescueFirewall -and -not $InstallRescue) {
-    Log-Error "--install-rescue-firewall requires --install-rescue."
-    exit 1
 }
 if ($InstallRescue) {
     if (-not $IsAdministrator) {
@@ -193,15 +187,47 @@ function Wait-ServiceAbsent([string]$Name) {
     throw "Service $Name could not be removed before reinstalling it"
 }
 
+function Restore-KomariNetworkIsolation([string]$RescueDirectory) {
+    $StatePath = Join-Path $RescueDirectory "network-isolation.json"
+    $State = $null
+    if (Test-Path $StatePath) {
+        try {
+            $State = Get-Content $StatePath -Raw | ConvertFrom-Json
+        }
+        catch {
+            throw "Cannot restore active Komari network isolation because $StatePath is invalid"
+        }
+    }
+    Get-NetFirewallRule -Group "Komari Rescue Isolation" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+    if ($State) {
+        foreach ($Profile in @($State.profiles)) {
+            if ($Profile.Name -notin @("Domain", "Private", "Public") -or
+                $Profile.DefaultInboundAction -notin @("Allow", "Block", "NotConfigured") -or
+                $Profile.DefaultOutboundAction -notin @("Allow", "Block", "NotConfigured")) {
+                throw "Cannot restore active Komari network isolation because its firewall profile state is invalid"
+            }
+            Set-NetFirewallProfile -Profile $Profile.Name `
+                -DefaultInboundAction $Profile.DefaultInboundAction `
+                -DefaultOutboundAction $Profile.DefaultOutboundAction
+        }
+        foreach ($RuleName in @($State.disabled_rules)) {
+            Get-NetFirewallRule -Name $RuleName -ErrorAction SilentlyContinue | Enable-NetFirewallRule
+        }
+        Remove-Item $StatePath -Force
+    }
+}
+
 if ($UninstallOnly) {
+	$RescueDirectory = Join-Path $env:ProgramData "Komari\Rescue\$ServiceName-rescue"
     foreach ($Name in @($ServiceName, "$ServiceName-rescue")) {
         Stop-Service -Name $Name -Force -ErrorAction SilentlyContinue
         & sc.exe delete $Name | Out-Null
     }
     Unregister-ScheduledTask -TaskName "$ServiceName-CurrentUser" -Confirm:$false -ErrorAction SilentlyContinue
+	Restore-KomariNetworkIsolation $RescueDirectory
     Get-NetFirewallRule -DisplayName "Komari Rescue Helper" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
     Remove-Item $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item (Join-Path $env:ProgramData "Komari\Rescue\$ServiceName-rescue") -Recurse -Force -ErrorAction SilentlyContinue
+	Remove-Item $RescueDirectory -Recurse -Force -ErrorAction SilentlyContinue
     Log-Success "Komari Agent uninstalled."
     exit 0
 }
@@ -258,6 +284,7 @@ if ($IsAdministrator) {
     }
     Get-NetFirewallRule -DisplayName "Komari Rescue Helper" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
     $PreviousRescueDir = Join-Path $env:ProgramData "Komari\Rescue\$RescueServiceName"
+	Restore-KomariNetworkIsolation $PreviousRescueDir
     Remove-Item $PreviousRescueDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
@@ -316,14 +343,12 @@ if ($InstallRescue) {
     New-Item -ItemType Directory -Path $RescueDir -Force | Out-Null
     $RescuePath = Join-Path $RescueDir "komari-agent-rescue.exe"
     $RescueConfigPath = Join-Path $RescueDir "rescue-helper.json"
-    $FirewallMarker = Join-Path $RescueDir "rescue-firewall-managed"
     $RescueFile = "komari-agent-rescue-windows-$Arch.exe"
     Invoke-WebRequest -Uri (Get-ReleaseUrl $Version $RescueFile) -OutFile $RescuePath -UseBasicParsing
     $RescueConfig = @{
         Endpoint = $AgentEndpoint
         Token = $AgentToken
         IgnoreUnsafeCert = $IgnoreUnsafeCert
-        FirewallConfigured = $InstallRescueFirewall
         InstanceIDPath = (Join-Path $RescueDir "rescue-instance")
         Action = @{
             AgentPath = $AgentPath
@@ -331,17 +356,13 @@ if ($InstallRescue) {
             ServiceName = $ServiceName
             RuntimeIdentity = $RuntimeIdentity
             RuntimeUser = $(if ($RuntimeIdentity -eq "service-account") { $ServiceAccount } else { "LocalSystem" })
-            FirewallMarker = $FirewallMarker
+            ControlPlaneURL = $AgentEndpoint
+            IsolationStatePath = (Join-Path $RescueDir "network-isolation.json")
         }
     }
     [IO.File]::WriteAllText($RescueConfigPath, ($RescueConfig | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding($false)))
     & icacls.exe $RescueDir /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" | Out-Null
     Assert-NativeCommand "Restricting access to $RescueDir"
-    if ($InstallRescueFirewall) {
-        Get-NetFirewallRule -DisplayName "Komari Rescue Helper" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
-        New-NetFirewallRule -DisplayName "Komari Rescue Helper" -Direction Outbound -Action Allow -Program $RescuePath -Protocol TCP -RemotePort 443 | Out-Null
-        New-Item -ItemType File -Path $FirewallMarker -Force | Out-Null
-    }
     $RescueArguments = Join-Arguments @("--config", $RescueConfigPath)
     & $Nssm install $RescueServiceName $RescuePath | Out-Null
     Assert-NativeCommand "Installing service $RescueServiceName"

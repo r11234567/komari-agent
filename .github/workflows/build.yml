@@ -39,7 +39,7 @@ jobs:
         run: '[scriptblock]::Create((Get-Content ./install.ps1 -Raw)) | Out-Null'
 
       - name: Verify pinned protocol dependency
-        run: go list -m github.com/r11234567/komari-proto | grep -Fx 'github.com/r11234567/komari-proto v0.1.12'
+        run: go list -m github.com/r11234567/komari-proto | grep -Fx 'github.com/r11234567/komari-proto v0.1.13'
 
       - name: Run transport and runtime contract tests
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'

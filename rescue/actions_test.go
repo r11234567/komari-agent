@@ -22,6 +22,20 @@ func TestExecuteActionRejectsUnspecifiedAction(t *testing.T) {
 	}
 }
 
+func TestExecuteActionRejectsDeprecatedActions(t *testing.T) {
+	for _, action := range []rescuev1.RescueAction{
+		rescuev1.RescueAction_RESCUE_ACTION_VERIFY_INSTALLATION,
+		rescuev1.RescueAction_RESCUE_ACTION_RESTORE_LAST_CONFIG,
+		rescuev1.RescueAction_RESCUE_ACTION_ROLLBACK_RUNTIME_SNAPSHOT,
+		rescuev1.RescueAction_RESCUE_ACTION_REPAIR_FIREWALL,
+		rescuev1.RescueAction_RESCUE_ACTION_RESTART_AGENT,
+	} {
+		if _, err := ExecuteAction(context.Background(), ActionConfig{}, action, nil); err == nil || !strings.Contains(err.Error(), "unsupported rescue action") {
+			t.Errorf("ExecuteAction(%s) error = %v, want unsupported action rejection", action, err)
+		}
+	}
+}
+
 func TestNormalizeEndpointRejectsNonHTTPTransport(t *testing.T) {
 	if _, err := normalizeEndpoint("file:///tmp/socket"); err == nil {
 		t.Fatal("normalizeEndpoint() accepted a non-HTTP transport")

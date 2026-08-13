@@ -8,11 +8,11 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+
+	rescuev1 "github.com/r11234567/komari-proto/gen/go/komari/rescue/v1"
 )
 
 func isPrivileged() bool { return os.Geteuid() == 0 }
-
-func ensureRuntimeOwnership(string, ActionConfig) error { return nil }
 
 func platformCommand(ctx context.Context, name string, arguments ...string) ([]byte, []byte, error) {
 	command := exec.CommandContext(ctx, name, arguments...)
@@ -22,10 +22,20 @@ func platformCommand(ctx context.Context, name string, arguments ...string) ([]b
 	return stdout.Bytes(), stderr.Bytes(), err
 }
 
-func restartAgent(context.Context, ActionConfig) (ActionResult, error) {
-	return ActionResult{}, errors.New("rescue service restart is supported only on Linux and Windows")
+func unsupported() (ActionResult, error) {
+	return ActionResult{}, errors.New("the privileged rescue helper is supported only on Linux and Windows")
 }
 
-func repairFirewall(context.Context, ActionConfig) (ActionResult, error) {
-	return ActionResult{}, errors.New("rescue firewall repair is supported only on Linux and Windows")
+func machineDiagnostics(context.Context) (ActionResult, error)    { return unsupported() }
+func preparePowerAction(ActionConfig, bool) (ActionResult, error) { return unsupported() }
+func prepareAgentRestart(ActionConfig) (ActionResult, error)      { return unsupported() }
+func prepareInterfaceIsolation(ActionConfig, rescuev1.NetworkIsolationMode) (ActionResult, error) {
+	return unsupported()
+}
+func prepareControlPlaneIsolation(context.Context, ActionConfig) (ActionResult, error) {
+	return unsupported()
+}
+func restoreNetwork(context.Context, ActionConfig) (ActionResult, error) { return unsupported() }
+func networkIsolationStatus(ActionConfig) (rescuev1.NetworkIsolationMode, []string) {
+	return rescuev1.NetworkIsolationMode_NETWORK_ISOLATION_MODE_UNSPECIFIED, nil
 }

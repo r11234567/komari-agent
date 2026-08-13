@@ -31,24 +31,22 @@ const (
 )
 
 type Config struct {
-	Endpoint           string
-	Token              string
-	AgentID            string
-	InstanceIDPath     string
-	Version            string
-	IgnoreUnsafeCert   bool
-	FirewallConfigured bool
-	Action             ActionConfig
+	Endpoint         string
+	Token            string
+	AgentID          string
+	InstanceIDPath   string
+	Version          string
+	IgnoreUnsafeCert bool
+	Action           ActionConfig
 }
 
 type Helper struct {
-	client             rescuev1connect.RescueServiceClient
-	token              string
-	agentID            string
-	instanceID         string
-	version            string
-	firewallConfigured bool
-	action             ActionConfig
+	client     rescuev1connect.RescueServiceClient
+	token      string
+	agentID    string
+	instanceID string
+	version    string
+	action     ActionConfig
 }
 
 func New(config Config) (*Helper, error) {
@@ -73,8 +71,7 @@ func New(config Config) (*Helper, error) {
 	return &Helper{
 		client: rescuev1connect.NewRescueServiceClient(&http.Client{Transport: transport}, baseURL),
 		token:  strings.TrimSpace(config.Token), agentID: strings.TrimSpace(config.AgentID),
-		instanceID: instanceID, version: config.Version, firewallConfigured: config.FirewallConfigured,
-		action: config.Action,
+		instanceID: instanceID, version: config.Version, action: config.Action,
 	}, nil
 }
 
@@ -174,10 +171,16 @@ func (h *Helper) execute(parent context.Context, assignment *rescuev1.RescueAssi
 		}
 	}
 	output := finalOutput(result, state)
-	return h.reportEvent(parent, &rescuev1.RescueEvent{
+	if err := h.reportEvent(parent, &rescuev1.RescueEvent{
 		SessionId: session.SessionId, Sequence: 1, OccurredAt: timestamppb.Now(), State: state,
 		Stream: rescuev1.RescueOutputStream_RESCUE_OUTPUT_STREAM_STDOUT, Output: output, Error: detail,
-	})
+	}); err != nil {
+		return err
+	}
+	if state == commonv1.OperationState_OPERATION_STATE_SUCCEEDED && result.AfterReport != nil {
+		return result.AfterReport(parent)
+	}
+	return nil
 }
 
 func finalOutput(result ActionResult, state commonv1.OperationState) []byte {
@@ -231,9 +234,10 @@ func (h *Helper) reportStatus(parent context.Context, statusErr error) error {
 	defer cancel()
 	status := &rescuev1.RescueHelperStatus{
 		Requested: true, Installed: true, GuardianRunning: true, HelperRunning: true,
-		FirewallConfigured: h.firewallConfigured, Version: h.version,
+		Version:          h.version,
 		HelperInstanceId: h.instanceID, ObservedAt: timestamppb.Now(),
 	}
+	status.NetworkIsolation, status.BlockedInterfaces = networkIsolationStatus(h.action)
 	if statusErr != nil {
 		status.Error = &commonv1.ErrorDetail{Code: "HELPER_CONNECTION", Message: truncateError(statusErr.Error())}
 	}
