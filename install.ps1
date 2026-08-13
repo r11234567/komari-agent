@@ -131,8 +131,22 @@ function Assert-NativeCommand([string]$Description) {
     }
 }
 
-function Wait-ServiceRunning([string]$Name) {
+function Start-ServiceAndWait([string]$Name) {
     $InstalledService = Get-Service -Name $Name -ErrorAction Stop
+    $InstalledService.Refresh()
+    if ($InstalledService.Status -eq [System.ServiceProcess.ServiceControllerStatus]::StopPending) {
+        $InstalledService.WaitForStatus(
+            [System.ServiceProcess.ServiceControllerStatus]::Stopped,
+            [TimeSpan]::FromSeconds(30)
+        )
+        $InstalledService.Refresh()
+    }
+    if ($InstalledService.Status -eq [System.ServiceProcess.ServiceControllerStatus]::Paused) {
+        Resume-Service -Name $Name -ErrorAction Stop
+    }
+    elseif ($InstalledService.Status -eq [System.ServiceProcess.ServiceControllerStatus]::Stopped) {
+        Start-Service -Name $Name -ErrorAction Stop
+    }
     $InstalledService.WaitForStatus(
         [System.ServiceProcess.ServiceControllerStatus]::Running,
         [TimeSpan]::FromSeconds(30)
@@ -227,9 +241,7 @@ else {
 Assert-NativeCommand "Configuring automatic startup for $ServiceName"
 & $Nssm set $ServiceName AppExit Default Restart | Out-Null
 Assert-NativeCommand "Configuring restart behavior for $ServiceName"
-& $Nssm start $ServiceName | Out-Null
-Assert-NativeCommand "Starting service $ServiceName"
-Wait-ServiceRunning $ServiceName
+Start-ServiceAndWait $ServiceName
 
 if ($InstallRescue) {
     $Nssm = Ensure-Nssm
@@ -272,9 +284,7 @@ if ($InstallRescue) {
     Assert-NativeCommand "Configuring automatic startup for $RescueServiceName"
     & $Nssm set $RescueServiceName AppExit Default Restart | Out-Null
     Assert-NativeCommand "Configuring restart behavior for $RescueServiceName"
-    & $Nssm start $RescueServiceName | Out-Null
-    Assert-NativeCommand "Starting service $RescueServiceName"
-    Wait-ServiceRunning $RescueServiceName
+    Start-ServiceAndWait $RescueServiceName
     Log-Success "Independent rescue helper installed as a LocalSystem service."
 }
 
