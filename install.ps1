@@ -273,7 +273,7 @@ Assert-NativeCommand "Configuring stderr logging for $ServiceName"
 & $Nssm set $ServiceName AppRotateFiles 1 | Out-Null
 Assert-NativeCommand "Configuring log rotation for $ServiceName"
 if ($RuntimeIdentity -eq "service-account") {
-    & sc.exe config $ServiceName obj= $ServiceAccount password= "" | Out-Null
+    & sc.exe config $ServiceName "obj= $ServiceAccount" | Out-Null
     Assert-NativeCommand "Configuring the $ServiceAccount service identity"
     & icacls.exe $InstallDir /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "${ServiceAccountSid}:(OI)(CI)M" | Out-Null
     Assert-NativeCommand "Granting the service account access to $InstallDir"
@@ -282,7 +282,7 @@ if ($RuntimeIdentity -eq "service-account") {
     Log-Success "Ordinary Agent installed as the non-login $ServiceAccount service account."
 }
 else {
-    & sc.exe config $ServiceName obj= LocalSystem password= "" | Out-Null
+    & sc.exe config $ServiceName "obj= LocalSystem" | Out-Null
     Assert-NativeCommand "Configuring the LocalSystem service identity"
     Log-Success "Ordinary Agent installed as a LocalSystem service."
 }
@@ -338,7 +338,7 @@ if ($InstallRescue) {
     Assert-NativeCommand "Installing service $RescueServiceName"
     & $Nssm set $RescueServiceName AppParameters $RescueArguments | Out-Null
     Assert-NativeCommand "Configuring rescue helper arguments"
-    & sc.exe config $RescueServiceName obj= LocalSystem password= "" | Out-Null
+    & sc.exe config $RescueServiceName "obj= LocalSystem" | Out-Null
     Assert-NativeCommand "Configuring the rescue service identity"
     & $Nssm set $RescueServiceName Start SERVICE_AUTO_START | Out-Null
     Assert-NativeCommand "Configuring automatic startup for $RescueServiceName"
