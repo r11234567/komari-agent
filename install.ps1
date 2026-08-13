@@ -250,19 +250,20 @@ if ($IsAdministrator) {
     Remove-Item $PreviousRescueDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+Remove-Item $AgentOutputLog, $AgentErrorLog -Force -ErrorAction SilentlyContinue
+
 $AgentFile = "komari-agent-windows-$Arch.exe"
 Invoke-WebRequest -Uri (Get-ReleaseUrl $Version $AgentFile) -OutFile $AgentPath -UseBasicParsing
-if ($KomariArgs -notcontains "--runtime-state-file") {
-    $KomariArgs += "--runtime-state-file"
-    $KomariArgs += $RuntimeStatePath
-}
 $AgentArgumentLine = Join-Arguments $KomariArgs
+$RuntimeStateEnvironment = "AGENT_RUNTIME_STATE_FILE=$RuntimeStatePath"
 
 $Nssm = Ensure-Nssm
 & $Nssm install $ServiceName $AgentPath | Out-Null
 Assert-NativeCommand "Installing service $ServiceName"
 & $Nssm set $ServiceName AppParameters $AgentArgumentLine | Out-Null
 Assert-NativeCommand "Configuring Agent arguments"
+& $Nssm set $ServiceName AppEnvironmentExtra $RuntimeStateEnvironment | Out-Null
+Assert-NativeCommand "Configuring the Agent runtime state environment"
 & $Nssm set $ServiceName AppDirectory $InstallDir | Out-Null
 Assert-NativeCommand "Configuring the working directory for $ServiceName"
 & $Nssm set $ServiceName AppStdout $AgentOutputLog | Out-Null
