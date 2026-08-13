@@ -131,6 +131,17 @@ function Assert-NativeCommand([string]$Description) {
     }
 }
 
+function Set-ServiceAccount([string]$Name, [string]$Account, [string]$NssmPath) {
+    & $NssmPath set $Name ObjectName $Account | Out-Null
+    Assert-NativeCommand "Configuring the $Account service identity"
+    $service = Get-CimInstance Win32_Service -Filter "Name='$Name'" -ErrorAction Stop
+    if ($service.StartName -ne $Account -and
+        -not ($Account -eq "LocalService" -and $service.StartName -eq "NT AUTHORITY\LocalService") -and
+        -not ($Account -eq "LocalSystem" -and $service.StartName -eq "LocalSystem")) {
+        throw "Service $Name account is $($service.StartName), expected $Account"
+    }
+}
+
 function Start-ServiceAndWait([string]$Name) {
     $InstalledService = Get-Service -Name $Name -ErrorAction Stop
     $InstalledService.Refresh()
@@ -273,8 +284,7 @@ Assert-NativeCommand "Configuring stderr logging for $ServiceName"
 & $Nssm set $ServiceName AppRotateFiles 1 | Out-Null
 Assert-NativeCommand "Configuring log rotation for $ServiceName"
 if ($RuntimeIdentity -eq "service-account") {
-    & sc.exe config $ServiceName "obj= $ServiceAccount" | Out-Null
-    Assert-NativeCommand "Configuring the $ServiceAccount service identity"
+    Set-ServiceAccount $ServiceName "LocalService" $Nssm
     & icacls.exe $InstallDir /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "${ServiceAccountSid}:(OI)(CI)M" | Out-Null
     Assert-NativeCommand "Granting the service account access to $InstallDir"
     & icacls.exe $RuntimeStateDir /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "${ServiceAccountSid}:(OI)(CI)M" | Out-Null
@@ -282,8 +292,7 @@ if ($RuntimeIdentity -eq "service-account") {
     Log-Success "Ordinary Agent installed as the non-login $ServiceAccount service account."
 }
 else {
-    & sc.exe config $ServiceName "obj= LocalSystem" | Out-Null
-    Assert-NativeCommand "Configuring the LocalSystem service identity"
+    Set-ServiceAccount $ServiceName "LocalSystem" $Nssm
     Log-Success "Ordinary Agent installed as a LocalSystem service."
 }
 & $Nssm set $ServiceName Start SERVICE_AUTO_START | Out-Null
@@ -338,8 +347,7 @@ if ($InstallRescue) {
     Assert-NativeCommand "Installing service $RescueServiceName"
     & $Nssm set $RescueServiceName AppParameters $RescueArguments | Out-Null
     Assert-NativeCommand "Configuring rescue helper arguments"
-    & sc.exe config $RescueServiceName "obj= LocalSystem" | Out-Null
-    Assert-NativeCommand "Configuring the rescue service identity"
+    Set-ServiceAccount $RescueServiceName "LocalSystem" $Nssm
     & $Nssm set $RescueServiceName Start SERVICE_AUTO_START | Out-Null
     Assert-NativeCommand "Configuring automatic startup for $RescueServiceName"
     & $Nssm set $RescueServiceName AppExit Default Restart | Out-Null
