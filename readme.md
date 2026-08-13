@@ -75,6 +75,8 @@ export AGENT_TOKEN="your-token"
 
 Linux 默认创建不可登录的专用 `komari` 服务账号，macOS 默认创建隐藏且不可登录的 `_komari` 服务账号；Windows 默认使用不可交互登录的 `NT SERVICE\\komari-agent` 虚拟服务账号。Docker 镜像固定以容器内的非 root `komari` 用户运行。专用服务账号无法执行需要 root 或管理员权限的远程控制操作；只有显式指定 `--install-runtime-identity root-or-administrator` 才以特权账号运行。
 
+Linux systemd 安装仅向普通 Agent 服务授予回程线路 ICMP 探测所需的 `CAP_NET_RAW`，不会授予 root 权限。Docker 仍以非 root 用户运行，启用回程线路监测时需添加 `--cap-add NET_RAW`；未提供该能力时，Agent 会向主控回报明确的探测错误，不影响指标上报和在线状态。
+
 Linux/macOS 卸载：
 
 ```bash

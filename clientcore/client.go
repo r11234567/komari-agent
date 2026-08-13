@@ -7,10 +7,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -19,11 +21,14 @@ import (
 	"github.com/komari-monitor/komari-agent/core/runtimeconfig"
 	"github.com/komari-monitor/komari-agent/dnsresolver"
 	"github.com/komari-monitor/komari-agent/monitoring"
+	"github.com/komari-monitor/komari-agent/server"
 	commonv1 "github.com/r11234567/komari-proto/gen/go/komari/common/v1"
 	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
 	configv1connect "github.com/r11234567/komari-proto/gen/go/komari/config/v1/configv1connect"
 	metricsv1 "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1"
 	metricsv1connect "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1/metricsv1connect"
+	networkv1 "github.com/r11234567/komari-proto/gen/go/komari/network/v1"
+	networkv1connect "github.com/r11234567/komari-proto/gen/go/komari/network/v1/networkv1connect"
 	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
 	reportv1connect "github.com/r11234567/komari-proto/gen/go/komari/report/v1/reportv1connect"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -40,6 +45,7 @@ type Client struct {
 	config   configv1connect.ConfigServiceClient
 	report   reportv1connect.AgentReportServiceClient
 	metrics  metricsv1connect.MetricsServiceClient
+	network  networkv1connect.NetworkProbeServiceClient
 	token    string
 	agentID  string
 	sequence atomic.Uint64
@@ -55,10 +61,12 @@ func New(config *flags_pkg.Config, store *runtimeconfig.Store) (*Client, error) 
 		return nil, err
 	}
 	httpClient := dnsresolver.GetHTTPClientWithPreference(requestDeadline, config.PreferIPVersion)
+	networkHTTPClient := dnsresolver.GetHTTPClientWithPreference(35*time.Second, config.PreferIPVersion)
 	return &Client{
 		config:  configv1connect.NewConfigServiceClient(httpClient, baseURL),
 		report:  reportv1connect.NewAgentReportServiceClient(httpClient, baseURL),
 		metrics: metricsv1connect.NewMetricsServiceClient(httpClient, baseURL),
+		network: networkv1connect.NewNetworkProbeServiceClient(networkHTTPClient, baseURL),
 		token:   config.Token, store: store,
 	}, nil
 }
@@ -70,6 +78,17 @@ func (c *Client) Run(ctx context.Context) error {
 	if err := c.SubmitReport(ctx); err != nil {
 		return classify(err)
 	}
+	probeCtx, stopProbes := context.WithCancel(ctx)
+	var probes sync.WaitGroup
+	probes.Add(1)
+	go func() {
+		defer probes.Done()
+		c.runReturnRouteProbes(probeCtx)
+	}()
+	defer func() {
+		stopProbes()
+		probes.Wait()
+	}()
 	for {
 		if err := c.SubmitMetrics(ctx); err != nil {
 			return classify(err)
@@ -88,6 +107,57 @@ func (c *Client) Run(ctx context.Context) error {
 		if err := c.SyncConfig(ctx); err != nil {
 			return classify(err)
 		}
+	}
+}
+
+func (c *Client) runReturnRouteProbes(ctx context.Context) {
+	for ctx.Err() == nil {
+		leaseCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		req := connect.NewRequest(&networkv1.LeaseReturnRouteProbeRequest{AgentId: c.agentID})
+		c.authorize(req.Header())
+		response, err := c.network.LeaseReturnRouteProbe(leaseCtx, req)
+		cancel()
+		if err != nil {
+			var connectErr *connect.Error
+			if errors.As(err, &connectErr) && (connectErr.Code() == connect.CodeUnimplemented || connectErr.Code() == connect.CodeNotFound) {
+				return
+			}
+			if !waitRetry(ctx) {
+				return
+			}
+			continue
+		}
+		assignment := response.Msg.Assignment
+		if assignment == nil {
+			continue
+		}
+		hops, probeErr := server.ProbeReturnRoute(ctx, assignment)
+		result := &networkv1.SubmitReturnRouteProbeResultRequest{
+			AgentId: c.agentID, AssignmentId: assignment.AssignmentId, TaskId: assignment.TaskId,
+			Hops: hops, FinishedAt: timestamppb.Now(),
+		}
+		if probeErr != nil {
+			result.Error = probeErr.Error()
+		}
+		reportCtx, reportCancel := context.WithTimeout(ctx, requestDeadline)
+		report := connect.NewRequest(result)
+		c.authorize(report.Header())
+		_, reportErr := c.network.SubmitReturnRouteProbeResult(reportCtx, report)
+		reportCancel()
+		if reportErr != nil {
+			log.Printf("Failed to submit return route result: %v", reportErr)
+		}
+	}
+}
+
+func waitRetry(ctx context.Context) bool {
+	timer := time.NewTimer(time.Duration(max(flags_pkg.GlobalConfig.ReconnectInterval, 1)) * time.Second)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 

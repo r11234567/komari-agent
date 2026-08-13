@@ -60,6 +60,7 @@ func detect(remoteControlEnabled bool, privilege reportv1.PrivilegeMode, privile
 		ServiceControl:    service,
 		Execution:         execution,
 		Webssh:            webssh,
+		ReturnRouteProbe:  available(),
 	}
 	if runtime.GOOS != "linux" && runtime.GOOS != "windows" {
 		result.ServiceControl = limited("service control capability is platform-dependent")

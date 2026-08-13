@@ -8,17 +8,19 @@ import (
 )
 
 const (
-	Version               = "2.0"
-	MethodAgentReport     = "agent.report"
-	MethodAgentBasicInfo  = "agent.basicInfo"
-	MethodAgentPingResult = "agent.pingResult"
-	MethodAgentTaskResult = "agent.taskResult"
-	MethodAgentExec       = "agent.exec"
-	MethodAgentPing       = "agent.ping"
-	MethodAgentMessage    = "agent.message"
-	MethodAgentEvent      = "agent.event"
-	MethodAgentTerminal   = "agent.terminal.request"
-	MethodAgentPull       = "agent.pull"
+	Version                = "2.0"
+	MethodAgentReport      = "agent.report"
+	MethodAgentBasicInfo   = "agent.basicInfo"
+	MethodAgentPingResult  = "agent.pingResult"
+	MethodAgentRouteResult = "agent.routeResult"
+	MethodAgentTaskResult  = "agent.taskResult"
+	MethodAgentExec        = "agent.exec"
+	MethodAgentPing        = "agent.ping"
+	MethodAgentRoute       = "agent.route"
+	MethodAgentMessage     = "agent.message"
+	MethodAgentEvent       = "agent.event"
+	MethodAgentTerminal    = "agent.terminal.request"
+	MethodAgentPull        = "agent.pull"
 )
 
 type Request struct {
@@ -54,6 +56,29 @@ type EventResult struct {
 	Events []Event `json:"events,omitempty"`
 }
 
+type RouteParams struct {
+	TaskID    uint   `json:"task_id"`
+	Protocol  string `json:"protocol"`
+	Target    string `json:"target"`
+	IPVersion int    `json:"ip_version"`
+	MaxHops   int    `json:"max_hops"`
+}
+
+type RouteHop struct {
+	TTL       int     `json:"ttl"`
+	IP        string  `json:"ip,omitempty"`
+	LatencyMS float64 `json:"latency_ms,omitempty"`
+	Timeout   bool    `json:"timeout,omitempty"`
+}
+
+func BuildRouteResultPayload(task RouteParams, hops []RouteHop, probeError string, finishedAt time.Time) interface{} {
+	return Request{JSONRPC: Version, Method: MethodAgentRouteResult, Params: map[string]interface{}{
+		"task_id": task.TaskID, "protocol": task.Protocol, "target": task.Target,
+		"ip_version": task.IPVersion, "hops": hops, "error": probeError,
+		"finished_at": finishedAt.Format(time.RFC3339Nano),
+	}}
+}
+
 func NewNotification(method string, params interface{}) []byte {
 	payload, _ := json.Marshal(Request{JSONRPC: Version, Method: method, Params: params})
 	return payload
@@ -65,11 +90,11 @@ func NewRequest(id interface{}, method string, params interface{}) []byte {
 }
 
 func BuildReportPayload(report v1.ReportPayload) []byte {
-	return NewNotification(MethodAgentReport, reportParams{Report: json.RawMessage(report)})
+	return NewNotification(MethodAgentReport, reportParams{Report: json.RawMessage(report), Capabilities: agentCapabilities()})
 }
 
 func BuildReportRequest(id interface{}, report v1.ReportPayload, ackEventIDs []string) []byte {
-	return NewRequest(id, MethodAgentReport, reportParams{Report: json.RawMessage(report), AckEventIDs: ackEventIDs})
+	return NewRequest(id, MethodAgentReport, reportParams{Report: json.RawMessage(report), AckEventIDs: ackEventIDs, Capabilities: agentCapabilities()})
 }
 
 func BuildBasicInfoPayload(info map[string]interface{}) []byte {
@@ -77,8 +102,13 @@ func BuildBasicInfoPayload(info map[string]interface{}) []byte {
 }
 
 type reportParams struct {
-	Report      json.RawMessage `json:"report"`
-	AckEventIDs []string        `json:"ack_event_ids,omitempty"`
+	Report       json.RawMessage `json:"report"`
+	AckEventIDs  []string        `json:"ack_event_ids,omitempty"`
+	Capabilities []string        `json:"capabilities,omitempty"`
+}
+
+func agentCapabilities() []string {
+	return []string{"exec", "ping", "route", "message", "event", "terminal"}
 }
 
 func BuildPingResultPayload(taskID uint, pingType string, value int, finishedAt time.Time) interface{} {

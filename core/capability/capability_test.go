@@ -14,6 +14,9 @@ func TestRemoteControlCapabilityRespectsRuntimeSetting(t *testing.T) {
 	if capabilities.RemoteControl.Limitation == "" {
 		t.Fatal("disabled remote control requires a limitation")
 	}
+	if !capabilities.ReturnRouteProbe.Available {
+		t.Fatal("return-route probing must remain independent from remote control")
+	}
 }
 
 func TestNonPrivilegedCapabilityRejectsRemoteControl(t *testing.T) {

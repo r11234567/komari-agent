@@ -22,5 +22,6 @@ USER komari
 ENTRYPOINT ["/app/komari-agent"]
 # 运行时请指定参数
 # Please specify parameters at runtime.
-# eg: docker run komari-agent -e example.com -t token
+# Return-route probing needs the narrowly scoped NET_RAW capability:
+# docker run --cap-add NET_RAW komari-agent -e example.com -t token
 CMD ["--help"]

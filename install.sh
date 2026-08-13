@@ -648,6 +648,8 @@ if [ "$init_system" = "nixos" ]; then
     echo -e "${CYAN}    WorkingDirectory = \"${target_dir}\";${NC}"
     echo -e "${CYAN}    Restart = \"always\";${NC}"
     echo -e "${CYAN}    User = \"${service_user}\";${NC}"
+    echo -e "${CYAN}    AmbientCapabilities = [ \"CAP_NET_RAW\" ];${NC}"
+    echo -e "${CYAN}    CapabilityBoundingSet = [ \"CAP_NET_RAW\" ];${NC}"
     echo -e "${CYAN}  };${NC}"
     echo -e "${CYAN}};${NC}"
     echo ""
@@ -696,6 +698,9 @@ ExecStart=${komari_agent_path} ${komari_args}
 WorkingDirectory=${target_dir}
 Restart=always
 User=${service_user}
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target

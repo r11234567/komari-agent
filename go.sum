@@ -56,6 +56,10 @@ github.com/r11234567/komari-proto v0.1.4 h1:74PgzbT7QEt6wVjVV3ELPRLVSyenQJJGU+tg
 github.com/r11234567/komari-proto v0.1.4/go.mod h1:GkpdDO6JqRdEN04VG8b6amDJMCo9E2RqL+UA8yxvsFI=
 github.com/r11234567/komari-proto v0.1.7 h1:OIYmebyiFtisM3CBdIMbZzD6lYH1McPM9fX3R0vxWng=
 github.com/r11234567/komari-proto v0.1.7/go.mod h1:GkpdDO6JqRdEN04VG8b6amDJMCo9E2RqL+UA8yxvsFI=
+github.com/r11234567/komari-proto v0.1.11 h1:Z+ijrElzV4i5eyeL5H6SlrR/zbpSvlw+MbfvYi5TYwI=
+github.com/r11234567/komari-proto v0.1.11/go.mod h1:GkpdDO6JqRdEN04VG8b6amDJMCo9E2RqL+UA8yxvsFI=
+github.com/r11234567/komari-proto v0.1.12 h1:vi340N3IxiFaSFaHiJ1hEFhHTZn/UEe5TeT89+VWKMc=
+github.com/r11234567/komari-proto v0.1.12/go.mod h1:GkpdDO6JqRdEN04VG8b6amDJMCo9E2RqL+UA8yxvsFI=
 github.com/rhysd/go-github-selfupdate v1.2.3 h1:iaa+J202f+Nc+A8zi75uccC8Wg3omaM7HDeimXA22Ag=
 github.com/rhysd/go-github-selfupdate v1.2.3/go.mod h1:mp/N8zj6jFfBQy/XMYoWsmfzxazpPAODuqarmPDe2Rg=
 github.com/russross/blackfriday/v2 v2.1.0/go.mod h1:+Rmxgy9KzJVeS9/2gXHxylqXiyQDYRxCVz55jmeOWTM=
