@@ -29,6 +29,8 @@ var (
 	v2SeenEvents  = make(map[string]struct{})
 )
 
+var legacyTransportRetryInterval = 2 * time.Minute
+
 func EstablishWebSocketConnection() {
 	var conn *ws.SafeConn
 	defer func() {
@@ -45,6 +47,9 @@ func EstablishWebSocketConnection() {
 
 	heartbeatTicker := time.NewTicker(30 * time.Second)
 	defer heartbeatTicker.Stop()
+
+	connectRetryTicker := time.NewTicker(legacyTransportRetryInterval)
+	defer connectRetryTicker.Stop()
 
 	nextProtocol := requestedProtocolVersion()
 	activeProtocol := 0
@@ -139,6 +144,11 @@ func EstablishWebSocketConnection() {
 						nextProtocol = 2
 					}
 				}
+			}
+		case <-connectRetryTicker.C:
+			if conn != nil {
+				log.Printf("Legacy v%d compatibility session expired; retrying Connect transport", activeProtocol)
+				return
 			}
 		case <-readDone:
 			log.Println("WebSocket disconnected")

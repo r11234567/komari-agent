@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"testing"
+	"time"
 )
 
 func preserveProtocolFallbackState(t *testing.T) {
@@ -80,5 +81,11 @@ func TestV2SuccessResetsProtocolFailureCount(t *testing.T) {
 	resetV2ProtocolFailures(2)
 	if shouldFallbackToV1(2, err) {
 		t.Fatal("success did not reset v2 protocol failure count")
+	}
+}
+
+func TestLegacyTransportRetryIntervalIsBounded(t *testing.T) {
+	if legacyTransportRetryInterval <= 0 || legacyTransportRetryInterval > 5*time.Minute {
+		t.Fatalf("legacy transport retry interval = %s", legacyTransportRetryInterval)
 	}
 }
