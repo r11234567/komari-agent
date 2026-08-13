@@ -1,5 +1,7 @@
 # Windows PowerShell installation script for Komari Agent.
 
+$ErrorActionPreference = "Stop"
+
 function Log-Info { param([string]$Message) Write-Host $Message -ForegroundColor Cyan }
 function Log-Success { param([string]$Message) Write-Host $Message -ForegroundColor Green }
 function Log-Error { param([string]$Message) Write-Host "[ERROR] $Message" -ForegroundColor Red }
@@ -123,6 +125,24 @@ function Join-Arguments([string[]]$Values) {
     return (($Values | ForEach-Object { Quote-Argument $_ }) -join ' ')
 }
 
+function Assert-NativeCommand([string]$Description) {
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Description failed with exit code $LASTEXITCODE"
+    }
+}
+
+function Wait-ServiceRunning([string]$Name) {
+    $InstalledService = Get-Service -Name $Name -ErrorAction Stop
+    $InstalledService.WaitForStatus(
+        [System.ServiceProcess.ServiceControllerStatus]::Running,
+        [TimeSpan]::FromSeconds(30)
+    )
+    $InstalledService.Refresh()
+    if ($InstalledService.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Running) {
+        throw "Service $Name did not reach the Running state (status: $($InstalledService.Status))"
+    }
+}
+
 if ($UninstallOnly) {
     foreach ($Name in @($ServiceName, "$ServiceName-rescue")) {
         Stop-Service -Name $Name -Force -ErrorAction SilentlyContinue
@@ -161,7 +181,8 @@ $AgentPath = Join-Path $InstallDir "komari-agent.exe"
 $RuntimeStatePath = Join-Path $InstallDir "runtime-config.json"
 $UserTaskName = "$ServiceName-CurrentUser"
 $RescueServiceName = "$ServiceName-rescue"
-$ServiceAccount = "NT SERVICE\$ServiceName"
+$ServiceAccount = "NT AUTHORITY\LocalService"
+$ServiceAccountSid = "*S-1-5-19"
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 
 $ExistingTask = Get-ScheduledTask -TaskName $UserTaskName -ErrorAction SilentlyContinue
@@ -189,18 +210,26 @@ $AgentArgumentLine = Join-Arguments $KomariArgs
 
 $Nssm = Ensure-Nssm
 & $Nssm install $ServiceName $AgentPath $AgentArgumentLine | Out-Null
+Assert-NativeCommand "Installing service $ServiceName"
 if ($RuntimeIdentity -eq "service-account") {
-    & $Nssm set $ServiceName ObjectName $ServiceAccount "" | Out-Null
-    & icacls.exe $InstallDir /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" "${ServiceAccount}:(OI)(CI)M" | Out-Null
+    & $Nssm set $ServiceName ObjectName LocalService | Out-Null
+    Assert-NativeCommand "Configuring the $ServiceAccount service identity"
+    & icacls.exe $InstallDir /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "${ServiceAccountSid}:(OI)(CI)M" | Out-Null
+    Assert-NativeCommand "Granting the service account access to $InstallDir"
     Log-Success "Ordinary Agent installed as the non-login $ServiceAccount service account."
 }
 else {
     & $Nssm set $ServiceName ObjectName LocalSystem | Out-Null
+    Assert-NativeCommand "Configuring the LocalSystem service identity"
     Log-Success "Ordinary Agent installed as a LocalSystem service."
 }
 & $Nssm set $ServiceName Start SERVICE_AUTO_START | Out-Null
+Assert-NativeCommand "Configuring automatic startup for $ServiceName"
 & $Nssm set $ServiceName AppExit Default Restart | Out-Null
+Assert-NativeCommand "Configuring restart behavior for $ServiceName"
 & $Nssm start $ServiceName | Out-Null
+Assert-NativeCommand "Starting service $ServiceName"
+Wait-ServiceRunning $ServiceName
 
 if ($InstallRescue) {
     $Nssm = Ensure-Nssm
@@ -227,7 +256,8 @@ if ($InstallRescue) {
         }
     }
     [IO.File]::WriteAllText($RescueConfigPath, ($RescueConfig | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding($false)))
-    & icacls.exe $RescueDir /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" | Out-Null
+    & icacls.exe $RescueDir /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" | Out-Null
+    Assert-NativeCommand "Restricting access to $RescueDir"
     if ($InstallRescueFirewall) {
         Get-NetFirewallRule -DisplayName "Komari Rescue Helper" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
         New-NetFirewallRule -DisplayName "Komari Rescue Helper" -Direction Outbound -Action Allow -Program $RescuePath -Protocol TCP -RemotePort 443 | Out-Null
@@ -235,10 +265,16 @@ if ($InstallRescue) {
     }
     $RescueArguments = Join-Arguments @("--config", $RescueConfigPath)
     & $Nssm install $RescueServiceName $RescuePath $RescueArguments | Out-Null
+    Assert-NativeCommand "Installing service $RescueServiceName"
     & $Nssm set $RescueServiceName ObjectName LocalSystem | Out-Null
+    Assert-NativeCommand "Configuring the rescue service identity"
     & $Nssm set $RescueServiceName Start SERVICE_AUTO_START | Out-Null
+    Assert-NativeCommand "Configuring automatic startup for $RescueServiceName"
     & $Nssm set $RescueServiceName AppExit Default Restart | Out-Null
+    Assert-NativeCommand "Configuring restart behavior for $RescueServiceName"
     & $Nssm start $RescueServiceName | Out-Null
+    Assert-NativeCommand "Starting service $RescueServiceName"
+    Wait-ServiceRunning $RescueServiceName
     Log-Success "Independent rescue helper installed as a LocalSystem service."
 }
 
