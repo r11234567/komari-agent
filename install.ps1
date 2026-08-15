@@ -99,11 +99,18 @@ switch ($env:PROCESSOR_ARCHITECTURE) {
 
 function Get-ReleaseVersion {
     if (-not [string]::IsNullOrWhiteSpace($InstallVersion)) { return $InstallVersion }
-    return (Invoke-RestMethod -Uri "https://api.github.com/repos/$ReleaseRepository/releases/latest" -UseBasicParsing).tag_name
+    # GitHub's latest/download redirect does not consume the unauthenticated
+    # REST API quota shared by every machine behind the same public address.
+    return "latest"
 }
 
 function Get-ReleaseUrl([string]$Version, [string]$FileName) {
-    $Url = "https://github.com/$ReleaseRepository/releases/download/$Version/$FileName"
+    if ($Version -eq "latest") {
+        $Url = "https://github.com/$ReleaseRepository/releases/latest/download/$FileName"
+    }
+    else {
+        $Url = "https://github.com/$ReleaseRepository/releases/download/$Version/$FileName"
+    }
     if (-not [string]::IsNullOrWhiteSpace($GitHubProxy)) {
         return "$($GitHubProxy.TrimEnd('/'))/$Url"
     }
