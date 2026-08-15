@@ -154,7 +154,10 @@ func (c *Client) Run(ctx context.Context) error {
 			log.Printf("Failed to publish Agent shutdown event: %v", err)
 		}
 	}()
-	return c.runMetricStream(ctx)
+	// Periodic metric batches are unary by default. Connect bidi streams require
+	// end-to-end HTTP/2 support and can stall behind otherwise valid HTTP/3 or
+	// HTTP/1.1 reverse proxies, while unary Connect works across all transports.
+	return c.runUnaryMetricLoop(ctx)
 }
 
 func (c *Client) runAgentEvents(ctx context.Context) {
