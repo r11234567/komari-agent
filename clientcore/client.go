@@ -607,6 +607,11 @@ func (c *Client) runPingProbes(ctx context.Context) {
 		}
 		assignment := response.Msg.Assignment
 		if assignment == nil {
+			// A lease normally long-polls. If a proxy or server returns an empty
+			// lease immediately, avoid turning it into a busy request loop.
+			if !waitRetry(ctx) {
+				return
+			}
 			continue
 		}
 		timeout := 3 * time.Second
@@ -649,6 +654,9 @@ func (c *Client) runReturnRouteProbes(ctx context.Context) {
 		}
 		assignment := response.Msg.Assignment
 		if assignment == nil {
+			if !waitRetry(ctx) {
+				return
+			}
 			continue
 		}
 		hops, probeErr := server.ProbeReturnRoute(ctx, assignment)
