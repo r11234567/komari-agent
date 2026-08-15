@@ -15,6 +15,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
+	"github.com/komari-monitor/komari-agent/requestheaders"
 	commonv1 "github.com/r11234567/komari-proto/gen/go/komari/common/v1"
 	rescuev1 "github.com/r11234567/komari-proto/gen/go/komari/rescue/v1"
 	rescuev1connect "github.com/r11234567/komari-proto/gen/go/komari/rescue/v1/rescuev1connect"
@@ -31,22 +32,26 @@ const (
 )
 
 type Config struct {
-	Endpoint         string
-	Token            string
-	AgentID          string
-	InstanceIDPath   string
-	Version          string
-	IgnoreUnsafeCert bool
-	Action           ActionConfig
+	Endpoint             string
+	Token                string
+	AgentID              string
+	InstanceIDPath       string
+	Version              string
+	IgnoreUnsafeCert     bool
+	CFAccessClientID     string
+	CFAccessClientSecret string
+	Action               ActionConfig
 }
 
 type Helper struct {
-	client     rescuev1connect.RescueServiceClient
-	token      string
-	agentID    string
-	instanceID string
-	version    string
-	action     ActionConfig
+	client               rescuev1connect.RescueServiceClient
+	token                string
+	agentID              string
+	instanceID           string
+	version              string
+	cfAccessClientID     string
+	cfAccessClientSecret string
+	action               ActionConfig
 }
 
 func New(config Config) (*Helper, error) {
@@ -56,6 +61,9 @@ func New(config Config) (*Helper, error) {
 	}
 	if strings.TrimSpace(config.Token) == "" {
 		return nil, errors.New("Agent token is required")
+	}
+	if (strings.TrimSpace(config.CFAccessClientID) == "") != (strings.TrimSpace(config.CFAccessClientSecret) == "") {
+		return nil, errors.New("Cloudflare Access client ID and client secret must be configured together")
 	}
 	instancePath := strings.TrimSpace(config.InstanceIDPath)
 	if instancePath == "" {
@@ -72,7 +80,10 @@ func New(config Config) (*Helper, error) {
 	return &Helper{
 		client: rescuev1connect.NewRescueServiceClient(&http.Client{Transport: transport}, baseURL),
 		token:  strings.TrimSpace(config.Token), agentID: strings.TrimSpace(config.AgentID),
-		instanceID: instanceID, version: config.Version, action: config.Action,
+		instanceID: instanceID, version: config.Version,
+		cfAccessClientID:     strings.TrimSpace(config.CFAccessClientID),
+		cfAccessClientSecret: strings.TrimSpace(config.CFAccessClientSecret),
+		action:               config.Action,
 	}, nil
 }
 
@@ -254,7 +265,9 @@ func (h *Helper) reportStatus(parent context.Context, statusErr error) error {
 	return nil
 }
 
-func (h *Helper) authorize(header http.Header) { header.Set("Authorization", "Bearer "+h.token) }
+func (h *Helper) authorize(header http.Header) {
+	requestheaders.ApplyAgentAuthentication(header, h.token, h.cfAccessClientID, h.cfAccessClientSecret)
+}
 
 func normalizeEndpoint(endpoint string) (string, error) {
 	value := strings.TrimRight(strings.TrimSpace(endpoint), "/")

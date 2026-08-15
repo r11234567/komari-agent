@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari-agent/dnsresolver"
+	"github.com/komari-monitor/komari-agent/requestheaders"
 	"github.com/komari-monitor/komari-agent/utils"
 )
 
@@ -138,7 +139,7 @@ func registerWithAutoDiscovery() error {
 
 	// 设置请求头
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", flags.AutoDiscoveryKey))
+	requestheaders.ApplyAgentAuthentication(req.Header, flags.AutoDiscoveryKey, flags.CFAccessClientID, flags.CFAccessClientSecret)
 
 	// 发送请求
 	client := dnsresolver.GetHTTPClientWithPreference(30*time.Second, flags.PreferIPVersion)

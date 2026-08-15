@@ -176,6 +176,25 @@ func GetHTTPClientWithPreference(timeout time.Duration, preferIPVersion string) 
 	return getHTTPClient(timeout, normalizeIPVersionPreference(preferIPVersion))
 }
 
+// GetStreamingHTTPClientWithPreference keeps connection establishment bounded
+// without applying http.Client.Timeout to the complete lifetime of a Connect
+// stream. Stream deadlines and cancellation are owned by the request context.
+func GetStreamingHTTPClientWithPreference(preferIPVersion string) *http.Client {
+	preferIPVersion = normalizeIPVersionPreference(preferIPVersion)
+	key := httpClientKey{timeout: -1, ignoreUnsafeCert: flags.IgnoreUnsafeCert, preferIPVersion: preferIPVersion}
+	httpClientMu.Lock()
+	defer httpClientMu.Unlock()
+	if client := httpClients[key]; client != nil {
+		return client
+	}
+	client := &http.Client{Transport: buildTransportWithPreference(15*time.Second, &tls.Config{
+		// This is controlled by the explicit --ignore-unsafe-cert compatibility option.
+		InsecureSkipVerify: flags.IgnoreUnsafeCert, // #nosec G402 // lgtm[go/disabled-certificate-check]
+	}, preferIPVersion)}
+	httpClients[key] = client
+	return client
+}
+
 func getHTTPClient(timeout time.Duration, preferIPVersion string) *http.Client {
 	if timeout <= 0 {
 		timeout = 30 * time.Second

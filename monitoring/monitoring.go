@@ -183,6 +183,14 @@ func (data Report) Proto(agentID string, sequence uint64) *reportv1.AgentReport 
 	config := runtimeconfig.Current()
 	cpu := unit.CpuStaticInfo()
 	hostname, _ := os.Hostname()
+	ipv4, ipv6, _ := unit.GetIPAddress()
+	addresses := make([]string, 0, 2)
+	if ipv4 != "" {
+		addresses = append(addresses, ipv4)
+	}
+	if ipv6 != "" {
+		addresses = append(addresses, ipv6)
+	}
 	resources := &reportv1.ResourceUsage{
 		CpuPercent:           data.CPU.Usage,
 		MemoryUsedBytes:      data.Ram.Used,
@@ -190,6 +198,9 @@ func (data Report) Proto(agentID string, sequence uint64) *reportv1.AgentReport 
 		SwapUsedBytes:        data.Swap.Used,
 		SwapTotalBytes:       data.Swap.Total,
 		LoadAverage:          []float64{data.Load.Load1, data.Load.Load5, data.Load.Load15},
+		ProcessCount:         uint64(max(data.Process, 0)),
+		TcpConnectionCount:   uint64(max(data.Connections.TCP, 0)),
+		UdpConnectionCount:   uint64(max(data.Connections.UDP, 0)),
 	}
 	if data.Ram.Total > 0 {
 		resources.MemoryPercent = float64(data.Ram.Used) * 100 / float64(data.Ram.Total)
@@ -219,14 +230,17 @@ func (data Report) Proto(agentID string, sequence uint64) *reportv1.AgentReport 
 			Hostname: hostname, Os: unit.OSName(), Platform: runtime.GOOS,
 			KernelVersion: unit.KernelVersion(), Architecture: runtime.GOARCH,
 			CpuCount: uint32(max(cpu.CPUCores, 0)), MemoryTotalBytes: data.Ram.Total,
-			Uptime: durationpb.New(time.Duration(data.Uptime) * time.Second),
+			Uptime: durationpb.New(time.Duration(data.Uptime) * time.Second), CpuName: cpu.CPUName,
+			CpuPhysicalCount: uint32(max(cpu.CPUPhysicalCores, 0)), Virtualization: unit.Virtualized(),
 		},
 		Resources: resources,
 		NetworkInterfaces: []*reportv1.NetworkInterface{{
-			Name: "aggregate", BytesSent: data.Network.TotalUp, BytesReceived: data.Network.TotalDown,
+			Name: "aggregate", Addresses: addresses, BytesSent: data.Network.TotalUp, BytesReceived: data.Network.TotalDown,
+			BytesSentPerSecond: data.Network.Up, BytesReceivedPerSecond: data.Network.Down,
 		}},
 		Disks: []*reportv1.DiskInfo{{
 			MountPoint: "aggregate", TotalBytes: data.Disk.Total, UsedBytes: data.Disk.Used,
+			UsagePercent: percent(data.Disk.Used, data.Disk.Total),
 		}},
 		Metadata: &reportv1.AgentMetadata{
 			Version: update.CurrentVersion, Capabilities: capability.Detect(config.RemoteControlEnabled),
@@ -234,6 +248,13 @@ func (data Report) Proto(agentID string, sequence uint64) *reportv1.AgentReport 
 		},
 		DiagnosticMessage: data.Message,
 	}
+}
+
+func percent(used, total uint64) float64 {
+	if total == 0 {
+		return 0
+	}
+	return float64(used) * 100 / float64(total)
 }
 
 func saturatingSubtract(total, used uint64) uint64 {

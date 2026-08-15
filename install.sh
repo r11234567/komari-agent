@@ -46,6 +46,8 @@ uninstall_only=false
 rescue_enabled=false
 rescue_endpoint=""
 rescue_token=""
+cf_access_client_id=""
+cf_access_client_secret=""
 ignore_unsafe_cert=false
 service_user="root"
  
@@ -120,6 +122,16 @@ while [[ $# -gt 0 ]]; do
             komari_args="$komari_args $1 $2"
             shift 2
             ;;
+        --cf-access-client-id)
+            cf_access_client_id="$2"
+            komari_args="$komari_args $1 $2"
+            shift 2
+            ;;
+        --cf-access-client-secret)
+            cf_access_client_secret="$2"
+            komari_args="$komari_args $1 $2"
+            shift 2
+            ;;
         -u|--ignore-unsafe-cert)
             ignore_unsafe_cert=true
             komari_args="$komari_args $1"
@@ -136,6 +148,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if { [ -n "$cf_access_client_id" ] && [ -z "$cf_access_client_secret" ]; } || { [ -z "$cf_access_client_id" ] && [ -n "$cf_access_client_secret" ]; }; then
+    log_error "--cf-access-client-id and --cf-access-client-secret must be provided together"
+    exit 1
+fi
 
 case "$runtime_identity" in
     root-or-administrator)
@@ -861,9 +878,9 @@ install_rescue_helper() {
     else
         rescue_download_url="https://github.com/${release_repository}/releases/${rescue_download_path}/${rescue_file}"
     fi
-    case "${rescue_endpoint}${rescue_token}" in
+    case "${rescue_endpoint}${rescue_token}${cf_access_client_id}${cf_access_client_secret}" in
     *$'\n'*|*$'\r'*)
-        log_error "Rescue endpoint or token contains unsupported control characters"
+        log_error "Rescue endpoint or credentials contain unsupported control characters"
         exit 1
         ;;
     esac
@@ -884,6 +901,10 @@ install_rescue_helper() {
     {
 		printf 'KOMARI_RESCUE_ENDPOINT=%s\n' "$(systemd_env_value "$rescue_endpoint")"
 		printf 'KOMARI_RESCUE_TOKEN=%s\n' "$(systemd_env_value "$rescue_token")"
+		if [ -n "$cf_access_client_id" ]; then
+			printf 'KOMARI_RESCUE_CF_ACCESS_CLIENT_ID=%s\n' "$(systemd_env_value "$cf_access_client_id")"
+			printf 'KOMARI_RESCUE_CF_ACCESS_CLIENT_SECRET=%s\n' "$(systemd_env_value "$cf_access_client_secret")"
+		fi
 		printf 'KOMARI_RESCUE_AGENT_PATH=%s\n' "$(systemd_env_value "$komari_agent_path")"
 		printf 'KOMARI_RESCUE_RUNTIME_STATE_FILE=%s\n' "$(systemd_env_value "$runtime_state_path")"
 		printf 'KOMARI_RESCUE_AGENT_SERVICE_NAME=%s\n' "$(systemd_env_value "$service_name")"

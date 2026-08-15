@@ -51,6 +51,9 @@ var RootCmd = &cobra.Command{
 		if flags.PreferIPVersion != "" && flags.PreferIPVersion != "4" && flags.PreferIPVersion != "6" {
 			return fmt.Errorf("invalid --prefer-ip-version value %q: expected 4 or 6", flags.PreferIPVersion)
 		}
+		if (flags.CFAccessClientID == "") != (flags.CFAccessClientSecret == "") {
+			return errors.New("Cloudflare Access client ID and client secret must be configured together")
+		}
 		runtimeStore, err := runtimeconfig.New(runtimeconfig.FromFlags(flags), flags.RuntimeStateFile)
 		if err != nil {
 			return fmt.Errorf("failed to initialize runtime config: %w", err)
@@ -63,7 +66,6 @@ var RootCmd = &cobra.Command{
 			<-stopCtx.Done()
 			log.Printf("shutting down gracefully...")
 			netstatic.Stop()
-			os.Exit(0)
 		}()
 
 		if flags.ShowWarning {
@@ -130,7 +132,6 @@ var RootCmd = &cobra.Command{
 			}
 			go update.DoUpdateWorks()
 		}
-		go server.DoUploadBasicInfoWorks()
 		for {
 			connectClient, err := clientcore.New(flags, runtimeStore)
 			if err == nil {
@@ -139,7 +140,10 @@ var RootCmd = &cobra.Command{
 			if errors.Is(err, clientcore.ErrLegacyFallback) {
 				log.Printf("Connect endpoint unavailable; entering legacy v1/v2 compatibility transport: %v", err)
 				server.UpdateBasicInfo()
+				legacyCtx, stopLegacy := context.WithCancel(stopCtx)
+				go server.DoUploadBasicInfoWorks(legacyCtx)
 				server.EstablishWebSocketConnection()
+				stopLegacy()
 				continue
 			}
 			if err != nil {
@@ -198,6 +202,8 @@ func init() {
 	RootCmd.PersistentFlags().BoolVar(&flags.MemoryIncludeCache, "memory-include-cache", false, "Include cache/buffer in memory usage")
 	RootCmd.PersistentFlags().BoolVar(&flags.MemoryReportRawUsed, "memory-exclude-bcf", false, "Use \"raminfo.Used = v.Total - v.Free - v.Buffers - v.Cached\" calculation for memory usage")
 	RootCmd.PersistentFlags().StringVar(&flags.CustomDNS, "custom-dns", "", "Custom DNS server to use (e.g. 8.8.8.8, 114.114.114.114). By default, the program uses the system DNS resolver.")
+	RootCmd.PersistentFlags().StringVar(&flags.CFAccessClientID, "cf-access-client-id", "", "Cloudflare Access service-token Client ID")
+	RootCmd.PersistentFlags().StringVar(&flags.CFAccessClientSecret, "cf-access-client-secret", "", "Cloudflare Access service-token Client Secret")
 	RootCmd.PersistentFlags().BoolVar(&flags.EnableGPU, "enable-gpu", false, "Enable basic GPU monitoring")
 	RootCmd.PersistentFlags().BoolVar(&flags.DetailedGPU, "detailed-gpu", false, "Enable detailed GPU monitoring (requires --enable-gpu)")
 	RootCmd.PersistentFlags().BoolVar(&flags.LegacyDetailedGPU, "gpu", false, "Deprecated: enable detailed GPU monitoring")

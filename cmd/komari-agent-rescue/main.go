@@ -23,6 +23,8 @@ func main() {
 	flag.StringVar(&configFile, "config", "", "Restricted JSON helper configuration path")
 	flag.StringVar(&config.Endpoint, "endpoint", env("KOMARI_RESCUE_ENDPOINT", config.Endpoint), "Komari Connect endpoint")
 	flag.StringVar(&config.Token, "token", env("KOMARI_RESCUE_TOKEN", config.Token), "Agent API token")
+	flag.StringVar(&config.CFAccessClientID, "cf-access-client-id", env("KOMARI_RESCUE_CF_ACCESS_CLIENT_ID", config.CFAccessClientID), "Cloudflare Access service-token Client ID")
+	flag.StringVar(&config.CFAccessClientSecret, "cf-access-client-secret", env("KOMARI_RESCUE_CF_ACCESS_CLIENT_SECRET", config.CFAccessClientSecret), "Cloudflare Access service-token Client Secret")
 	flag.StringVar(&config.AgentID, "agent-id", env("KOMARI_RESCUE_AGENT_ID", config.AgentID), "Expected Agent ID (optional; authentication remains authoritative)")
 	flag.StringVar(&config.InstanceIDPath, "instance-id-file", env("KOMARI_RESCUE_INSTANCE_ID_FILE", config.InstanceIDPath), "Persistent helper instance ID path")
 	flag.BoolVar(&config.IgnoreUnsafeCert, "ignore-unsafe-cert", config.IgnoreUnsafeCert || envBool("KOMARI_RESCUE_IGNORE_UNSAFE_CERT"), "Ignore unsafe certificate errors")

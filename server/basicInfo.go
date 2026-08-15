@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log"
@@ -20,12 +21,18 @@ import (
 
 var flags = pkg_flags.GlobalConfig
 
-func DoUploadBasicInfoWorks() {
-	ticker := time.NewTicker(time.Duration(flags.InfoReportInterval) * time.Minute)
-	for range ticker.C {
-		err := uploadBasicInfo()
-		if err != nil {
-			log.Println("Error uploading basic info:", err)
+func DoUploadBasicInfoWorks(ctx context.Context) {
+	ticker := time.NewTicker(time.Duration(max(flags.InfoReportInterval, 1)) * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			err := uploadBasicInfo()
+			if err != nil {
+				log.Println("Error uploading basic info:", err)
+			}
 		}
 	}
 }

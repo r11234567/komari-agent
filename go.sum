@@ -64,6 +64,16 @@ github.com/r11234567/komari-proto v0.1.13 h1:P2iOV3gnEjCEL7XN5775LoAA7/MTfL7s5Ai
 github.com/r11234567/komari-proto v0.1.13/go.mod h1:GkpdDO6JqRdEN04VG8b6amDJMCo9E2RqL+UA8yxvsFI=
 github.com/r11234567/komari-proto v0.1.14 h1:cnnncUKr2LKBgTGc8qP5yhZyA0Buo8qpfkJmcagWYcg=
 github.com/r11234567/komari-proto v0.1.14/go.mod h1:GkpdDO6JqRdEN04VG8b6amDJMCo9E2RqL+UA8yxvsFI=
+github.com/r11234567/komari-proto v0.1.16 h1:s7lsdPjH9q2CNrlqZYg1dKONWADwNkiGnx5rwNwySUQ=
+github.com/r11234567/komari-proto v0.1.16/go.mod h1:GkpdDO6JqRdEN04VG8b6amDJMCo9E2RqL+UA8yxvsFI=
+github.com/r11234567/komari-proto v0.1.17 h1:c/xaBp35o5moDhbDOMRYmMtkWcJmj+a6j84LnMXsKHU=
+github.com/r11234567/komari-proto v0.1.17/go.mod h1:GkpdDO6JqRdEN04VG8b6amDJMCo9E2RqL+UA8yxvsFI=
+github.com/r11234567/komari-proto v0.1.18 h1:hcAdBqdTAGq5ijGCT4jEwTGRnnr2LZyImKDDQZ/5SO4=
+github.com/r11234567/komari-proto v0.1.18/go.mod h1:GkpdDO6JqRdEN04VG8b6amDJMCo9E2RqL+UA8yxvsFI=
+github.com/r11234567/komari-proto v0.1.19 h1:4TFm8lbknRkeO8DvR1/2yrY4sNjvhIAfB2oak+2Jn0w=
+github.com/r11234567/komari-proto v0.1.19/go.mod h1:GkpdDO6JqRdEN04VG8b6amDJMCo9E2RqL+UA8yxvsFI=
+github.com/r11234567/komari-proto v0.1.20 h1:+yiJ8FAshR0gL1Jf9cZ/IdB2OYp3AAgq2W7N/QUgC88=
+github.com/r11234567/komari-proto v0.1.20/go.mod h1:GkpdDO6JqRdEN04VG8b6amDJMCo9E2RqL+UA8yxvsFI=
 github.com/rhysd/go-github-selfupdate v1.2.3 h1:iaa+J202f+Nc+A8zi75uccC8Wg3omaM7HDeimXA22Ag=
 github.com/rhysd/go-github-selfupdate v1.2.3/go.mod h1:mp/N8zj6jFfBQy/XMYoWsmfzxazpPAODuqarmPDe2Rg=
 github.com/russross/blackfriday/v2 v2.1.0/go.mod h1:+Rmxgy9KzJVeS9/2gXHxylqXiyQDYRxCVz55jmeOWTM=

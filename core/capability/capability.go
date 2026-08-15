@@ -16,7 +16,9 @@ func limited(reason string) *reportv1.CapabilityState {
 // elevate a process and is safe to call from a non-root/standard-user agent.
 func Detect(remoteControlEnabled bool) *reportv1.AgentCapabilities {
 	privilege, privileged, privilegeLimitation := privilegeState()
-	return detect(remoteControlEnabled, privilege, privileged, privilegeLimitation)
+	result := detect(remoteControlEnabled, privilege, privileged, privilegeLimitation)
+	result.ReturnRouteProbe = returnRouteProbeState()
+	return result
 }
 
 // RemoteControlAllowed is the enforcement point for execution and terminal

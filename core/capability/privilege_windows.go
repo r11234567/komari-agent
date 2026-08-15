@@ -14,3 +14,10 @@ func privilegeState() (reportv1.PrivilegeMode, bool, string) {
 	}
 	return reportv1.PrivilegeMode_PRIVILEGE_MODE_WINDOWS_STANDARD_USER, false, "running as a standard Windows user; elevated service control is unavailable"
 }
+
+func returnRouteProbeState() *reportv1.CapabilityState {
+	if windows.Token(0).IsElevated() {
+		return available()
+	}
+	return limited("built-in ICMP return-route probes require an administrator service token")
+}

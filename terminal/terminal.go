@@ -27,6 +27,37 @@ type terminalImpl struct {
 	term       Terminal
 }
 
+// Session exposes the platform PTY to transport-neutral clients.
+type Session struct {
+	term Terminal
+}
+
+func OpenSession(cols, rows int) (*Session, error) {
+	if allowed, reason := capability.RemoteControlAllowed(runtimeconfig.RemoteControlEnabled()); !allowed {
+		return nil, fmt.Errorf("remote control is unavailable: %s", reason)
+	}
+	impl, err := newTerminalImpl()
+	if err != nil {
+		return nil, err
+	}
+	if cols > 0 && rows > 0 {
+		if err := impl.term.Resize(cols, rows); err != nil {
+			_ = impl.term.Close()
+			return nil, err
+		}
+	}
+	return &Session{term: impl.term}, nil
+}
+
+func (s *Session) Read(buffer []byte) (int, error) { return s.term.Read(buffer) }
+func (s *Session) Write(data []byte) (int, error)  { return s.term.Write(data) }
+func (s *Session) Resize(cols, rows int) error     { return s.term.Resize(cols, rows) }
+func (s *Session) Wait() error                     { return s.term.Wait() }
+func (s *Session) Close() error {
+	gracefulShutdown(s.term)
+	return s.term.Close()
+}
+
 // StartTerminal 启动终端并处理 WebSocket 通信
 func StartTerminal(conn *websocket.Conn) {
 	if allowed, reason := capability.RemoteControlAllowed(runtimeconfig.RemoteControlEnabled()); !allowed {
@@ -34,7 +65,7 @@ func StartTerminal(conn *websocket.Conn) {
 		conn.Close()
 		return
 	}
-	impl, err := newTerminalImpl()
+	session, err := OpenSession(80, 24)
 	if err != nil {
 		conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("Error: %v\r\n", err)))
 		return
@@ -44,17 +75,16 @@ func StartTerminal(conn *websocket.Conn) {
 	done := make(chan struct{})
 
 	defer func() {
-		gracefulShutdown(impl.term)
-		impl.term.Close()
+		session.Close()
 		conn.Close()
 		close(done)
 	}()
 
 	// 从 WebSocket 读取消息并写入终端
-	go handleWebSocketInput(conn, impl.term, errChan, done)
+	go handleWebSocketInput(conn, session.term, errChan, done)
 
 	// 从终端读取输出并写入 WebSocket
-	go handleTerminalOutput(conn, impl.term, errChan, done)
+	go handleTerminalOutput(conn, session.term, errChan, done)
 
 	// 等待终端进程结束或出现错误
 	select {
