@@ -80,7 +80,11 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 	probeCtx, stopProbes := context.WithCancel(ctx)
 	var probes sync.WaitGroup
-	probes.Add(1)
+	probes.Add(2)
+	go func() {
+		defer probes.Done()
+		c.runPingProbes(probeCtx)
+	}()
 	go func() {
 		defer probes.Done()
 		c.runReturnRouteProbes(probeCtx)
@@ -106,6 +110,48 @@ func (c *Client) Run(ctx context.Context) error {
 		}
 		if err := c.SyncConfig(ctx); err != nil {
 			return classify(err)
+		}
+	}
+}
+
+func (c *Client) runPingProbes(ctx context.Context) {
+	for ctx.Err() == nil {
+		leaseCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		req := connect.NewRequest(&networkv1.LeasePingProbeRequest{AgentId: c.agentID})
+		c.authorize(req.Header())
+		response, err := c.network.LeasePingProbe(leaseCtx, req)
+		cancel()
+		if err != nil {
+			var connectErr *connect.Error
+			if errors.As(err, &connectErr) && (connectErr.Code() == connect.CodeUnimplemented || connectErr.Code() == connect.CodeNotFound) {
+				return
+			}
+			if !waitRetry(ctx) {
+				return
+			}
+			continue
+		}
+		assignment := response.Msg.Assignment
+		if assignment == nil {
+			continue
+		}
+		timeout := 3 * time.Second
+		if assignment.Timeout != nil {
+			if err := assignment.Timeout.CheckValid(); err == nil && assignment.Timeout.AsDuration() > 0 {
+				timeout = assignment.Timeout.AsDuration()
+			}
+		}
+		latency := server.ProbePing(assignment.Protocol, assignment.Target, timeout)
+		reportCtx, reportCancel := context.WithTimeout(ctx, requestDeadline)
+		report := connect.NewRequest(&networkv1.SubmitPingProbeResultRequest{
+			AgentId: c.agentID, AssignmentId: assignment.AssignmentId, TaskId: assignment.TaskId,
+			Protocol: assignment.Protocol, LatencyMs: latency, FinishedAt: timestamppb.Now(),
+		})
+		c.authorize(report.Header())
+		_, reportErr := c.network.SubmitPingProbeResult(reportCtx, report)
+		reportCancel()
+		if reportErr != nil {
+			log.Printf("Failed to submit ping result: %v", reportErr)
 		}
 	}
 }

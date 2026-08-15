@@ -103,3 +103,9 @@ func TestNormalizeHTTPPingTargetRejectsUnsafeInput(t *testing.T) {
 		})
 	}
 }
+
+func TestProbePingRejectsUnsupportedProtocol(t *testing.T) {
+	if got := ProbePing("unsupported", "example.com", time.Second); got != -1 {
+		t.Fatalf("ProbePing returned %d, want -1", got)
+	}
+}

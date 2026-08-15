@@ -313,59 +313,7 @@ func NewPingTask(conn *ws.SafeConn, protocolVersion int, taskID uint, pingType, 
 		log.Printf("Invalid task ID: %d", taskID)
 		return
 	}
-	var err error = nil
-	var latency int64
-	pingResult := -1
-	timeout := 3 * time.Second           // 默认超时时间
-	const highLatencyThreshold = 1000    // ms 阈值
-	const retryDropThresholdTcping = 800 // ms 重试中延迟降低超过此值则基本认为发生重传
-	// 800ms = SYN/SYN-ACK 首次超时重传 1000ms - 防误判容许 200ms 延迟抖动
-
-	measure := func() (int64, error) {
-		switch pingType {
-		case "icmp":
-			return icmpPing(pingTarget, timeout)
-		case "tcp":
-			return tcpPing(pingTarget, timeout)
-		case "http":
-			return httpPing(pingTarget, timeout)
-		default:
-			return -1, errors.New("unsupported ping type")
-		}
-	}
-	PingHighLatencyRetries := 3
-	// 首次测量
-	if latency, err = measure(); err == nil {
-		firstLatency := latency
-		if latency > int64(highLatencyThreshold) && PingHighLatencyRetries > 0 {
-			attempts := PingHighLatencyRetries
-			for i := 0; i < attempts; i++ {
-				if second, err2 := measure(); err2 == nil {
-					if second <= int64(highLatencyThreshold) {
-						if pingType == "tcp" && firstLatency-second > int64(retryDropThresholdTcping) {
-							err = errors.New("suspicious retransmission detected in tcp handshake")
-							break
-						}
-						latency = second
-						break
-					}
-					if i == attempts-1 { // 最后一次仍高
-						err = errors.New("latency remains high after retries")
-					}
-				} else {
-					err = err2
-					break
-				}
-			}
-		}
-	}
-
-	if err != nil {
-		log.Print("Ping task failed")
-		pingResult = -1 // 如果有错误，设置结果为 -1
-	} else {
-		pingResult = int(latency)
-	}
+	pingResult := int(ProbePing(pingType, pingTarget, 3*time.Second))
 	finishedAt := time.Now()
 	payload := map[string]interface{}{
 		"type":        "ping_result",
@@ -394,7 +342,64 @@ func NewPingTask(conn *ws.SafeConn, protocolVersion int, taskID uint, pingType, 
 	if err := conn.WriteJSON(wsPayload); err != nil {
 		log.Printf("Failed to write JSON to WebSocket: %v", err)
 	}
+}
 
+// ProbePing executes the shared latency policy used by Connect and the legacy
+// compatibility transports. A result of -1 retains the historical loss marker.
+func ProbePing(pingType, pingTarget string, timeout time.Duration) int64 {
+	if timeout <= 0 {
+		timeout = 3 * time.Second
+	}
+	const highLatencyThreshold = 1000    // ms 阈值
+	const retryDropThresholdTcping = 800 // ms 重试中延迟降低超过此值则基本认为发生重传
+	// 800ms = SYN/SYN-ACK 首次超时重传 1000ms - 防误判容许 200ms 延迟抖动
+
+	measure := func() (int64, error) {
+		switch pingType {
+		case "icmp":
+			return icmpPing(pingTarget, timeout)
+		case "tcp":
+			return tcpPing(pingTarget, timeout)
+		case "http":
+			return httpPing(pingTarget, timeout)
+		default:
+			return -1, errors.New("unsupported ping type")
+		}
+	}
+	var latency int64
+	var err error
+	const pingHighLatencyRetries = 3
+	// 首次测量
+	if latency, err = measure(); err == nil {
+		firstLatency := latency
+		if latency > int64(highLatencyThreshold) && pingHighLatencyRetries > 0 {
+			attempts := pingHighLatencyRetries
+			for i := 0; i < attempts; i++ {
+				if second, err2 := measure(); err2 == nil {
+					if second <= int64(highLatencyThreshold) {
+						if pingType == "tcp" && firstLatency-second > int64(retryDropThresholdTcping) {
+							err = errors.New("suspicious retransmission detected in tcp handshake")
+							break
+						}
+						latency = second
+						break
+					}
+					if i == attempts-1 { // 最后一次仍高
+						err = errors.New("latency remains high after retries")
+					}
+				} else {
+					err = err2
+					break
+				}
+			}
+		}
+	}
+
+	if err != nil {
+		log.Print("Ping task failed")
+		return -1
+	}
+	return latency
 }
 
 func postV2RPC(payload interface{}) error {
