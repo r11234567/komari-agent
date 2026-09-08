@@ -111,11 +111,37 @@ func New(config *flags_pkg.Config, store *runtimeconfig.Store) (*Client, error) 
 }
 
 func (c *Client) Run(ctx context.Context) error {
-	if err := c.SyncConfig(ctx); err != nil {
-		return classify(err)
+	// Startup is where a rejection is most expensive: returning an error here
+	// sends the caller back through New + the whole handshake, so a panel that
+	// is rate limiting or briefly refusing the token would be re-handshaked at
+	// connection cadence indefinitely. Wait it out here instead, and only give
+	// up on failures that genuinely need a fresh client.
+	var startRetry retryPolicy
+	for {
+		err := c.SyncConfig(ctx)
+		if err == nil {
+			break
+		}
+		if !isTransientRejection(err) {
+			return classify(err)
+		}
+		logTransientRejection("configuration sync", err)
+		if !startRetry.Wait(ctx, err) {
+			return nil
+		}
 	}
-	if err := c.SubmitReport(ctx); err != nil {
-		return classify(err)
+	for {
+		err := c.SubmitReport(ctx)
+		if err == nil {
+			break
+		}
+		if !isTransientRejection(err) {
+			return classify(err)
+		}
+		logTransientRejection("initial basic info report", err)
+		if !startRetry.Wait(ctx, err) {
+			return nil
+		}
 	}
 	if err := c.publishAgentEvent(ctx, agentv1.AgentEventType_AGENT_EVENT_TYPE_STARTED, "Connect transport started"); err != nil && !isUnsupported(err) {
 		log.Printf("Failed to publish Agent lifecycle event: %v", err)
@@ -162,17 +188,20 @@ func (c *Client) Run(ctx context.Context) error {
 
 func (c *Client) runAgentEvents(ctx context.Context) {
 	after := ""
+	var retry retryPolicy
 	for ctx.Err() == nil {
 		req := connect.NewRequest(&agentv1.SubscribeEventsRequest{AgentId: c.agentIDValue(), AfterEventId: after})
 		c.authorize(req.Header())
 		stream, err := c.events.SubscribeEvents(ctx, req)
 		if err != nil {
-			if isUnsupported(err) || !waitRetry(ctx) {
+			if isUnsupported(err) || !retry.Wait(ctx, err) {
 				return
 			}
 			continue
 		}
+		received := false
 		for stream.Receive() {
+			received = true
 			event := stream.Msg().Event
 			if event == nil {
 				continue
@@ -188,22 +217,23 @@ func (c *Client) runAgentEvents(ctx context.Context) {
 			}
 			after = event.EventId
 		}
-		if err := stream.Err(); err != nil && !isUnsupported(err) {
-			if !waitRetry(ctx) {
-				return
-			}
-			continue
+		// A subscription that delivered events was healthy; start the next
+		// backoff from the base interval rather than from where the previous
+		// failure streak left off.
+		if received {
+			retry.Reset()
 		}
-		if stream.Err() != nil && isUnsupported(stream.Err()) {
+		if err := stream.Err(); err != nil && isUnsupported(err) {
 			return
 		}
-		if !waitRetry(ctx) {
+		if !retry.Wait(ctx, stream.Err()) {
 			return
 		}
 	}
 }
 
 func (c *Client) runConfigUpdates(ctx context.Context) {
+	var retry retryPolicy
 	for ctx.Err() == nil {
 		req := connect.NewRequest(&configv1.WatchDesiredConfigRequest{
 			AgentId: c.agentIDValue(), AfterRevision: c.store.Current().Revision,
@@ -215,12 +245,14 @@ func (c *Client) runConfigUpdates(ctx context.Context) {
 				c.runConfigPolling(ctx)
 				return
 			}
-			if !waitRetry(ctx) {
+			if !retry.Wait(ctx, err) {
 				return
 			}
 			continue
 		}
+		received := false
 		for stream.Receive() {
+			received = true
 			desired := stream.Msg().Desired
 			if desired == nil {
 				continue
@@ -229,11 +261,14 @@ func (c *Client) runConfigUpdates(ctx context.Context) {
 				log.Printf("Failed to apply streamed Connect config: %v", err)
 			}
 		}
+		if received {
+			retry.Reset()
+		}
 		if err := stream.Err(); err != nil && isUnsupported(err) {
 			c.runConfigPolling(ctx)
 			return
 		}
-		if ctx.Err() != nil || !waitRetry(ctx) {
+		if ctx.Err() != nil || !retry.Wait(ctx, stream.Err()) {
 			return
 		}
 	}
@@ -268,17 +303,20 @@ func (c *Client) publishAgentEvent(parent context.Context, eventType agentv1.Age
 func (c *Client) runExecutions(ctx context.Context) {
 	semaphore := make(chan struct{}, 4)
 	var jobs sync.Map
+	var retry retryPolicy
 	for ctx.Err() == nil {
 		req := connect.NewRequest(&execv1.LeaseExecutionRequest{AgentId: c.agentIDValue()})
 		c.authorize(req.Header())
 		stream, err := c.execution.LeaseExecution(ctx, req)
 		if err != nil {
-			if isUnsupported(err) || !waitRetry(ctx) {
+			if isUnsupported(err) || !retry.Wait(ctx, err) {
 				return
 			}
 			continue
 		}
+		received := false
 		for stream.Receive() {
+			received = true
 			message := stream.Msg()
 			if cancellation := message.Cancellation; cancellation != nil {
 				if value, ok := jobs.Load(cancellation.ExecutionId); ok {
@@ -319,16 +357,13 @@ func (c *Client) runExecutions(ctx context.Context) {
 				}
 			}()
 		}
-		if err := stream.Err(); err != nil && !isUnsupported(err) {
-			if !waitRetry(ctx) {
-				return
-			}
-			continue
+		if received {
+			retry.Reset()
 		}
-		if stream.Err() != nil && isUnsupported(stream.Err()) {
+		if err := stream.Err(); err != nil && isUnsupported(err) {
 			return
 		}
-		if !waitRetry(ctx) {
+		if !retry.Wait(ctx, stream.Err()) {
 			return
 		}
 	}
@@ -422,17 +457,20 @@ func (c *Client) reportExecutionEvent(parent context.Context, event *execv1.Exec
 
 func (c *Client) runRemoteSessions(ctx context.Context) {
 	semaphore := make(chan struct{}, 4)
+	var retry retryPolicy
 	for ctx.Err() == nil {
 		req := connect.NewRequest(&websshv1.LeaseSessionsRequest{AgentId: c.agentIDValue()})
 		c.authorize(req.Header())
 		stream, err := c.webssh.LeaseSessions(ctx, req)
 		if err != nil {
-			if isUnsupported(err) || !waitRetry(ctx) {
+			if isUnsupported(err) || !retry.Wait(ctx, err) {
 				return
 			}
 			continue
 		}
+		received := false
 		for stream.Receive() {
+			received = true
 			assignment := stream.Msg().Assignment
 			if assignment == nil {
 				continue
@@ -449,16 +487,13 @@ func (c *Client) runRemoteSessions(ctx context.Context) {
 				return
 			}
 		}
-		if err := stream.Err(); err != nil && !isUnsupported(err) {
-			if !waitRetry(ctx) {
-				return
-			}
-			continue
+		if received {
+			retry.Reset()
 		}
-		if stream.Err() != nil && isUnsupported(stream.Err()) {
+		if err := stream.Err(); err != nil && isUnsupported(err) {
 			return
 		}
-		if !waitRetry(ctx) {
+		if !retry.Wait(ctx, stream.Err()) {
 			return
 		}
 	}
@@ -592,6 +627,7 @@ func isUnsupported(err error) bool {
 }
 
 func (c *Client) runPingProbes(ctx context.Context) {
+	var retry retryPolicy
 	for ctx.Err() == nil {
 		leaseCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		req := connect.NewRequest(&networkv1.LeasePingProbeRequest{AgentId: c.agentIDValue()})
@@ -599,20 +635,20 @@ func (c *Client) runPingProbes(ctx context.Context) {
 		response, err := c.network.LeasePingProbe(leaseCtx, req)
 		cancel()
 		if err != nil {
-			var connectErr *connect.Error
-			if errors.As(err, &connectErr) && (connectErr.Code() == connect.CodeUnimplemented || connectErr.Code() == connect.CodeNotFound) {
+			if isUnsupported(err) {
 				return
 			}
-			if !waitRetry(ctx) {
+			if !retry.Wait(ctx, err) {
 				return
 			}
 			continue
 		}
+		retry.Reset()
 		assignment := response.Msg.Assignment
 		if assignment == nil {
 			// A lease normally long-polls. If a proxy or server returns an empty
 			// lease immediately, avoid turning it into a busy request loop.
-			if !waitRetry(ctx) {
+			if !retry.Wait(ctx, nil) {
 				return
 			}
 			continue
@@ -639,6 +675,7 @@ func (c *Client) runPingProbes(ctx context.Context) {
 }
 
 func (c *Client) runReturnRouteProbes(ctx context.Context) {
+	var retry retryPolicy
 	for ctx.Err() == nil {
 		leaseCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		req := connect.NewRequest(&networkv1.LeaseReturnRouteProbeRequest{AgentId: c.agentIDValue()})
@@ -646,18 +683,18 @@ func (c *Client) runReturnRouteProbes(ctx context.Context) {
 		response, err := c.network.LeaseReturnRouteProbe(leaseCtx, req)
 		cancel()
 		if err != nil {
-			var connectErr *connect.Error
-			if errors.As(err, &connectErr) && (connectErr.Code() == connect.CodeUnimplemented || connectErr.Code() == connect.CodeNotFound) {
+			if isUnsupported(err) {
 				return
 			}
-			if !waitRetry(ctx) {
+			if !retry.Wait(ctx, err) {
 				return
 			}
 			continue
 		}
+		retry.Reset()
 		assignment := response.Msg.Assignment
 		if assignment == nil {
-			if !waitRetry(ctx) {
+			if !retry.Wait(ctx, nil) {
 				return
 			}
 			continue
@@ -681,8 +718,11 @@ func (c *Client) runReturnRouteProbes(ctx context.Context) {
 	}
 }
 
+// waitRetry paces a single one-off retry at the operator's reconnect interval
+// with jitter. Loops that can fail repeatedly own a retryPolicy instead, so
+// their delay grows and they honour a server's Retry-After.
 func waitRetry(ctx context.Context) bool {
-	timer := time.NewTimer(time.Duration(max(flags_pkg.GlobalConfig.ReconnectInterval, 1)) * time.Second)
+	timer := time.NewTimer(jitter(baseInterval()))
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
@@ -716,6 +756,7 @@ func (c *Client) advanceSequence(accepted uint64) {
 
 func (c *Client) runMetricStream(ctx context.Context) error {
 	var pending *metricsv1.SubmitMetricsRequest
+	var streamRetry retryPolicy
 	infoInterval := time.Duration(max(flags_pkg.GlobalConfig.InfoReportInterval, 1)) * time.Minute
 	nextInfoReport := time.Now().Add(infoInterval)
 	for ctx.Err() == nil {
@@ -750,6 +791,9 @@ func (c *Client) runMetricStream(ctx context.Context) error {
 				break
 			}
 			c.advanceSequence(ack.AcceptedSequence)
+			// The stream is delivering. A later interruption starts its backoff
+			// from the base interval rather than from an earlier failure streak.
+			streamRetry.Reset()
 			pending = nil
 			if !time.Now().Before(nextInfoReport) {
 				if streamErr = c.SubmitReport(ctx); streamErr != nil {
@@ -783,7 +827,7 @@ func (c *Client) runMetricStream(ctx context.Context) error {
 		if streamErr != nil {
 			log.Printf("Connect metrics stream interrupted: %v", streamErr)
 		}
-		if !waitRetry(ctx) {
+		if !streamRetry.Wait(ctx, streamErr) {
 			return nil
 		}
 	}
@@ -793,16 +837,39 @@ func (c *Client) runMetricStream(ctx context.Context) error {
 func (c *Client) runUnaryMetricLoop(ctx context.Context) error {
 	infoInterval := time.Duration(max(flags_pkg.GlobalConfig.InfoReportInterval, 1)) * time.Minute
 	nextInfoReport := time.Now().Add(infoInterval)
+	var retry retryPolicy
 	for {
+		// A rejection that says "later" or "your credential was not accepted
+		// right now" is ridden out in place. Returning here would unwind to
+		// Run's caller, which rebuilds the client and replays SyncConfig,
+		// SubmitReport, the lifecycle event and six stream subscriptions -
+		// turning one refused request into a burst of them, on a fixed period,
+		// for as long as the condition lasts. That shape is indistinguishable
+		// from an attack to any log-driven banning layer in front of the panel.
 		if err := c.SubmitMetrics(ctx); err != nil {
-			return classify(err)
+			if !isTransientRejection(err) {
+				return classify(err)
+			}
+			logTransientRejection("metric submission", err)
+			if !retry.Wait(ctx, err) {
+				return nil
+			}
+			continue
 		}
 		if !time.Now().Before(nextInfoReport) {
 			if err := c.SubmitReport(ctx); err != nil {
-				return classify(err)
+				if !isTransientRejection(err) {
+					return classify(err)
+				}
+				logTransientRejection("basic info report", err)
+				if !retry.Wait(ctx, err) {
+					return nil
+				}
+				continue
 			}
 			nextInfoReport = time.Now().Add(infoInterval)
 		}
+		retry.Reset()
 		interval := runtimeconfig.Current().ReportInterval
 		if interval <= 0 {
 			interval = 3 * time.Second
@@ -814,6 +881,18 @@ func (c *Client) runUnaryMetricLoop(ctx context.Context) error {
 			return nil
 		case <-timer.C:
 		}
+	}
+}
+
+// logTransientRejection reports a rejection the Agent is riding out, naming the
+// reason so an operator reading Agent logs can tell a rate limit apart from a
+// rotated or revoked token without correlating against panel logs.
+func logTransientRejection(what string, err error) {
+	switch {
+	case isRateLimited(err):
+		log.Printf("Panel is rate limiting %s; backing off: %v", what, err)
+	default:
+		log.Printf("Panel rejected %s credential; backing off pending token recovery: %v", what, err)
 	}
 }
 

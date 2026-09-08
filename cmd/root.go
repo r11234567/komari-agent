@@ -132,7 +132,13 @@ var RootCmd = &cobra.Command{
 			}
 			go update.DoUpdateWorks()
 		}
+		// restarts counts consecutive session rebuilds. Rebuilding replays the
+		// whole handshake, so a panel that keeps ending sessions must be backed
+		// off rather than re-dialled on a fixed period: the latter is what makes
+		// one unhealthy Agent look like a scanner to a log-driven IP ban layer.
+		restarts := 0
 		for {
+			sessionStart := time.Now()
 			connectClient, err := clientcore.New(flags, runtimeStore)
 			if err == nil {
 				err = connectClient.Run(stopCtx)
@@ -149,10 +155,16 @@ var RootCmd = &cobra.Command{
 			if err != nil {
 				log.Printf("Connect agent transport stopped: %v", err)
 			}
+			// A session that ran for a useful stretch was healthy, whatever
+			// ended it. Only rapid consecutive failures escalate.
+			if time.Since(sessionStart) >= time.Minute {
+				restarts = 0
+			}
+			restarts++
 			select {
 			case <-stopCtx.Done():
 				return nil
-			case <-time.After(time.Duration(max(flags.ReconnectInterval, 1)) * time.Second):
+			case <-time.After(clientcore.RestartDelay(restarts)):
 			}
 		}
 	},
