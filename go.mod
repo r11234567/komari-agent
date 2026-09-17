@@ -3,7 +3,7 @@ module github.com/komari-monitor/komari-agent
 go 1.25.0
 
 require (
-	connectrpc.com/connect v1.20.0
+	connectrpc.com/connect v1.21.0
 	github.com/UserExistsError/conpty v0.1.4
 	github.com/blang/semver v3.5.1+incompatible
 	github.com/creack/pty v1.1.24
