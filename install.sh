@@ -287,6 +287,12 @@ komari_args="${komari_args# }"
 
 komari_agent_path="${target_dir}/agent"
 runtime_state_path="${target_dir}/runtime-config.json"
+# Credentials and privileged state live beside the installation rather than in
+# a user home. The service runs as an unprivileged account whose home may not
+# exist, and the separately privileged helper has to read the same files
+# without guessing which user installed the Agent.
+credentials_path="${target_dir}/credentials.json"
+privileged_state_path="${target_dir}/privileged.json"
 
 echo -e "${WHITE}===========================================${NC}"
 echo -e "${WHITE}    Komari Agent Installation Script     ${NC}"
@@ -543,6 +549,14 @@ log_success "Komari-agent installed to ${GREEN}$komari_agent_path${NC}"
 case " $komari_args " in
     *" --runtime-state-file "*) ;;
     *) komari_args="$komari_args --runtime-state-file ${runtime_state_path}" ;;
+esac
+case " $komari_args " in
+    *" --credentials-file "*) ;;
+    *) komari_args="$komari_args --credentials-file ${credentials_path}" ;;
+esac
+case " $komari_args " in
+    *" --privileged-state-file "*) ;;
+    *) komari_args="$komari_args --privileged-state-file ${privileged_state_path}" ;;
 esac
 
 # Detect init system and configure service
@@ -913,6 +927,7 @@ install_rescue_helper() {
 		printf 'KOMARI_RESCUE_INSTANCE_ID_FILE=%s\n' "$(systemd_env_value "${rescue_env_dir}/${rescue_service_name}.instance")"
 		printf 'KOMARI_RESCUE_CONTROL_PLANE_URL=%s\n' "$(systemd_env_value "$rescue_endpoint")"
 		printf 'KOMARI_RESCUE_ISOLATION_STATE_FILE=%s\n' "$(systemd_env_value "${rescue_env_dir}/${rescue_service_name}.network-isolation.json")"
+		printf 'KOMARI_RESCUE_PRIVILEGED_STATE_FILE=%s\n' "$(systemd_env_value "$privileged_state_path")"
         if [ "$ignore_unsafe_cert" = true ]; then
             printf 'KOMARI_RESCUE_IGNORE_UNSAFE_CERT=true\n'
         fi
@@ -959,3 +974,28 @@ fi
 log_config "Service: ${GREEN}$service_name${NC}"
 log_config "Arguments: ${GREEN}$komari_args${NC}"
 echo -e "${WHITE}===========================================${NC}"
+
+# An Agent installed without a token is not yet enrolled. Enrolment is a
+# separate, deliberate step: it needs a human to approve this machine in the
+# panel, so the installer explains it rather than trying to automate it away.
+case " $komari_args " in
+    *" --token "*|*" -t "*) ;;
+    *)
+        echo ""
+        log_step "This machine is not enrolled yet."
+        echo ""
+        log_info "Enrol it by running:"
+        if [ "$runtime_identity" = "service-account" ]; then
+            # The credentials file belongs to the service account, so writing it
+            # as anyone else would leave the daemon unable to read its own
+            # identity.
+            echo -e "    ${GREEN}sudo -u ${service_user} ${komari_agent_path} login --endpoint panel.example.com --credentials-file ${credentials_path}${NC}"
+        else
+            echo -e "    ${GREEN}${komari_agent_path} login --endpoint panel.example.com --credentials-file ${credentials_path}${NC}"
+        fi
+        echo ""
+        log_info "That prints a link. Open it, sign in to the panel, and approve this machine."
+        log_info "Then start the service: ${GREEN}systemctl restart ${service_name}${NC}"
+        echo -e "${WHITE}===========================================${NC}"
+        ;;
+esac

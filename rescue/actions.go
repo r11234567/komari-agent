@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/komari-monitor/komari-agent/core/privileged"
 	unit "github.com/komari-monitor/komari-agent/monitoring/unit"
 	diagv1 "github.com/r11234567/komari-proto/gen/go/komari/diag/v1"
 	rescuev1 "github.com/r11234567/komari-proto/gen/go/komari/rescue/v1"
@@ -22,6 +23,10 @@ type ActionConfig struct {
 	RuntimeUser        string
 	ControlPlaneURL    string
 	IsolationStatePath string
+	// PrivilegedStatePath lets the helper withdraw a privileged configuration
+	// without the panel. An empty value falls back to the default location, so
+	// a helper installed before this existed still finds the state.
+	PrivilegedStatePath string
 }
 
 type ActionResult struct {
@@ -56,6 +61,8 @@ func ExecuteAction(ctx context.Context, config ActionConfig, action rescuev1.Res
 		return grantTemporarySSHAccess(ctx, config, sshPort)
 	case rescuev1.RescueAction_RESCUE_ACTION_REVOKE_TEMPORARY_SSH_ACCESS:
 		return revokeTemporarySSHAccess(ctx, config)
+	case rescuev1.RescueAction_RESCUE_ACTION_ROLLBACK_PRIVILEGED_CONFIG:
+		return rollbackPrivilegedConfig(config)
 	case rescuev1.RescueAction_RESCUE_ACTION_SHUTDOWN:
 		return preparePowerAction(config, false)
 	case rescuev1.RescueAction_RESCUE_ACTION_REBOOT:
@@ -96,6 +103,30 @@ func performanceDiagnostics(_ context.Context, includeCPU, includeMemory bool) (
 		return ActionResult{}, err
 	}
 	return ActionResult{Diagnostics: report}, nil
+}
+
+// rollbackPrivilegedConfig withdraws the active privileged configuration.
+//
+// The rescue helper can do this without any panel involvement, which is the
+// point: if a privilege change was wrong, or the panel that sent it is
+// unreachable, the host must still be able to take those privileges back.
+// Unlike the CLI path this asks for no local password, because narrowing what
+// the Agent may do is not the direction that needs guarding, and a rescue
+// session already proved administrator authority with a second factor.
+func rollbackPrivilegedConfig(config ActionConfig) (ActionResult, error) {
+	store, err := privileged.Open(config.PrivilegedStatePath)
+	if err != nil {
+		return ActionResult{}, err
+	}
+	restored, revision, err := store.Rollback()
+	if err != nil {
+		return ActionResult{}, err
+	}
+	return ActionResult{Stdout: []byte(fmt.Sprintf(
+		"rolled_back_revision=%d\nremote_control=%t\nwebssh=%t\nexecution=%t\nrescue_helper=%t\n"+
+			"note=restart the Agent for this to take effect\n",
+		revision, restored.RemoteControlEnabled, restored.WebSSHEnabled,
+		restored.ExecutionEnabled, restored.RescueHelperEnabled))}, nil
 }
 
 func ensureNoActiveIsolation(config ActionConfig) error {

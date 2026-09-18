@@ -38,6 +38,7 @@ func main() {
 	flag.StringVar(&config.Action.RuntimeUser, "agent-runtime-user", env("KOMARI_RESCUE_AGENT_RUNTIME_USER", config.Action.RuntimeUser), "Installed Agent runtime user")
 	flag.StringVar(&config.Action.ControlPlaneURL, "control-plane-url", env("KOMARI_RESCUE_CONTROL_PLANE_URL", fallback(config.Action.ControlPlaneURL, config.Endpoint)), "Control plane URL retained during network isolation")
 	flag.StringVar(&config.Action.IsolationStatePath, "isolation-state-file", env("KOMARI_RESCUE_ISOLATION_STATE_FILE", config.Action.IsolationStatePath), "Komari-managed network isolation state path")
+	flag.StringVar(&config.Action.PrivilegedStatePath, "privileged-state-file", env("KOMARI_RESCUE_PRIVILEGED_STATE_FILE", config.Action.PrivilegedStatePath), "Privileged configuration state path, so the helper can withdraw one without the panel")
 	flag.Parse()
 	config.Version = update.CurrentVersion
 	// The revocation timer runs this binary as a bare process with no
