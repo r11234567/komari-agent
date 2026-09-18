@@ -17,7 +17,6 @@
 package localauth
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"os"
@@ -95,14 +94,14 @@ func Verify(options Options) (Result, error) {
 	case state.available && !state.requiresPassword:
 		// Passwordless sudo would grant privileges without proving anyone is
 		// present, so the operator's own password is checked directly.
-		if err := verifyPassword(options, operator, "Password for "+operator+": "); err != nil {
+		if err := verifyPassword(options, operator); err != nil {
 			return Result{}, err
 		}
 		return Result{Method: MethodCallerPassword, Operator: operator}, nil
 
 	default:
 		// No usable sudo: fall back to the root password.
-		if err := verifyPassword(options, "root", "Password for root: "); err != nil {
+		if err := verifyPassword(options, "root"); err != nil {
 			return Result{}, err
 		}
 		return Result{Method: MethodRootPassword, Operator: operator}, nil
@@ -170,15 +169,17 @@ func verifyThroughSudo(options Options, operator string) error {
 	return nil
 }
 
-// verifyPassword reads a password and checks it without granting anything.
+// verifyPassword has the system authenticate the operator, without granting
+// anything.
 //
 // The check runs `su <account> -c true`, which validates the credential
 // through the host's own PAM stack. That matters for two reasons: it honours
 // whatever the host actually uses for authentication, and it works where sudo
-// is configured not to ask. The password is written to the child's stdin and
-// never appears in an argument list, where it would be visible in the process
-// table to every user on the machine.
-func verifyPassword(options Options, account, prompt string) error {
+// is configured not to ask.
+//
+// The prompt comes from su, not from here. The operator types their password
+// to the system, and it never passes through this process at any point.
+func verifyPassword(options Options, account string) error {
 	binary, err := exec.LookPath("su")
 	if err != nil {
 		return errors.New("neither sudo nor su is available, so this host cannot verify an operator locally")
@@ -198,90 +199,22 @@ func verifyPassword(options Options, account, prompt string) error {
 	if options.Prompt != "" {
 		fmt.Fprintln(terminal, options.Prompt)
 	}
-	password, err := readPassword(terminal, prompt, options.Timeout)
-	if err != nil {
-		return err
-	}
-	// su reads one line from stdin when it has no controlling terminal of its
-	// own, which is how the password reaches PAM without ever being an
-	// argument or an environment variable.
+
+	// The terminal is handed to su, which prompts through PAM itself. This
+	// process never reads, holds or forwards the password: the operator types
+	// it to the system, not to the Agent. Reading it here and piping it in
+	// would work, but it would put a host credential through an Agent's
+	// address space for no benefit, and an Agent that can collect passwords is
+	// a far worse problem than the one this check solves.
 	command := exec.Command(binary, account, "-c", "true")
-	command.Stdin = strings.NewReader(password + "\n")
-	command.Stdout, command.Stderr = nil, nil
-	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	command.Stdin, command.Stdout, command.Stderr = terminal, terminal, terminal
+	// A fresh session with the tty as controlling terminal is what lets PAM
+	// prompt at all; without it su refuses, having nowhere to ask.
+	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true}
 	if err := runBounded(command, options.Timeout); err != nil {
 		return fmt.Errorf("authentication for %s failed", account)
 	}
 	return nil
-}
-
-// readPassword disables echo for the duration of the read.
-//
-// stty is used rather than a terminal library because this must work on a
-// minimal host with no extra dependencies, and the echo state is restored even
-// if the read fails, so a failed upgrade never leaves a shell with echo off.
-func readPassword(terminal *os.File, prompt string, timeout time.Duration) (string, error) {
-	restore, err := disableEcho(terminal)
-	if err != nil {
-		return "", err
-	}
-	defer restore()
-
-	fmt.Fprint(terminal, prompt)
-	type result struct {
-		value string
-		err   error
-	}
-	results := make(chan result, 1)
-	go func() {
-		line, readErr := bufio.NewReader(terminal).ReadString('\n')
-		results <- result{value: strings.TrimRight(line, "\r\n"), err: readErr}
-	}()
-	select {
-	case outcome := <-results:
-		fmt.Fprintln(terminal)
-		if outcome.err != nil {
-			return "", fmt.Errorf("read password: %w", outcome.err)
-		}
-		if outcome.value == "" {
-			return "", errors.New("no password was entered")
-		}
-		return outcome.value, nil
-	case <-time.After(timeout):
-		fmt.Fprintln(terminal)
-		return "", errors.New("timed out waiting for a password")
-	}
-}
-
-func disableEcho(terminal *os.File) (func(), error) {
-	binary, err := exec.LookPath("stty")
-	if err != nil {
-		// Without stty the password would echo. Refusing is better than
-		// printing a credential onto a shared terminal or into a scrollback
-		// buffer someone else can read.
-		return nil, errors.New("stty is required to read a password without echoing it")
-	}
-	previous, err := sttyOutput(binary, terminal, "-g")
-	if err != nil {
-		return nil, errors.New("this terminal does not support disabling echo")
-	}
-	if err := runStty(binary, terminal, "-echo"); err != nil {
-		return nil, errors.New("could not disable terminal echo")
-	}
-	return func() { _ = runStty(binary, terminal, previous) }, nil
-}
-
-func sttyOutput(binary string, terminal *os.File, arguments ...string) (string, error) {
-	command := exec.Command(binary, arguments...)
-	command.Stdin = terminal
-	output, err := command.Output()
-	return strings.TrimSpace(string(output)), err
-}
-
-func runStty(binary string, terminal *os.File, arguments ...string) error {
-	command := exec.Command(binary, arguments...)
-	command.Stdin = terminal
-	return command.Run()
 }
 
 // accountLocked reports whether an account has no usable password, which is
