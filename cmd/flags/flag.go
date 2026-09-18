@@ -36,6 +36,8 @@ type Config struct {
 	DisableCompression   bool    `json:"disable_compression" env:"AGENT_DISABLE_COMPRESSION"`         // 禁用v2传输压缩
 	PreferIPVersion      string  `json:"prefer_ip_version" env:"AGENT_PREFER_IP_VERSION"`             // 面板连接优先使用的 IP 版本：4 或 6
 	RuntimeStateFile     string  `json:"runtime_state_file" env:"AGENT_RUNTIME_STATE_FILE"`           // 在线配置快照持久化路径
+	PrivilegedStateFile  string  `json:"privileged_state_file" env:"AGENT_PRIVILEGED_STATE_FILE"`     // 特权配置状态持久化路径
+	CredentialsFile      string  `json:"credentials_file" env:"AGENT_CREDENTIALS_FILE"`               // 注册凭据持久化路径
 
 }
 

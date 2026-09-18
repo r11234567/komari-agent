@@ -20,6 +20,7 @@ import (
 	"github.com/google/uuid"
 	flags_pkg "github.com/komari-monitor/komari-agent/cmd/flags"
 	"github.com/komari-monitor/komari-agent/core/capability"
+	"github.com/komari-monitor/komari-agent/core/privileged"
 	"github.com/komari-monitor/komari-agent/core/runtimeconfig"
 	"github.com/komari-monitor/komari-agent/dnsresolver"
 	"github.com/komari-monitor/komari-agent/monitoring"
@@ -53,18 +54,23 @@ const (
 var ErrLegacyFallback = errors.New("Connect transport is unavailable; use legacy compatibility transport")
 
 type Client struct {
-	config    configv1connect.ConfigServiceClient
-	events    agentv1connect.AgentEventServiceClient
-	report    reportv1connect.AgentReportServiceClient
-	metrics   metricsv1connect.MetricsServiceClient
-	network   networkv1connect.NetworkProbeServiceClient
-	execution execv1connect.ExecutionServiceClient
-	webssh    websshv1connect.WebSSHServiceClient
-	token     string
-	agentMu   sync.RWMutex
-	agentID   string
-	sequence  atomic.Uint64
-	store     *runtimeconfig.Store
+	config     configv1connect.ConfigServiceClient
+	privileged configv1connect.PrivilegedDeliveryServiceClient
+	events     agentv1connect.AgentEventServiceClient
+	report     reportv1connect.AgentReportServiceClient
+	metrics    metricsv1connect.MetricsServiceClient
+	network    networkv1connect.NetworkProbeServiceClient
+	execution  execv1connect.ExecutionServiceClient
+	webssh     websshv1connect.WebSSHServiceClient
+	token      string
+	agentMu    sync.RWMutex
+	agentID    string
+	sequence   atomic.Uint64
+	store      *runtimeconfig.Store
+	// privilegedStore records privileged revisions without applying them. The
+	// Agent only ever writes a pending revision here; promoting it is an
+	// explicit local decision made through the CLI.
+	privilegedStore *privileged.Store
 }
 
 func (c *Client) agentIDValue() string {
@@ -92,6 +98,15 @@ func New(config *flags_pkg.Config, store *runtimeconfig.Store) (*Client, error) 
 	if err != nil {
 		return nil, err
 	}
+	// A privileged state file that cannot be opened must not stop the Agent
+	// from reporting: the settings in force are already the restrictive
+	// default, and refusing to start would turn a storage problem into an
+	// outage. The privileged watch is skipped instead.
+	privilegedStore, privilegedErr := privileged.Open(config.PrivilegedStateFile)
+	if privilegedErr != nil {
+		log.Printf("Privileged configuration state unavailable; privileged delivery is disabled: %v", privilegedErr)
+		privilegedStore = nil
+	}
 	httpClient := dnsresolver.GetHTTPClientWithPreference(requestDeadline, config.PreferIPVersion)
 	networkHTTPClient := dnsresolver.GetHTTPClientWithPreference(35*time.Second, config.PreferIPVersion)
 	streamHTTPClient := dnsresolver.GetStreamingHTTPClientWithPreference(config.PreferIPVersion)
@@ -99,14 +114,16 @@ func New(config *flags_pkg.Config, store *runtimeconfig.Store) (*Client, error) 
 		// WatchDesiredConfig is a durable server stream. It must not inherit the
 		// unary client's whole-request timeout, otherwise the Agent disconnects
 		// a healthy configuration watch every requestDeadline.
-		config:    configv1connect.NewConfigServiceClient(streamHTTPClient, baseURL),
-		events:    agentv1connect.NewAgentEventServiceClient(streamHTTPClient, baseURL),
-		report:    reportv1connect.NewAgentReportServiceClient(httpClient, baseURL),
-		metrics:   metricsv1connect.NewMetricsServiceClient(streamHTTPClient, baseURL),
-		network:   networkv1connect.NewNetworkProbeServiceClient(networkHTTPClient, baseURL),
-		execution: execv1connect.NewExecutionServiceClient(streamHTTPClient, baseURL),
-		webssh:    websshv1connect.NewWebSSHServiceClient(streamHTTPClient, baseURL),
-		token:     config.Token, store: store,
+		config:     configv1connect.NewConfigServiceClient(streamHTTPClient, baseURL),
+		privileged: configv1connect.NewPrivilegedDeliveryServiceClient(streamHTTPClient, baseURL),
+		events:     agentv1connect.NewAgentEventServiceClient(streamHTTPClient, baseURL),
+		report:     reportv1connect.NewAgentReportServiceClient(httpClient, baseURL),
+		metrics:    metricsv1connect.NewMetricsServiceClient(streamHTTPClient, baseURL),
+		network:    networkv1connect.NewNetworkProbeServiceClient(networkHTTPClient, baseURL),
+		execution:  execv1connect.NewExecutionServiceClient(streamHTTPClient, baseURL),
+		webssh:     websshv1connect.NewWebSSHServiceClient(streamHTTPClient, baseURL),
+		token:      config.Token, store: store,
+		privilegedStore: privilegedStore,
 	}, nil
 }
 
@@ -158,6 +175,9 @@ func (c *Client) Run(ctx context.Context) error {
 	capabilities := capability.Detect(runtimeconfig.RemoteControlEnabled())
 	start(c.runAgentEvents)
 	start(c.runConfigUpdates)
+	if c.privilegedStore != nil {
+		start(c.runPrivilegedUpdates)
+	}
 	start(c.runPingProbes)
 	if capabilities.Execution != nil && capabilities.Execution.Available {
 		start(c.runExecutions)
@@ -272,6 +292,103 @@ func (c *Client) runConfigUpdates(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// runPrivilegedUpdates records privileged revisions delivered by the panel.
+//
+// This loop deliberately never applies anything. Its whole job is to persist
+// what was delivered so an operator on the host can see a pending change and
+// decide about it through the CLI. An Agent that applied these on receipt
+// would let whoever controls the panel widen privileges on every machine at
+// once, which is the failure this separation exists to prevent.
+func (c *Client) runPrivilegedUpdates(ctx context.Context) {
+	var retry retryPolicy
+	for ctx.Err() == nil {
+		req := connect.NewRequest(&configv1.WatchPrivilegedDeliveryRequest{
+			AgentId: c.agentIDValue(), AfterRevision: c.privilegedStore.State().AppliedRevision,
+		})
+		c.authorize(req.Header())
+		stream, err := c.privileged.WatchPrivilegedDelivery(ctx, req)
+		if err != nil {
+			// A panel without the privileged track is not an error: it simply
+			// never delivers these, and retrying forever would log noise on
+			// every older deployment.
+			if isUnsupported(err) || !retry.Wait(ctx, err) {
+				return
+			}
+			continue
+		}
+		received := false
+		for stream.Receive() {
+			received = true
+			revision := stream.Msg().GetRevision()
+			if revision == nil {
+				continue
+			}
+			c.rememberAgentID(revision.GetAgentId())
+			if err := c.recordPrivilegedRevision(ctx, revision); err != nil {
+				log.Printf("Failed to record privileged revision %d: %v", revision.GetRevision(), err)
+			}
+		}
+		if received {
+			retry.Reset()
+		}
+		if err := stream.Err(); err != nil && isUnsupported(err) {
+			return
+		}
+		if ctx.Err() != nil || !retry.Wait(ctx, stream.Err()) {
+			return
+		}
+	}
+}
+
+// recordPrivilegedRevision stores a delivered revision and reports the state
+// it is waiting in.
+//
+// An automatic class is reported as failed rather than applied. The panel
+// classifies, but these settings are privileged by construction, so a
+// revision claiming it needs no human is a classification the Agent must not
+// honour: doing so would turn the panel's mistake into a silent privilege
+// grant.
+func (c *Client) recordPrivilegedRevision(parent context.Context, revision *configv1.PrivilegedRevision) error {
+	state := configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_NEEDS_CONFIRMATION
+	var detail *commonv1.ErrorDetail
+
+	recordErr := c.privilegedStore.RecordPending(revision)
+	switch {
+	case recordErr != nil:
+		state = configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_FAILED
+		detail = &commonv1.ErrorDetail{Code: "PRIVILEGED_REJECTED", Message: recordErr.Error()}
+	case revision.GetPlan().GetUpgradeClass() == configv1.UpgradeClass_UPGRADE_CLASS_AUTOMATIC:
+		state = configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_FAILED
+		detail = &commonv1.ErrorDetail{
+			Code:    "PRIVILEGED_REQUIRES_LOCAL_APPROVAL",
+			Message: "privileged settings are never applied automatically; run komari-agent upgrade on the host",
+		}
+	case revision.GetPlan().GetUpgradeClass() == configv1.UpgradeClass_UPGRADE_CLASS_MANUAL_PRIVILEGED:
+		state = configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_NEEDS_MANUAL_AUTHORIZATION
+	}
+
+	ctx, cancel := context.WithTimeout(parent, requestDeadline)
+	defer cancel()
+	report := connect.NewRequest(&configv1.ReportPrivilegedDeliveryRequest{
+		AgentId:             c.agentIDValue(),
+		Revision:            revision.GetRevision(),
+		State:               state,
+		FinishedAt:          timestamppb.Now(),
+		ActivePrivilegeMode: capability.Detect(runtimeconfig.RemoteControlEnabled()).GetPrivilegeMode(),
+	})
+	if detail != nil {
+		report.Msg.Errors = []*commonv1.ErrorDetail{detail}
+	}
+	c.authorize(report.Header())
+	if _, err := c.privileged.ReportPrivilegedDelivery(ctx, report); err != nil && !isUnsupported(err) {
+		return err
+	}
+	if recordErr != nil {
+		return recordErr
+	}
+	return nil
 }
 
 func (c *Client) runConfigPolling(ctx context.Context) {

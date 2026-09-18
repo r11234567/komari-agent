@@ -30,10 +30,14 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-var (
-	privilegedStatePath string
-	upgradeAssumeYes    bool
-)
+var upgradeAssumeYes bool
+
+// privilegedPath resolves where the privileged configuration state lives.
+//
+// Like the credentials path this is a root-level persistent flag, so the
+// running daemon and these commands cannot end up reading different files and
+// disagreeing about what is pending or active.
+func privilegedPath() string { return flags.PrivilegedStateFile }
 
 var upgradeCmd = &cobra.Command{
 	Use:   "upgrade",
@@ -51,7 +55,7 @@ is never sent to the panel or seen by the Agent; the panel is only told which
 method verified you.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		loadFromEnv()
-		store, err := privileged.Open(privilegedStatePath)
+		store, err := privileged.Open(privilegedPath())
 		if err != nil {
 			return err
 		}
@@ -122,7 +126,7 @@ The withdrawn settings become the new rollback target, so rolling back by
 mistake can itself be undone.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		loadFromEnv()
-		store, err := privileged.Open(privilegedStatePath)
+		store, err := privileged.Open(privilegedPath())
 		if err != nil {
 			return err
 		}
@@ -169,7 +173,7 @@ var privilegedStatusCmd = &cobra.Command{
 	Use:   "privileged",
 	Short: "Show the privileged configuration and any pending change",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		store, err := privileged.Open(privilegedStatePath)
+		store, err := privileged.Open(privilegedPath())
 		if err != nil {
 			return err
 		}
@@ -291,7 +295,7 @@ func writeAuditLog(message string) {
 // can check the outcome against what the revision assumed instead of trusting
 // the reported state alone.
 func reportPrivilegedOutcome(parent context.Context, revision uint64, state configv1.PrivilegedDeliveryState, mode reportv1.PrivilegeMode, auth localauth.Result) error {
-	credentialStore, err := credentials.Open(loginCredentialsPath)
+	credentialStore, err := credentials.Open(credentialsPath())
 	if err != nil {
 		return err
 	}
@@ -322,7 +326,7 @@ func reportPrivilegedOutcome(parent context.Context, revision uint64, state conf
 	// the panel that the upgrade ran on this machine rather than being claimed
 	// from somewhere else.
 	if state == configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_DELIVERED && auth.Method != "" {
-		store, storeErr := privileged.Open(privilegedStatePath)
+		store, storeErr := privileged.Open(privilegedPath())
 		if storeErr != nil {
 			return nil
 		}
@@ -345,10 +349,6 @@ func reportPrivilegedOutcome(parent context.Context, revision uint64, state conf
 }
 
 func init() {
-	for _, command := range []*cobra.Command{upgradeCmd, rollbackCmd, privilegedStatusCmd} {
-		command.Flags().StringVar(&privilegedStatePath, "privileged-state-file", "", "Path to the stored privileged configuration state")
-		command.Flags().StringVar(&loginCredentialsPath, "credentials-file", "", "Path to the stored credentials")
-	}
 	upgradeCmd.Flags().BoolVarP(&upgradeAssumeYes, "yes", "y", false, "Do not ask for confirmation (local authentication is still required)")
 	rollbackCmd.Flags().BoolVarP(&upgradeAssumeYes, "yes", "y", false, "Do not ask for confirmation")
 	statusCmd.AddCommand(privilegedStatusCmd)

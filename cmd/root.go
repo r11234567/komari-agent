@@ -228,6 +228,8 @@ func init() {
 	RootCmd.PersistentFlags().BoolVar(&flags.DisableCompression, "disable-compression", false, "Disable v2 gzip/permessage-deflate compression")
 	RootCmd.PersistentFlags().StringVar(&flags.PreferIPVersion, "prefer-ip-version", "", "Prefer IP version for dashboard connections: 4 or 6")
 	RootCmd.PersistentFlags().StringVar(&flags.RuntimeStateFile, "runtime-state-file", "", "Path for persisted online runtime configuration snapshots")
+	RootCmd.PersistentFlags().StringVar(&flags.PrivilegedStateFile, "privileged-state-file", "", "Path for persisted privileged configuration state")
+	RootCmd.PersistentFlags().StringVar(&flags.CredentialsFile, "credentials-file", "", "Path for persisted enrollment credentials")
 	RootCmd.PersistentFlags().ParseErrorsWhitelist.UnknownFlags = true
 }
 

@@ -28,10 +28,17 @@ import (
 const enrollmentTimeout = 15 * time.Minute
 
 var (
-	loginEndpoint        string
-	loginCredentialsPath string
-	loginNoPin           bool
+	loginEndpoint string
+	loginNoPin    bool
 )
+
+// credentialsPath resolves where credentials live.
+//
+// The path is a root-level persistent flag rather than a per-command one so
+// that a host storing its identity somewhere non-default does not have to
+// repeat the location on every subcommand, and so the running daemon and the
+// CLI cannot disagree about which file is authoritative.
+func credentialsPath() string { return flags.CredentialsFile }
 
 var loginCmd = &cobra.Command{
 	Use:   "login",
@@ -57,7 +64,7 @@ is the step where a human decides this machine may join.`,
 			return errors.New("a panel address is required: pass --endpoint panel.example.com")
 		}
 
-		store, err := credentials.Open(loginCredentialsPath)
+		store, err := credentials.Open(credentialsPath())
 		if err != nil {
 			return err
 		}
@@ -120,7 +127,7 @@ If the sign-in has fully expired, this cannot recover it: re-enrolling needs
 a human to approve in the panel again. That is the point of an expiry.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		loadFromEnv()
-		store, err := credentials.Open(loginCredentialsPath)
+		store, err := credentials.Open(credentialsPath())
 		if err != nil {
 			return err
 		}
@@ -166,7 +173,7 @@ current, what privileges the Agent holds, and which configuration revision is
 running.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		loadFromEnv()
-		store, err := credentials.Open(loginCredentialsPath)
+		store, err := credentials.Open(credentialsPath())
 		if err != nil {
 			return err
 		}
@@ -206,7 +213,7 @@ var logoutCmd = &cobra.Command{
 This only affects this host. The machine stays registered in the panel, so
 remove it there as well if you are decommissioning it.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		store, err := credentials.Open(loginCredentialsPath)
+		store, err := credentials.Open(credentialsPath())
 		if err != nil {
 			return err
 		}
@@ -238,7 +245,7 @@ var trustShowCmd = &cobra.Command{
 	Use:   "show",
 	Short: "Show the pinned panel signing keys",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		store, err := credentials.Open(loginCredentialsPath)
+		store, err := credentials.Open(credentialsPath())
 		if err != nil {
 			return err
 		}
@@ -273,7 +280,7 @@ Run this after the panel rotates its keys. Compare the printed fingerprints
 against the panel before relying on them: this replaces what the Agent trusts.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		loadFromEnv()
-		store, err := credentials.Open(loginCredentialsPath)
+		store, err := credentials.Open(credentialsPath())
 		if err != nil {
 			return err
 		}
@@ -337,9 +344,6 @@ func firstNonEmpty(values ...string) string {
 func init() {
 	loginCmd.Flags().StringVarP(&loginEndpoint, "endpoint", "e", "", "Panel address, for example panel.example.com")
 	loginCmd.Flags().BoolVar(&loginNoPin, "no-pin", false, "Skip pinning the panel signing keys during enrollment")
-	for _, command := range []*cobra.Command{loginCmd, refreshCmd, statusCmd, logoutCmd, trustShowCmd, trustRefreshCmd} {
-		command.Flags().StringVar(&loginCredentialsPath, "credentials-file", "", "Path to the stored credentials")
-	}
 	trustCmd.AddCommand(trustShowCmd, trustRefreshCmd)
 	RootCmd.AddCommand(loginCmd, refreshCmd, statusCmd, logoutCmd, trustCmd)
 }
