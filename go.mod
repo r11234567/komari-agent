@@ -1,6 +1,6 @@
 module github.com/komari-monitor/komari-agent
 
-go 1.25.0
+go 1.26.0
 
 require (
 	connectrpc.com/connect v1.20.0
@@ -17,7 +17,7 @@ require (
 	github.com/shirou/gopsutil/v4 v4.26.4
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/net v0.58.0
-	golang.org/x/sys v0.47.0
+	golang.org/x/sys v0.48.0
 	google.golang.org/protobuf v1.36.12
 	gopkg.in/toast.v1 v1.0.0-20180812000517-0a84660828b2
 )
