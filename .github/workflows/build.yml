@@ -45,7 +45,7 @@ jobs:
       # version silently: a generated-client change alters wire compatibility
       # with the panel, so it has to be a deliberate edit here as well.
       - name: Verify pinned protocol dependency
-        run: go list -m github.com/r11234567/komari-proto | grep -Fx 'github.com/r11234567/komari-proto v0.1.29'
+        run: go list -m github.com/r11234567/komari-proto | grep -Fx 'github.com/r11234567/komari-proto v0.1.30'
 
       - name: Run transport and runtime contract tests
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
