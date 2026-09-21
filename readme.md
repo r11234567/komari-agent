@@ -1,3 +1,13 @@
+> **Fork 声明**
+>
+> 本仓库是 [komari-monitor/komari-agent](https://github.com/komari-monitor/komari-agent) 的 Fork，主要用于个人使用、部署、测试和定制。
+>
+> 本仓库**并非上游项目的官方仓库**，此处所做的修改不应视为上游项目的一部分。
+>
+> 如需了解官方项目、文档、版本发布及相关支持，请以[komari-monitor/komari-agent]为准。
+>
+> 上游项目的版权、许可证及贡献者署名均保持不变。
+
 # komari-agent
 
 ## 配置方式
