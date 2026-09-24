@@ -4,6 +4,7 @@
 package clientcore
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -20,8 +21,10 @@ import (
 	"github.com/google/uuid"
 	flags_pkg "github.com/komari-monitor/komari-agent/cmd/flags"
 	"github.com/komari-monitor/komari-agent/core/capability"
+	"github.com/komari-monitor/komari-agent/core/credentials"
 	"github.com/komari-monitor/komari-agent/core/privileged"
 	"github.com/komari-monitor/komari-agent/core/runtimeconfig"
+	"github.com/komari-monitor/komari-agent/core/signing"
 	"github.com/komari-monitor/komari-agent/dnsresolver"
 	"github.com/komari-monitor/komari-agent/monitoring"
 	"github.com/komari-monitor/komari-agent/requestheaders"
@@ -42,6 +45,7 @@ import (
 	reportv1connect "github.com/r11234567/komari-proto/gen/go/komari/report/v1/reportv1connect"
 	websshv1 "github.com/r11234567/komari-proto/gen/go/komari/webssh/v1"
 	websshv1connect "github.com/r11234567/komari-proto/gen/go/komari/webssh/v1/websshv1connect"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -71,6 +75,21 @@ type Client struct {
 	// Agent only ever writes a pending revision here; promoting it is an
 	// explicit local decision made through the CLI.
 	privilegedStore *privileged.Store
+	// credentialStore holds the enrolled identity, including the panel signing
+	// keys this Agent pinned. It is what makes a delivered instruction
+	// attributable rather than merely well-formed.
+	credentialStore *credentials.Store
+	// replayGuard remembers which instruction nonces were already carried out,
+	// persisted so a restart cannot reopen the window.
+	replayGuard *signing.ReplayGuard
+}
+
+// identity returns the enrolled identity, if this Agent has one.
+func (c *Client) identity() (credentials.Identity, bool) {
+	if c.credentialStore == nil {
+		return credentials.Identity{}, false
+	}
+	return c.credentialStore.Identity()
 }
 
 func (c *Client) agentIDValue() string {
@@ -107,6 +126,15 @@ func New(config *flags_pkg.Config, store *runtimeconfig.Store) (*Client, error) 
 		log.Printf("Privileged configuration state unavailable; privileged delivery is disabled: %v", privilegedErr)
 		privilegedStore = nil
 	}
+	// A credential store that will not open leaves the Agent unable to verify
+	// which panel composed an instruction, so the privileged watch is disabled
+	// rather than run without attribution.
+	credentialStore, credentialErr := credentials.Open(config.CredentialsFile)
+	if credentialErr != nil {
+		log.Printf("Enrolled identity unavailable; privileged delivery is disabled: %v", credentialErr)
+		credentialStore = nil
+		privilegedStore = nil
+	}
 	httpClient := dnsresolver.GetHTTPClientWithPreference(requestDeadline, config.PreferIPVersion)
 	networkHTTPClient := dnsresolver.GetHTTPClientWithPreference(35*time.Second, config.PreferIPVersion)
 	streamHTTPClient := dnsresolver.GetStreamingHTTPClientWithPreference(config.PreferIPVersion)
@@ -124,6 +152,8 @@ func New(config *flags_pkg.Config, store *runtimeconfig.Store) (*Client, error) 
 		webssh:     websshv1connect.NewWebSSHServiceClient(streamHTTPClient, baseURL),
 		token:      config.Token, store: store,
 		privilegedStore: privilegedStore,
+		credentialStore: credentialStore,
+		replayGuard:     signing.NewReplayGuard(config.ReplayStateFile),
 	}, nil
 }
 
@@ -354,6 +384,16 @@ func (c *Client) recordPrivilegedRevision(parent context.Context, revision *conf
 	state := configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_NEEDS_CONFIRMATION
 	var detail *commonv1.ErrorDetail
 
+	// Verification happens before the revision is stored. A revision that
+	// cannot be attributed to the panel this Agent enrolled with is refused
+	// outright rather than recorded as pending: leaving it visible to the
+	// operator would invite them to approve something nobody vouched for.
+	if err := c.verifyPrivilegedRevision(revision); err != nil {
+		return c.reportPrivilegedState(parent, revision.GetRevision(),
+			configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_FAILED,
+			&commonv1.ErrorDetail{Code: "PRIVILEGED_SIGNATURE_REJECTED", Message: err.Error()})
+	}
+
 	recordErr := c.privilegedStore.RecordPending(revision)
 	switch {
 	case recordErr != nil:
@@ -369,11 +409,22 @@ func (c *Client) recordPrivilegedRevision(parent context.Context, revision *conf
 		state = configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_NEEDS_MANUAL_AUTHORIZATION
 	}
 
+	if err := c.reportPrivilegedState(parent, revision.GetRevision(), state, detail); err != nil {
+		return err
+	}
+	if recordErr != nil {
+		return recordErr
+	}
+	return nil
+}
+
+// reportPrivilegedState tells the panel which state a revision is waiting in.
+func (c *Client) reportPrivilegedState(parent context.Context, revision uint64, state configv1.PrivilegedDeliveryState, detail *commonv1.ErrorDetail) error {
 	ctx, cancel := context.WithTimeout(parent, requestDeadline)
 	defer cancel()
 	report := connect.NewRequest(&configv1.ReportPrivilegedDeliveryRequest{
 		AgentId:             c.agentIDValue(),
-		Revision:            revision.GetRevision(),
+		Revision:            revision,
 		State:               state,
 		FinishedAt:          timestamppb.Now(),
 		ActivePrivilegeMode: capability.Detect(runtimeconfig.RemoteControlEnabled()).GetPrivilegeMode(),
@@ -385,10 +436,64 @@ func (c *Client) recordPrivilegedRevision(parent context.Context, revision *conf
 	if _, err := c.privileged.ReportPrivilegedDelivery(ctx, report); err != nil && !isUnsupported(err) {
 		return err
 	}
-	if recordErr != nil {
-		return recordErr
+	return nil
+}
+
+// verifyPrivilegedRevision establishes that the panel composed this revision.
+//
+// The check is skipped only when no keys are pinned, which is the state of an
+// Agent enrolled against a panel that does not sign yet. That is a deliberate
+// migration allowance, not a fallback: once an Agent has pinned a key it will
+// never again act on an unsigned revision, so a stripped signature cannot
+// downgrade a configured Agent.
+func (c *Client) verifyPrivilegedRevision(revision *configv1.PrivilegedRevision) error {
+	identity, ok := c.identity()
+	if !ok || len(identity.ControlPlaneKeys) == 0 {
+		return nil
+	}
+	envelope := revision.GetSignature()
+	if envelope == nil {
+		return errors.New("the panel sent a privileged revision without a signature, but this Agent has pinned signing keys")
+	}
+	verifier := signing.New(identity, c.replayGuard)
+	instruction, err := verifier.Verify(envelope)
+	if err != nil {
+		return err
+	}
+	// The signature covers an instruction, and that instruction has to be
+	// about this revision. Without this a valid signature over revision 3
+	// would authorize revision 4.
+	if instruction.InstructionType != privilegedInstructionType {
+		return fmt.Errorf("the signature authorizes %q, not a privileged configuration change", instruction.InstructionType)
+	}
+	if !bytes.Equal(instruction.Body, privilegedRevisionBody(revision)) {
+		return errors.New("the signature does not match the delivered privileged configuration")
 	}
 	return nil
+}
+
+// privilegedInstructionType names what a privileged revision signature covers.
+const privilegedInstructionType = "komari.config.v1.PrivilegedRevision"
+
+// privilegedRevisionBody is the canonical bytes a signature commits to.
+//
+// The settings and the revision number are covered, so neither the contents
+// nor the ordering can be altered under a valid signature. Deterministic
+// marshalling matters here: protobuf field ordering is not guaranteed
+// otherwise, and a re-serialization that differed would reject a legitimate
+// revision.
+func privilegedRevisionBody(revision *configv1.PrivilegedRevision) []byte {
+	body := &configv1.PrivilegedRevision{
+		AgentId:    revision.GetAgentId(),
+		Revision:   revision.GetRevision(),
+		Privileged: revision.GetPrivileged(),
+		Plan:       revision.GetPlan(),
+	}
+	encoded, err := proto.MarshalOptions{Deterministic: true}.Marshal(body)
+	if err != nil {
+		return nil
+	}
+	return encoded
 }
 
 func (c *Client) runConfigPolling(ctx context.Context) {

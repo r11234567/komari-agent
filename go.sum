@@ -180,3 +180,7 @@ gopkg.in/yaml.v2 v2.2.1 h1:mUhvW9EsL+naU5Q3cakzfE91YhliOondGd6ZrsDBHQE=
 gopkg.in/yaml.v2 v2.2.1/go.mod h1:hI93XBmqTisBFMUTm0b8Fm+jr3Dg1NNxqwp+5A1VGuI=
 gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
 gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
+github.com/r11234567/komari-proto v0.1.31 h1:EfUI7xSIwxWxLO9gUxl5tgnsytoEUVtp4qLZ7s4RZaU=
+github.com/r11234567/komari-proto v0.1.31/go.mod h1:GkpdDO6JqRdEN04VG8b6amDJMCo9E2RqL+UA8yxvsFI=
+github.com/r11234567/komari-proto v0.1.32 h1:TaUNUAQ0n6wDxThOWnwS9AQFYjjsGM6SjVqQ9VsqyB4=
+github.com/r11234567/komari-proto v0.1.32/go.mod h1:GkpdDO6JqRdEN04VG8b6amDJMCo9E2RqL+UA8yxvsFI=

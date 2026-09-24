@@ -293,6 +293,7 @@ runtime_state_path="${target_dir}/runtime-config.json"
 # without guessing which user installed the Agent.
 credentials_path="${target_dir}/credentials.json"
 privileged_state_path="${target_dir}/privileged.json"
+replay_state_path="${target_dir}/nonces.json"
 
 echo -e "${WHITE}===========================================${NC}"
 echo -e "${WHITE}    Komari Agent Installation Script     ${NC}"
@@ -557,6 +558,10 @@ esac
 case " $komari_args " in
     *" --privileged-state-file "*) ;;
     *) komari_args="$komari_args --privileged-state-file ${privileged_state_path}" ;;
+esac
+case " $komari_args " in
+    *" --replay-state-file "*) ;;
+    *) komari_args="$komari_args --replay-state-file ${replay_state_path}" ;;
 esac
 
 # Detect init system and configure service
