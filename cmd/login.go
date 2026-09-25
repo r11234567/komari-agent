@@ -302,8 +302,66 @@ against the panel before relying on them: this replaces what the Agent trusts.`,
 	},
 }
 
+var reauthCmd = &cobra.Command{
+	Use:   "reauth",
+	Short: "Re-authenticate this machine when its sign-in has expired",
+	Long: `Re-authenticate this machine when its sign-in has expired.
+
+When the refresh token expires (after ~180 days), the Agent can no longer
+renew itself silently. This command starts a new device authorization grant
+that a panel administrator must approve, just like the original login, but
+preserves the machine's identity, keypair, and pinned trust bundle.
+
+Use this instead of 'logout + login' to avoid losing the machine's history
+and configuration in the panel.`,
+	Example: `  komari-agent reauth`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		loadFromEnv()
+		store, err := credentials.Open(credentialsPath())
+		if err != nil {
+			return err
+		}
+		identity, ok := store.Identity()
+		if !ok {
+			return errors.New("this machine is not enrolled; run 'komari-agent login' instead")
+		}
+		if !identity.RefreshExpired(time.Now()) {
+			fmt.Printf("Sign-in for agent %s is still valid (until %s).\n",
+				identity.AgentID, identity.RefreshTokenExpiresAt.Local().Format("2006-01-02 15:04"))
+			fmt.Println("Use 'komari-agent refresh' to renew the access token, or wait until it expires.")
+			return nil
+		}
+
+		client, err := enrollment.New(identity.Endpoint, dnsresolver.GetHTTPClientWithPreference(30*time.Second, flags.PreferIPVersion))
+		if err != nil {
+			return err
+		}
+
+		ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		ctx, cancel := context.WithTimeout(ctx, enrollmentTimeout)
+		defer cancel()
+
+		fmt.Printf("Re-authenticating agent %s with %s\n\n", identity.AgentID, client.Endpoint())
+		renewed, err := client.Reauth(ctx, identity, printInstruction)
+		if err != nil {
+			return err
+		}
+
+		if err := store.Save(renewed); err != nil {
+			return err
+		}
+
+		fmt.Printf("\nRe-authenticated as agent %s\n", renewed.AgentID)
+		if !renewed.RefreshTokenExpiresAt.IsZero() {
+			fmt.Printf("Sign-in valid until %s (renewed automatically)\n",
+				renewed.RefreshTokenExpiresAt.Local().Format("2006-01-02 15:04"))
+		}
+		return nil
+	},
+}
+
 func pinTrust(ctx context.Context, client *enrollment.Client, store *credentials.Store, identity credentials.Identity) error {
-	keys, algorithms, requireAll, minimum, err := client.FetchTrustBundle(ctx, identity.AgentID)
 	if err != nil {
 		return err
 	}
@@ -345,5 +403,5 @@ func init() {
 	loginCmd.Flags().StringVarP(&loginEndpoint, "endpoint", "e", "", "Panel address, for example panel.example.com")
 	loginCmd.Flags().BoolVar(&loginNoPin, "no-pin", false, "Skip pinning the panel signing keys during enrollment")
 	trustCmd.AddCommand(trustShowCmd, trustRefreshCmd)
-	RootCmd.AddCommand(loginCmd, refreshCmd, statusCmd, logoutCmd, trustCmd)
+	RootCmd.AddCommand(loginCmd, refreshCmd, reauthCmd, statusCmd, logoutCmd, trustCmd)
 }

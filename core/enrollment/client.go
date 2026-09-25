@@ -80,10 +80,41 @@ func (c *Client) Endpoint() string { return c.endpoint }
 
 // Enroll runs the whole grant and returns a complete identity.
 //
+// Enroll runs the whole grant and returns a complete identity.
+//
 // The keypair is generated here and the private half never leaves this
 // process, so the credentials the server issues are bound to a key only this
 // machine holds.
 func (c *Client) Enroll(ctx context.Context, scopes []string, progress Progress) (credentials.Identity, error) {
+	return c.enroll(ctx, scopes, "", progress)
+}
+
+// Reauth re-authenticates an already-registered agent whose refresh token has
+// expired. It reuses the existing keypair and agent ID so the panel presents
+// this as a re-authorization of a known machine rather than a brand-new
+// enrollment.
+func (c *Client) Reauth(ctx context.Context, identity credentials.Identity, progress Progress) (credentials.Identity, error) {
+	if identity.AgentID == "" {
+		return identity, errors.New("no agent ID is stored; run komari-agent login")
+	}
+	next, err := c.enroll(ctx, identity.Scopes, identity.AgentID, progress)
+	if err != nil {
+		return identity, err
+	}
+	// Preserve the keypair and trust bundle: re-auth renews credentials, it
+	// does not replace identity.
+	next.PrivateKey = identity.PrivateKey
+	next.PublicKey = identity.PublicKey
+	next.KeyID = identity.KeyID
+	next.ControlPlaneKeys = identity.ControlPlaneKeys
+	next.PolicyAlgorithms = identity.PolicyAlgorithms
+	next.PolicyRequireAll = identity.PolicyRequireAll
+	next.PolicyMinimumSignatures = identity.PolicyMinimumSignatures
+	next.EnrolledAt = identity.EnrolledAt
+	return next, nil
+}
+
+func (c *Client) enroll(ctx context.Context, scopes []string, existingAgentID string, progress Progress) (credentials.Identity, error) {
 	publicKey, privateKey, keyID, err := credentials.GenerateKeypair()
 	if err != nil {
 		return credentials.Identity{}, err
@@ -93,7 +124,7 @@ func (c *Client) Enroll(ctx context.Context, scopes []string, progress Progress)
 		return credentials.Identity{}, fmt.Errorf("encode agent public key: %w", err)
 	}
 
-	begin, err := c.service.BeginEnrollment(ctx, connect.NewRequest(&enrollmentv1.BeginEnrollmentRequest{
+	req := &enrollmentv1.BeginEnrollmentRequest{
 		AgentPublicKey: &securityv1.PublicKey{
 			Algorithm: securityv1.SignatureAlgorithm_SIGNATURE_ALGORITHM_ED25519,
 			Value:     rawPublic,
@@ -101,7 +132,11 @@ func (c *Client) Enroll(ctx context.Context, scopes []string, progress Progress)
 		},
 		Device:          localDevice(),
 		RequestedScopes: scopes,
-	}))
+	}
+	if existingAgentID != "" {
+		req.ExistingAgentId = &existingAgentID
+	}
+	begin, err := c.service.BeginEnrollment(ctx, connect.NewRequest(req))
 	if err != nil {
 		return credentials.Identity{}, fmt.Errorf("begin enrollment: %w", err)
 	}
@@ -203,6 +238,16 @@ func (c *Client) Refresh(ctx context.Context, identity credentials.Identity) (cr
 	if err != nil {
 		return identity, fmt.Errorf("refresh credentials: %w", err)
 	}
+	// If the panel signed its response, verify it before accepting the new
+	// credentials. A response without a proof is accepted on its own: not all
+	// panel versions sign yet, and refusing a valid rotation because the proof
+	// is absent would lock out more agents than the verification protects.
+	// Once panels universally sign, this can be tightened to require a proof.
+	if envelope := response.Msg.GetProof(); envelope != nil && len(identity.ControlPlaneKeys) > 0 {
+		if err := verifyResponseEnvelope(envelope, identity); err != nil {
+			return identity, fmt.Errorf("refresh response signature rejected: %w", err)
+		}
+	}
 	issued := response.Msg.GetCredentials()
 	if issued == nil {
 		return identity, errors.New("control plane returned no credentials")
@@ -253,7 +298,44 @@ func (c *Client) FetchTrustBundle(ctx context.Context, agentID string) ([]creden
 	return keys, algorithms, policy.GetRequireAll(), policy.GetMinimumSignatures(), nil
 }
 
-// Fingerprint renders a pinned key for an operator to compare by eye.
+// verifyResponseEnvelope checks that a SignedEnvelope from the panel verifies
+// against at least one of the pinned control-plane keys. It is intentionally
+// simpler than the full signing.Verifier: refresh responses carry no nonce or
+// agent-binding fields, so replay and binding checks are omitted here; the
+// request proof already binds the exchange to this agent and this token.
+func verifyResponseEnvelope(envelope *securityv1.SignedEnvelope, identity credentials.Identity) error {
+	payload := envelope.GetPayload()
+	if len(payload) == 0 {
+		return errors.New("signed response envelope has no payload")
+	}
+	for _, sig := range envelope.GetSignatures() {
+		alg := sig.GetAlgorithm()
+		if alg != securityv1.SignatureAlgorithm_SIGNATURE_ALGORITHM_ED25519 {
+			// Only Ed25519 is implemented; other algorithms are skipped rather
+			// than failed so a dual-signed envelope from a newer panel still
+			// verifies against the Ed25519 key an older agent understands.
+			continue
+		}
+		for _, pinned := range identity.ControlPlaneKeys {
+			if int32(alg) != pinned.Algorithm {
+				continue
+			}
+			if sig.GetKeyId() != "" && pinned.KeyID != "" && sig.GetKeyId() != pinned.KeyID {
+				continue
+			}
+			raw, err := base64.StdEncoding.DecodeString(pinned.Value)
+			if err != nil || len(raw) != ed25519.PublicKeySize {
+				continue
+			}
+			if ed25519.Verify(ed25519.PublicKey(raw), payload, sig.GetValue()) {
+				return nil
+			}
+		}
+	}
+	return errors.New("no pinned control-plane key verified the refresh response signature")
+}
+
+
 //
 // The operator typed the panel's domain by hand, so first contact is where
 // trust is established. Showing the fingerprint is what lets a later

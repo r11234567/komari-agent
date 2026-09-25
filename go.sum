@@ -50,8 +50,8 @@ github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 h1:o4JXh1EVt
 github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55/go.mod h1:OmDBASR4679mdNQnz2pUhc2G8CO2JrUAVFDRBDP/hJE=
 github.com/prometheus-community/pro-bing v0.9.1 h1:kpuAr6AU2oRtzGihJSUcetHtjc7ku7h6PxeuW9RVrQw=
 github.com/prometheus-community/pro-bing v0.9.1/go.mod h1:z79wYTxAOf6FpTng0QdIhZ3j/Nd5l3+gnFSCIT+SiSQ=
-github.com/r11234567/komari-proto v0.1.32 h1:TaUNUAQ0n6wDxThOWnwS9AQFYjjsGM6SjVqQ9VsqyB4=
-github.com/r11234567/komari-proto v0.1.32/go.mod h1:GkpdDO6JqRdEN04VG8b6amDJMCo9E2RqL+UA8yxvsFI=
+github.com/r11234567/komari-proto v0.1.34 h1:IKFzrQpRDfmeKWRtB3kYHHDM6W3INhVjFXTBSOfWp4c=
+github.com/r11234567/komari-proto v0.1.34/go.mod h1:GkpdDO6JqRdEN04VG8b6amDJMCo9E2RqL+UA8yxvsFI=
 github.com/rhysd/go-github-selfupdate v1.2.3 h1:iaa+J202f+Nc+A8zi75uccC8Wg3omaM7HDeimXA22Ag=
 github.com/rhysd/go-github-selfupdate v1.2.3/go.mod h1:mp/N8zj6jFfBQy/XMYoWsmfzxazpPAODuqarmPDe2Rg=
 github.com/russross/blackfriday/v2 v2.1.0/go.mod h1:+Rmxgy9KzJVeS9/2gXHxylqXiyQDYRxCVz55jmeOWTM=
