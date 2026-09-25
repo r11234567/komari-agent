@@ -362,6 +362,7 @@ and configuration in the panel.`,
 }
 
 func pinTrust(ctx context.Context, client *enrollment.Client, store *credentials.Store, identity credentials.Identity) error {
+	keys, algorithms, requireAll, minimum, err := client.FetchTrustBundle(ctx, identity.AgentID)
 	if err != nil {
 		return err
 	}
