@@ -49,7 +49,7 @@ jobs:
 
       - name: Run transport and runtime contract tests
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
-        run: go test ./core/... ./clientcore ./monitoring/unit ./terminal ./cmd
+        run: go test ./core/... ./clientcore ./server ./monitoring/unit ./terminal ./cmd
 
       - name: Build binary
         env:

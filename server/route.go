@@ -5,15 +5,12 @@ import (
 	cryptorand "crypto/rand"
 	"encoding/binary"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
-	v2 "github.com/komari-monitor/komari-agent/protocol/v2"
-	"github.com/komari-monitor/komari-agent/ws"
 	networkv1 "github.com/r11234567/komari-proto/gen/go/komari/network/v1"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
@@ -70,31 +67,6 @@ func probeReturnRoute(
 	return probeIPv4(ctx, destination, maxHops, hopTimeout)
 }
 
-func runLegacyRouteTask(conn *ws.SafeConn, task v2.RouteParams) {
-	assignment := &networkv1.ReturnRouteProbeAssignment{
-		TaskId: uint64(task.TaskID), Protocol: task.Protocol, Target: task.Target,
-		IpVersion: uint32(task.IPVersion), MaxHops: uint32(task.MaxHops),
-	}
-	hops, err := ProbeReturnRoute(context.Background(), assignment)
-	errText := ""
-	if err != nil {
-		errText = err.Error()
-	}
-	legacyHops := make([]v2.RouteHop, 0, len(hops))
-	for _, hop := range hops {
-		legacyHops = append(legacyHops, v2.RouteHop{TTL: int(hop.Ttl), IP: hop.Ip, LatencyMS: hop.LatencyMs, Timeout: hop.Timeout})
-	}
-	payload := v2.BuildRouteResultPayload(task, legacyHops, errText, time.Now())
-	if conn == nil {
-		if err := postV2RPC(payload); err != nil {
-			log.Printf("Failed to upload return route result over POST: %v", err)
-		}
-		return
-	}
-	if err := conn.WriteJSON(payload); err != nil {
-		log.Printf("Failed to upload return route result: %v", err)
-	}
-}
 
 func resolveRouteTarget(ctx context.Context, target string, version int) (net.IP, error) {
 	if host, _, err := net.SplitHostPort(target); err == nil {

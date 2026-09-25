@@ -1,174 +1,26 @@
 package server
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
-	"os"
-	"os/exec"
-	"runtime"
 	"strings"
 	"time"
 
-	"github.com/komari-monitor/komari-agent/core/capability"
-	"github.com/komari-monitor/komari-agent/core/runtimeconfig"
-	"github.com/komari-monitor/komari-agent/dnsresolver"
-	v2 "github.com/komari-monitor/komari-agent/protocol/v2"
-	"github.com/komari-monitor/komari-agent/ws"
 	ping "github.com/prometheus-community/pro-bing"
 )
 
-func NewTask(task_id, command string) {
-	if task_id == "" {
-		return
-	}
-	if strings.TrimSpace(command) == "" {
-		uploadTaskResult(task_id, "No command provided", 0, time.Now())
-		return
-	}
-	if allowed, reason := capability.RemoteControlAllowed(runtimeconfig.RemoteControlEnabled()); !allowed {
-		uploadTaskResult(task_id, reason, -1, time.Now())
-		return
-	}
-	log.Print("Executing remote task")
-	result, exitCode := runTaskCommand(command)
-	uploadTaskResult(task_id, result, exitCode, time.Now())
-}
-
-func runTaskCommand(command string) (string, int) {
-	cmd, cleanup, err := buildTaskCommand(command)
-	if err != nil {
-		return err.Error(), -1
-	}
-	defer cleanup()
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err = cmd.Run()
-
-	result := stdout.String()
-	if stderr.Len() > 0 {
-		result = appendErrorResult(result, stderr.String())
-	}
-	result = strings.ReplaceAll(result, "\r\n", "\n")
-	exitCode := 0
-	if err != nil {
-		if exitError, ok := err.(*exec.ExitError); ok {
-			exitCode = exitError.ExitCode()
-		} else {
-			result = appendErrorResult(result, err.Error())
-			exitCode = -1
-		}
-	}
-
-	return result, exitCode
-}
-
-func buildTaskCommand(command string) (*exec.Cmd, func(), error) {
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		scriptFile, err := os.CreateTemp("", "komari-task-*.ps1")
-		if err != nil {
-			return nil, func() {}, err
-		}
-		cleanup := func() {
-			_ = os.Remove(scriptFile.Name())
-		}
-		if _, err := scriptFile.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
-			_ = scriptFile.Close()
-			cleanup()
-			return nil, func() {}, err
-		}
-		script := "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n" + command
-		if _, err := scriptFile.WriteString(script); err != nil {
-			_ = scriptFile.Close()
-			cleanup()
-			return nil, func() {}, err
-		}
-		if err := scriptFile.Close(); err != nil {
-			cleanup()
-			return nil, func() {}, err
-		}
-		cmd = exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptFile.Name())
-		return cmd, cleanup, nil
-	} else {
-		cmd = exec.Command("sh", "-s")
-		cmd.Stdin = strings.NewReader(command)
-	}
-	return cmd, func() {}, nil
-}
-
-func appendErrorResult(result, err string) string {
-	if result == "" {
-		return err
-	}
-	return result + "\n" + err
-}
-
-func uploadTaskResult(taskID, result string, exitCode int, finishedAt time.Time) {
-	payload := map[string]interface{}{
-		"task_id":     taskID,
-		"result":      result,
-		"exit_code":   exitCode,
-		"finished_at": finishedAt,
-	}
-
-	jsonData, _ := json.Marshal(payload)
-	endpoint := strings.TrimSuffix(flags.Endpoint, "/") + "/api/clients/task/result?token=" + flags.Token
-
-	client := dnsresolver.GetHTTPClientWithPreference(30*time.Second, flags.PreferIPVersion)
-	maxRetry := flags.MaxRetries
-	for attempt := 0; attempt <= maxRetry; attempt++ {
-		req, err := http.NewRequest("POST", endpoint, bytes.NewReader(jsonData))
-		if err != nil {
-			log.Printf("Failed to create task result request: %v", err)
-			return
-		}
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := client.Do(req)
-		if resp != nil {
-			_, _ = io.Copy(io.Discard, resp.Body)
-			_ = resp.Body.Close()
-		}
-		if err == nil && resp != nil && resp.StatusCode == http.StatusOK {
-			return
-		}
-		if attempt == maxRetry {
-			if err != nil {
-				log.Printf("Failed to upload task result: %v", err)
-			} else if resp != nil {
-				log.Printf("Failed to upload task result: %s", resp.Status)
-			}
-			return
-		}
-		log.Printf("Failed to upload task result, retrying %d/%d", attempt+1, maxRetry)
-		time.Sleep(2 * time.Second)
-	}
-}
-
-// resolveIP 解析域名到 IP 地址，排除 DNS 查询时间
 func resolveIP(target string) (string, error) {
-	// 如果已经是 IP 地址，直接返回
 	if ip := net.ParseIP(target); ip != nil {
 		return target, nil
 	}
-	// 解析域名到 IP
 	addrs, err := net.LookupHost(target)
 	if err != nil || len(addrs) == 0 {
 		return "", errors.New("failed to resolve target")
 	}
-	return addrs[0], nil // 返回第一个解析的 IP
+	return addrs[0], nil
 }
 
 func icmpPing(target string, timeout time.Duration) (int64, error) {
@@ -176,16 +28,11 @@ func icmpPing(target string, timeout time.Duration) (int64, error) {
 	if err != nil {
 		host = target
 	}
-	// For ICMP, we only need the host/IP, port is irrelevant.
-	// If the host is an IPv6 literal, it might be wrapped in brackets.
 	host = strings.Trim(host, "[]")
-
-	// 先解析 IP 地址
 	ip, err := resolveIP(host)
 	if err != nil {
 		return -1, err
 	}
-
 	pinger, err := ping.NewPinger(ip)
 	if err != nil {
 		return -1, err
@@ -193,8 +40,7 @@ func icmpPing(target string, timeout time.Duration) (int64, error) {
 	pinger.Count = 1
 	pinger.Timeout = timeout
 	pinger.SetPrivileged(true)
-	err = pinger.Run()
-	if err != nil {
+	if err := pinger.Run(); err != nil {
 		return -1, err
 	}
 	stats := pinger.Statistics()
@@ -207,22 +53,16 @@ func icmpPing(target string, timeout time.Duration) (int64, error) {
 func tcpPing(target string, timeout time.Duration) (int64, error) {
 	host, port, err := net.SplitHostPort(target)
 	if err != nil {
-		// No port, assume port 80
 		host = target
 		port = "80"
 	}
-
-	// If the host is an IPv6 literal, it might be wrapped in brackets.
 	host = strings.Trim(host, "[]")
-
 	ip, err := resolveIP(host)
 	if err != nil {
 		return -1, err
 	}
-
-	targetAddr := net.JoinHostPort(ip, port)
 	start := time.Now()
-	conn, err := net.DialTimeout("tcp", targetAddr, timeout)
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, port), timeout)
 	if err != nil {
 		return -1, err
 	}
@@ -239,7 +79,6 @@ func httpPing(target string, timeout time.Duration) (int64, error) {
 	if err != nil {
 		return -1, err
 	}
-
 	transport := &http.Transport{
 		DisableKeepAlives: true,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -247,12 +86,10 @@ func httpPing(target string, timeout time.Duration) (int64, error) {
 			if err != nil {
 				return nil, err
 			}
-			dialer := &net.Dialer{Timeout: timeout}
-			return dialer.DialContext(ctx, network, net.JoinHostPort(resolvedIP, port))
+			return (&net.Dialer{Timeout: timeout}).DialContext(ctx, network, net.JoinHostPort(resolvedIP, port))
 		},
 	}
 	defer transport.CloseIdleConnections()
-
 	client := &http.Client{
 		Timeout:   timeout,
 		Transport: transport,
@@ -265,8 +102,6 @@ func httpPing(target string, timeout time.Duration) (int64, error) {
 		return -1, err
 	}
 	start := time.Now()
-	// The controller intentionally configures arbitrary public or private monitoring targets.
-	// The URL is scheme/authority validated, DNS-pinned above, and redirects are disabled.
 	resp, err := client.Do(req) // lgtm[go/request-forgery]
 	latency := time.Since(start).Milliseconds()
 	if err != nil {
@@ -280,22 +115,13 @@ func httpPing(target string, timeout time.Duration) (int64, error) {
 }
 
 func normalizeHTTPPingTarget(target string) (*url.URL, error) {
-	target = strings.TrimSpace(target)
-	if target == "" {
-		return nil, errors.New("HTTP ping target is empty")
-	}
-	if ip := net.ParseIP(target); ip != nil && ip.To4() == nil {
-		target = "[" + target + "]"
-	}
-	if !strings.Contains(target, "://") {
+	if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
 		target = "http://" + target
 	}
-
-	targetURL, err := url.ParseRequestURI(target)
+	targetURL, err := url.Parse(target)
 	if err != nil {
-		return nil, fmt.Errorf("invalid HTTP ping target: %w", err)
+		return nil, err
 	}
-	targetURL.Scheme = strings.ToLower(targetURL.Scheme)
 	if targetURL.Scheme != "http" && targetURL.Scheme != "https" {
 		return nil, errors.New("HTTP ping target must use http or https")
 	}
@@ -308,51 +134,14 @@ func normalizeHTTPPingTarget(target string) (*url.URL, error) {
 	return targetURL, nil
 }
 
-func NewPingTask(conn *ws.SafeConn, protocolVersion int, taskID uint, pingType, pingTarget string) {
-	if taskID == 0 {
-		log.Printf("Invalid task ID: %d", taskID)
-		return
-	}
-	pingResult := int(ProbePing(pingType, pingTarget, 3*time.Second))
-	finishedAt := time.Now()
-	payload := map[string]interface{}{
-		"type":        "ping_result",
-		"task_id":     taskID,
-		"ping_type":   pingType,
-		"value":       pingResult,
-		"finished_at": finishedAt,
-	}
-	var wsPayload interface{} = payload
-	if protocolVersion >= 2 {
-		wsPayload = v2.BuildPingResultPayload(taskID, pingType, pingResult, finishedAt)
-	}
-	// https://github.com/komari-monitor/komari/commit/eb87a4fc330b7d1c407fa4ff70177615a4f50a1f
-	// -1 代表丢包，服务端计算
-	//if pingResult == -1 {
-	//	return
-	//}
-	if conn == nil {
-		if protocolVersion >= 2 {
-			if err := postV2RPC(wsPayload); err != nil {
-				log.Printf("Failed to upload ping result over POST: %v", err)
-			}
-		}
-		return
-	}
-	if err := conn.WriteJSON(wsPayload); err != nil {
-		log.Printf("Failed to write JSON to WebSocket: %v", err)
-	}
-}
-
-// ProbePing executes the shared latency policy used by Connect and the legacy
-// compatibility transports. A result of -1 retains the historical loss marker.
+// ProbePing executes the shared latency policy used by the Connect transport.
+// A result of -1 means packet loss or an unreachable target.
 func ProbePing(pingType, pingTarget string, timeout time.Duration) int64 {
 	if timeout <= 0 {
 		timeout = 3 * time.Second
 	}
-	const highLatencyThreshold = 1000    // ms 阈值
-	const retryDropThresholdTcping = 800 // ms 重试中延迟降低超过此值则基本认为发生重传
-	// 800ms = SYN/SYN-ACK 首次超时重传 1000ms - 防误判容许 200ms 延迟抖动
+	const highLatencyThreshold = 1000
+	const retryDropThresholdTcping = 800
 
 	measure := func() (int64, error) {
 		switch pingType {
@@ -366,86 +155,29 @@ func ProbePing(pingType, pingTarget string, timeout time.Duration) int64 {
 			return -1, errors.New("unsupported ping type")
 		}
 	}
-	var latency int64
-	var err error
-	const pingHighLatencyRetries = 3
-	// 首次测量
-	if latency, err = measure(); err == nil {
-		firstLatency := latency
-		if latency > int64(highLatencyThreshold) && pingHighLatencyRetries > 0 {
-			attempts := pingHighLatencyRetries
-			for i := 0; i < attempts; i++ {
-				if second, err2 := measure(); err2 == nil {
-					if second <= int64(highLatencyThreshold) {
-						if pingType == "tcp" && firstLatency-second > int64(retryDropThresholdTcping) {
-							err = errors.New("suspicious retransmission detected in tcp handshake")
-							break
-						}
-						latency = second
-						break
-					}
-					if i == attempts-1 { // 最后一次仍高
-						err = errors.New("latency remains high after retries")
-					}
-				} else {
-					err = err2
-					break
+
+	latency, err := measure()
+	if err != nil {
+		return -1
+	}
+	firstLatency := latency
+	if latency > int64(highLatencyThreshold) {
+		const retries = 3
+		for i := 0; i < retries; i++ {
+			second, err2 := measure()
+			if err2 != nil {
+				return -1
+			}
+			if second <= int64(highLatencyThreshold) {
+				if pingType == "tcp" && firstLatency-second > int64(retryDropThresholdTcping) {
+					return -1
 				}
+				return second
+			}
+			if i == retries-1 {
+				return -1
 			}
 		}
 	}
-
-	if err != nil {
-		log.Print("Ping task failed")
-		return -1
-	}
 	return latency
-}
-
-func postV2RPC(payload interface{}) error {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	endpoint := strings.TrimSuffix(flags.Endpoint, "/") + "/api/clients/v2/rpc?token=" + flags.Token
-	compressed := false
-	if !flags.DisableCompression {
-		if gz, err := gzipBytes(body); err == nil {
-			body = gz
-			compressed = true
-		}
-	}
-	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if compressed {
-		req.Header.Set("Content-Encoding", "gzip")
-	}
-	client := dnsresolver.GetHTTPClientWithPreference(30*time.Second, flags.PreferIPVersion)
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return &httpStatusError{StatusCode: resp.StatusCode, Status: resp.Status, Body: string(body)}
-	}
-	_, _ = io.Copy(io.Discard, resp.Body)
-	return nil
-}
-
-func gzipBytes(data []byte) ([]byte, error) {
-	var buf bytes.Buffer
-	zw := gzip.NewWriter(&buf)
-	if _, err := zw.Write(data); err != nil {
-		_ = zw.Close()
-		return nil, err
-	}
-	if err := zw.Close(); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
 }

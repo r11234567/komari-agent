@@ -17,7 +17,6 @@ import (
 	"github.com/komari-monitor/komari-agent/dnsresolver"
 	"github.com/komari-monitor/komari-agent/monitoring/netstatic"
 	monitoring "github.com/komari-monitor/komari-agent/monitoring/unit"
-	"github.com/komari-monitor/komari-agent/server"
 	"github.com/komari-monitor/komari-agent/update"
 	"github.com/spf13/cobra"
 
@@ -44,9 +43,6 @@ var RootCmd = &cobra.Command{
 			if err != nil {
 				return fmt.Errorf("failed to parse config file: %w", err)
 			}
-		}
-		if flags.ProtocolVersion == 0 {
-			flags.ProtocolVersion = 2
 		}
 		if flags.PreferIPVersion != "" && flags.PreferIPVersion != "4" && flags.PreferIPVersion != "6" {
 			return fmt.Errorf("invalid --prefer-ip-version value %q: expected 4 or 6", flags.PreferIPVersion)
@@ -144,13 +140,8 @@ var RootCmd = &cobra.Command{
 				err = connectClient.Run(stopCtx)
 			}
 			if errors.Is(err, clientcore.ErrLegacyFallback) {
-				log.Printf("Connect endpoint unavailable; entering legacy v1/v2 compatibility transport: %v", err)
-				server.UpdateBasicInfo()
-				legacyCtx, stopLegacy := context.WithCancel(stopCtx)
-				go server.DoUploadBasicInfoWorks(legacyCtx)
-				server.EstablishWebSocketConnection()
-				stopLegacy()
-				continue
+				log.Printf("Connect endpoint unavailable; the legacy WebSocket transport has been removed. Please upgrade the panel or configure a valid Connect endpoint: %v", err)
+				return err
 			}
 			if err != nil {
 				log.Printf("Connect agent transport stopped: %v", err)
@@ -224,8 +215,7 @@ func init() {
 	RootCmd.PersistentFlags().StringVar(&flags.CustomIpv6, "custom-ipv6", "", "Custom IPv6 address to use")
 	RootCmd.PersistentFlags().BoolVar(&flags.GetIpAddrFromNic, "get-ip-addr-from-nic", false, "Get IP address from network interface")
 	RootCmd.PersistentFlags().StringVar(&flags.ConfigFile, "config", "", "Path to the configuration file")
-	RootCmd.PersistentFlags().IntVar(&flags.ProtocolVersion, "protocol-version", 2, "Report protocol version (1 or 2)")
-	RootCmd.PersistentFlags().BoolVar(&flags.DisableCompression, "disable-compression", false, "Disable v2 gzip/permessage-deflate compression")
+	RootCmd.PersistentFlags().BoolVar(&flags.DisableCompression, "disable-compression", false, "Disable gzip/permessage-deflate compression")
 	RootCmd.PersistentFlags().StringVar(&flags.PreferIPVersion, "prefer-ip-version", "", "Prefer IP version for dashboard connections: 4 or 6")
 	RootCmd.PersistentFlags().StringVar(&flags.RuntimeStateFile, "runtime-state-file", "", "Path for persisted online runtime configuration snapshots")
 	RootCmd.PersistentFlags().StringVar(&flags.PrivilegedStateFile, "privileged-state-file", "", "Path for persisted privileged configuration state")

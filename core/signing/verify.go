@@ -258,6 +258,28 @@ func verifyOne(algorithm int32, key, payload, signature []byte) bool {
 			return false
 		}
 		return ed25519.Verify(ed25519.PublicKey(key), payload, signature)
+
+	case securityv1.SignatureAlgorithm_SIGNATURE_ALGORITHM_ML_DSA_65,
+		securityv1.SignatureAlgorithm_SIGNATURE_ALGORITHM_ML_DSA_87:
+		// ML-DSA (FIPS 204) is not yet in the Go standard library.
+		// When a Go implementation ships, replace this stub with:
+		//   return mldsa.Verify(key, payload, signature)
+		// The algorithm is already accepted by the policy engine; only the
+		// cryptographic check is deferred. Until the stub is filled, a panel
+		// that sets RequireAll=true with an ML-DSA key will refuse all
+		// instructions, which is the safe failure mode.
+		_ = key
+		_ = signature
+		return false
+
+	case securityv1.SignatureAlgorithm_SIGNATURE_ALGORITHM_FN_DSA_512:
+		// FN-DSA (FIPS 206, Falcon-512) is not yet in the Go standard library.
+		// When a Go implementation ships, replace this stub with:
+		//   return fndsa.Verify(key, payload, signature)
+		_ = key
+		_ = signature
+		return false
+
 	default:
 		// An algorithm this build cannot check never counts as verified. The
 		// post-quantum values exist in the protocol before any implementation
