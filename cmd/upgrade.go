@@ -352,5 +352,13 @@ func init() {
 	upgradeCmd.Flags().BoolVarP(&upgradeAssumeYes, "yes", "y", false, "Do not ask for confirmation (local authentication is still required)")
 	rollbackCmd.Flags().BoolVarP(&upgradeAssumeYes, "yes", "y", false, "Do not ask for confirmation")
 	statusCmd.AddCommand(privilegedStatusCmd)
-	RootCmd.AddCommand(upgradeCmd, rollbackCmd)
+
+	// update-conf is an alias for upgrade; the name makes the intent clearer
+	// when an operator is following a privileged-config delivery command.
+	updateConfCmd := *upgradeCmd
+	updateConfCmd.Use = "update-conf"
+	updateConfCmd.Short = "Apply a pending privileged-configuration change (alias for upgrade)"
+	updateConfCmd.Hidden = false
+
+	RootCmd.AddCommand(upgradeCmd, rollbackCmd, &updateConfCmd)
 }
