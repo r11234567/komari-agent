@@ -545,6 +545,23 @@ if [ "$EUID" -eq 0 ] && [ "$service_user" != "root" ]; then
 fi
 log_success "Komari-agent installed to ${GREEN}$komari_agent_path${NC}"
 
+# Create a symlink in /usr/local/bin so operators can run komari-agent commands
+# directly (e.g. komari-agent login, komari-agent status) without knowing the
+# install path. Only attempted on Linux/macOS where /usr/local/bin is standard.
+if [ "$os_name" != "windows" ] && [ "$EUID" -eq 0 ]; then
+    symlink_dir="/usr/local/bin"
+    symlink_path="${symlink_dir}/komari-agent"
+    if [ -d "$symlink_dir" ]; then
+        ln -sf "$komari_agent_path" "$symlink_path"
+        log_success "Symlink created: ${GREEN}${symlink_path}${NC} -> ${komari_agent_path}"
+    else
+        log_warning "Skipping symlink: ${symlink_dir} does not exist"
+    fi
+elif [ "$os_name" != "windows" ] && [ "$EUID" -ne 0 ]; then
+    log_info "Not running as root; skipping /usr/local/bin symlink."
+    log_info "To run komari-agent commands manually, use: ${CYAN}${komari_agent_path}${NC}"
+fi
+
 # Keep the online-dispatch snapshot alongside this installation so the
 # separately privileged helper can roll it back without reading a user home.
 case " $komari_args " in
