@@ -115,7 +115,12 @@ func httpPing(target string, timeout time.Duration) (int64, error) {
 }
 
 func normalizeHTTPPingTarget(target string) (*url.URL, error) {
+	// A bare IPv6 address (no brackets, no scheme) must be bracketed before
+	// prepending a scheme, or url.Parse will treat the colons as a port.
 	if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
+		if strings.Count(target, ":") > 1 && !strings.HasPrefix(target, "[") {
+			target = "[" + target + "]"
+		}
 		target = "http://" + target
 	}
 	targetURL, err := url.Parse(target)
