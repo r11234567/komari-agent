@@ -6,12 +6,18 @@ package clientcore
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +28,7 @@ import (
 	flags_pkg "github.com/komari-monitor/komari-agent/cmd/flags"
 	"github.com/komari-monitor/komari-agent/core/capability"
 	"github.com/komari-monitor/komari-agent/core/credentials"
+	"github.com/komari-monitor/komari-agent/core/enrollment"
 	"github.com/komari-monitor/komari-agent/core/privileged"
 	"github.com/komari-monitor/komari-agent/core/runtimeconfig"
 	"github.com/komari-monitor/komari-agent/core/signing"
@@ -66,7 +73,10 @@ type Client struct {
 	network    networkv1connect.NetworkProbeServiceClient
 	execution  execv1connect.ExecutionServiceClient
 	webssh     websshv1connect.WebSSHServiceClient
+	endpoint   string
+	tokenMu    sync.RWMutex
 	token      string
+	refreshMu  sync.Mutex
 	agentMu    sync.RWMutex
 	agentID    string
 	sequence   atomic.Uint64
@@ -92,6 +102,153 @@ func (c *Client) identity() (credentials.Identity, bool) {
 	return c.credentialStore.Identity()
 }
 
+func (c *Client) tokenValue() string {
+	c.tokenMu.RLock()
+	defer c.tokenMu.RUnlock()
+	return c.token
+}
+
+func (c *Client) updateToken(token string) {
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	c.token = token
+}
+
+func (c *Client) refreshCredentials(ctx context.Context, oldToken string) error {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+
+	if c.tokenValue() != oldToken && c.tokenValue() != "" {
+		return nil
+	}
+
+	identity, ok := c.identity()
+	if !ok || strings.TrimSpace(identity.RefreshToken) == "" {
+		return errors.New("no refresh token available for credential refresh")
+	}
+
+	endpoint := c.endpoint
+	if endpoint == "" {
+		endpoint = identity.Endpoint
+	}
+	refreshClient := dnsresolver.GetHTTPClientWithPreference(requestDeadline, flags_pkg.GlobalConfig.PreferIPVersion)
+	enrollClient, err := enrollment.New(endpoint, refreshClient)
+	if err != nil {
+		return fmt.Errorf("create enrollment client: %w", err)
+	}
+
+	refreshed, err := enrollClient.Refresh(ctx, identity)
+	if err != nil {
+		return fmt.Errorf("refresh credentials: %w", err)
+	}
+
+	if err := c.credentialStore.Save(refreshed); err != nil {
+		return fmt.Errorf("save refreshed identity: %w", err)
+	}
+
+	c.updateToken(refreshed.AccessToken)
+	log.Printf("Successfully refreshed and persisted access token (expires at %s)", refreshed.AccessTokenExpiresAt)
+	return nil
+}
+
+type dpopTransport struct {
+	base   http.RoundTripper
+	client *Client
+}
+
+func wrapWithDPoP(httpClient *http.Client, client *Client) *http.Client {
+	transport := httpClient.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	return &http.Client{
+		Transport: &dpopTransport{
+			base:   transport,
+			client: client,
+		},
+		Timeout: httpClient.Timeout,
+	}
+}
+
+func (d *dpopTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if d.client == nil {
+		return d.base.RoundTrip(req)
+	}
+
+	identity, ok := d.client.identity()
+	if !ok || identity.PrivateKey == "" {
+		return d.base.RoundTrip(req)
+	}
+
+	privKey, err := identity.SigningKey()
+	if err != nil || len(privKey) != ed25519.PrivateKeySize {
+		return d.base.RoundTrip(req)
+	}
+
+	token := d.client.tokenValue()
+	if token == "" {
+		auth := req.Header.Get("Authorization")
+		if strings.HasPrefix(auth, "Bearer ") {
+			token = strings.TrimPrefix(auth, "Bearer ")
+		}
+	}
+	if token == "" {
+		return d.base.RoundTrip(req)
+	}
+
+	// Do not buffer if it's an unbounded client-streaming body
+	if req.Body != nil && req.Body != http.NoBody && req.ContentLength < 0 && req.GetBody == nil {
+		return d.base.RoundTrip(req)
+	}
+
+	var bodyBytes []byte
+	if req.Body != nil && req.Body != http.NoBody {
+		var readErr error
+		bodyBytes, readErr = io.ReadAll(req.Body)
+		if readErr != nil {
+			return nil, readErr
+		}
+		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	}
+
+	signRequest := func(curToken string) {
+		tokenDigest := sha256.Sum256([]byte(curToken))
+		tokenHash := hex.EncodeToString(tokenDigest[:])
+		bodyDigest := sha256.Sum256(bodyBytes)
+		bodyHash := hex.EncodeToString(bodyDigest[:])
+		tsStr := strconv.FormatInt(time.Now().Unix(), 10)
+		nonce := uuid.NewString()
+
+		payload := fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n%s", req.Method, req.URL.Path, tsStr, nonce, tokenHash, bodyHash)
+		sig := ed25519.Sign(privKey, []byte(payload))
+
+		req.Header.Set("Authorization", "Bearer "+curToken)
+		req.Header.Set("X-Komari-Signature", base64.StdEncoding.EncodeToString(sig))
+		req.Header.Set("X-Komari-Timestamp", tsStr)
+		req.Header.Set("X-Komari-Nonce", nonce)
+	}
+
+	signRequest(token)
+
+	resp, err := d.base.RoundTrip(req)
+	if err == nil && resp.StatusCode == http.StatusUnauthorized {
+		// Attempt auto-refresh on 401
+		if refreshErr := d.client.refreshCredentials(req.Context(), token); refreshErr == nil {
+			newToken := d.client.tokenValue()
+			if newToken != "" && newToken != token {
+				_ = resp.Body.Close()
+				signRequest(newToken)
+				if bodyBytes != nil {
+					req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+				}
+				return d.base.RoundTrip(req)
+			}
+		}
+	}
+
+	return resp, err
+}
+
 func (c *Client) agentIDValue() string {
 	c.agentMu.RLock()
 	defer c.agentMu.RUnlock()
@@ -110,10 +267,36 @@ func (c *Client) rememberAgentID(agentID string) {
 }
 
 func New(config *flags_pkg.Config, store *runtimeconfig.Store) (*Client, error) {
-	if strings.TrimSpace(config.Endpoint) == "" || strings.TrimSpace(config.Token) == "" {
+	// A credential store holds the enrolled identity (from device-code login).
+	// Open it first so an Agent started without CLI flags can load its persisted
+	// endpoint, token, and agent ID automatically.
+	credentialStore, credentialErr := credentials.Open(config.CredentialsFile)
+	if credentialErr != nil {
+		log.Printf("Enrolled identity unavailable; privileged delivery is disabled: %v", credentialErr)
+		credentialStore = nil
+	}
+
+	endpoint := strings.TrimSpace(config.Endpoint)
+	token := strings.TrimSpace(config.Token)
+	agentID := ""
+
+	if credentialStore != nil {
+		if identity, ok := credentialStore.Identity(); ok && identity.AgentID != "" {
+			if endpoint == "" {
+				endpoint = identity.Endpoint
+			}
+			if token == "" {
+				token = identity.AccessToken
+			}
+			agentID = identity.AgentID
+		}
+	}
+
+	if endpoint == "" || token == "" {
 		return nil, ErrLegacyFallback
 	}
-	baseURL, err := connectBaseURL(config.Endpoint)
+
+	baseURL, err := connectBaseURL(endpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -126,35 +309,32 @@ func New(config *flags_pkg.Config, store *runtimeconfig.Store) (*Client, error) 
 		log.Printf("Privileged configuration state unavailable; privileged delivery is disabled: %v", privilegedErr)
 		privilegedStore = nil
 	}
-	// A credential store that will not open leaves the Agent unable to verify
-	// which panel composed an instruction, so the privileged watch is disabled
-	// rather than run without attribution.
-	credentialStore, credentialErr := credentials.Open(config.CredentialsFile)
-	if credentialErr != nil {
-		log.Printf("Enrolled identity unavailable; privileged delivery is disabled: %v", credentialErr)
-		credentialStore = nil
+	if credentialStore == nil {
 		privilegedStore = nil
+	}
+	c := &Client{
+		endpoint:        endpoint,
+		token:           token,
+		agentID:         agentID,
+		store:           store,
+		privilegedStore: privilegedStore,
+		credentialStore: credentialStore,
+		replayGuard:     signing.NewReplayGuard(config.ReplayStateFile),
 	}
 	httpClient := dnsresolver.GetHTTPClientWithPreference(requestDeadline, config.PreferIPVersion)
 	networkHTTPClient := dnsresolver.GetHTTPClientWithPreference(35*time.Second, config.PreferIPVersion)
 	streamHTTPClient := dnsresolver.GetStreamingHTTPClientWithPreference(config.PreferIPVersion)
-	return &Client{
-		// WatchDesiredConfig is a durable server stream. It must not inherit the
-		// unary client's whole-request timeout, otherwise the Agent disconnects
-		// a healthy configuration watch every requestDeadline.
-		config:     configv1connect.NewConfigServiceClient(streamHTTPClient, baseURL),
-		privileged: configv1connect.NewPrivilegedDeliveryServiceClient(streamHTTPClient, baseURL),
-		events:     agentv1connect.NewAgentEventServiceClient(streamHTTPClient, baseURL),
-		report:     reportv1connect.NewAgentReportServiceClient(httpClient, baseURL),
-		metrics:    metricsv1connect.NewMetricsServiceClient(streamHTTPClient, baseURL),
-		network:    networkv1connect.NewNetworkProbeServiceClient(networkHTTPClient, baseURL),
-		execution:  execv1connect.NewExecutionServiceClient(streamHTTPClient, baseURL),
-		webssh:     websshv1connect.NewWebSSHServiceClient(streamHTTPClient, baseURL),
-		token:      config.Token, store: store,
-		privilegedStore: privilegedStore,
-		credentialStore: credentialStore,
-		replayGuard:     signing.NewReplayGuard(config.ReplayStateFile),
-	}, nil
+
+	c.config = configv1connect.NewConfigServiceClient(wrapWithDPoP(streamHTTPClient, c), baseURL)
+	c.privileged = configv1connect.NewPrivilegedDeliveryServiceClient(wrapWithDPoP(streamHTTPClient, c), baseURL)
+	c.events = agentv1connect.NewAgentEventServiceClient(wrapWithDPoP(streamHTTPClient, c), baseURL)
+	c.report = reportv1connect.NewAgentReportServiceClient(wrapWithDPoP(httpClient, c), baseURL)
+	c.metrics = metricsv1connect.NewMetricsServiceClient(wrapWithDPoP(streamHTTPClient, c), baseURL)
+	c.network = networkv1connect.NewNetworkProbeServiceClient(wrapWithDPoP(networkHTTPClient, c), baseURL)
+	c.execution = execv1connect.NewExecutionServiceClient(wrapWithDPoP(streamHTTPClient, c), baseURL)
+	c.webssh = websshv1connect.NewWebSSHServiceClient(wrapWithDPoP(streamHTTPClient, c), baseURL)
+
+	return c, nil
 }
 
 func (c *Client) Run(ctx context.Context) error {
@@ -547,7 +727,26 @@ func (c *Client) runExecutions(ctx context.Context) {
 				continue
 			}
 			assignment := message.Assignment
-			if assignment == nil || assignment.Execution == nil || assignment.Spec == nil {
+			if assignment == nil || assignment.Execution == nil || assignment.Envelope == nil {
+				continue
+			}
+			spec, err := c.verifyExecutionAssignment(assignment)
+			if err != nil {
+				log.Printf("Rejecting execution %s signature/nonce: %v", assignment.Execution.ExecutionId, err)
+				reportCtx, reportCancel := context.WithTimeout(context.WithoutCancel(ctx), requestDeadline)
+				code := int32(-1)
+				_, _ = c.reportExecutionEvent(reportCtx, &execv1.ExecutionEvent{
+					ExecutionId: assignment.Execution.ExecutionId,
+					Sequence:    1,
+					OccurredAt:  timestamppb.Now(),
+					State:       commonv1.OperationState_OPERATION_STATE_FAILED,
+					ExitCode:    &code,
+					Error: &commonv1.ErrorDetail{
+						Code:    "SIGNATURE_VERIFICATION_FAILED",
+						Message: err.Error(),
+					},
+				})
+				reportCancel()
 				continue
 			}
 			executionID := assignment.Execution.ExecutionId
@@ -574,7 +773,7 @@ func (c *Client) runExecutions(ctx context.Context) {
 					}
 					return
 				}
-				if err := c.executeAssignment(jobParent, assignment); err != nil && ctx.Err() == nil {
+				if err := c.executeAssignment(jobParent, assignment, spec); err != nil && ctx.Err() == nil {
 					log.Printf("Connect execution %s failed: %v", executionID, err)
 				}
 			}()
@@ -591,10 +790,40 @@ func (c *Client) runExecutions(ctx context.Context) {
 	}
 }
 
-func (c *Client) executeAssignment(parent context.Context, assignment *execv1.ExecutionAssignment) error {
+func (c *Client) verifyExecutionAssignment(assignment *execv1.ExecutionAssignment) (*execv1.ExecutionSpec, error) {
+	if assignment == nil {
+		return nil, errors.New("nil execution assignment")
+	}
+	envelope := assignment.GetEnvelope()
+	if envelope == nil {
+		return nil, errors.New("the panel sent an execution assignment without a SignedEnvelope")
+	}
+	identity, ok := c.identity()
+	if !ok || len(identity.ControlPlaneKeys) == 0 {
+		return nil, errors.New("no panel signing keys are pinned; cannot verify signed execution assignment")
+	}
+	if identity.AgentID == "" {
+		identity.AgentID = c.agentIDValue()
+	}
+	verifier := signing.New(identity, c.replayGuard)
+	instruction, err := verifier.Verify(envelope)
+	if err != nil {
+		return nil, fmt.Errorf("verify execution envelope: %w", err)
+	}
+	if instruction.InstructionType != "exec:v1" {
+		return nil, fmt.Errorf("the signature authorizes %q, not an execution instruction (exec:v1)", instruction.InstructionType)
+	}
+	var spec execv1.ExecutionSpec
+	if err := proto.Unmarshal(instruction.Body, &spec); err != nil {
+		return nil, fmt.Errorf("unmarshal execution spec from signed instruction body: %w", err)
+	}
+	return &spec, nil
+}
+
+func (c *Client) executeAssignment(parent context.Context, assignment *execv1.ExecutionAssignment, spec *execv1.ExecutionSpec) error {
 	timeout := 5 * time.Minute
-	if assignment.Spec.Timeout != nil && assignment.Spec.Timeout.CheckValid() == nil && assignment.Spec.Timeout.AsDuration() > 0 {
-		timeout = assignment.Spec.Timeout.AsDuration()
+	if spec.Timeout != nil && spec.Timeout.CheckValid() == nil && spec.Timeout.AsDuration() > 0 {
+		timeout = spec.Timeout.AsDuration()
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
@@ -628,7 +857,7 @@ func (c *Client) executeAssignment(parent context.Context, assignment *execv1.Ex
 	if err := report(&execv1.ExecutionEvent{State: commonv1.OperationState_OPERATION_STATE_RUNNING}); err != nil {
 		return err
 	}
-	exitCode, runErr := server.RunTypedExecution(ctx, assignment.Spec, func(output server.ExecutionOutput) error {
+	exitCode, runErr := server.RunTypedExecution(ctx, spec, func(output server.ExecutionOutput) error {
 		return report(&execv1.ExecutionEvent{State: commonv1.OperationState_OPERATION_STATE_RUNNING, Stream: output.Stream, Output: output.Data})
 	})
 	state := commonv1.OperationState_OPERATION_STATE_SUCCEEDED
@@ -1061,14 +1290,24 @@ func (c *Client) runUnaryMetricLoop(ctx context.Context) error {
 	nextInfoReport := time.Now().Add(infoInterval)
 	var retry retryPolicy
 	for {
-		// A rejection that says "later" or "your credential was not accepted
-		// right now" is ridden out in place. Returning here would unwind to
-		// Run's caller, which rebuilds the client and replays SyncConfig,
-		// SubmitReport, the lifecycle event and six stream subscriptions -
-		// turning one refused request into a burst of them, on a fixed period,
-		// for as long as the condition lasts. That shape is indistinguishable
-		// from an attack to any log-driven banning layer in front of the panel.
 		if err := c.SubmitMetrics(ctx); err != nil {
+			if isAuthRejection(err) {
+				oldToken := c.tokenValue()
+				if refreshErr := c.refreshCredentials(ctx, oldToken); refreshErr != nil {
+					log.Printf("Credential refresh failed after auth rejection: %v", refreshErr)
+					if isAuthRejection(refreshErr) || errors.Is(refreshErr, context.Canceled) {
+						return classify(refreshErr)
+					}
+					if c.credentialStore == nil || !c.credentialStore.Enrolled() {
+						return classify(err)
+					}
+				} else {
+					if err := c.SubmitMetrics(ctx); err == nil {
+						retry.Reset()
+						goto metricsDone
+					}
+				}
+			}
 			if !isTransientRejection(err) {
 				return classify(err)
 			}
@@ -1078,8 +1317,27 @@ func (c *Client) runUnaryMetricLoop(ctx context.Context) error {
 			}
 			continue
 		}
+	metricsDone:
 		if !time.Now().Before(nextInfoReport) {
 			if err := c.SubmitReport(ctx); err != nil {
+				if isAuthRejection(err) {
+					oldToken := c.tokenValue()
+					if refreshErr := c.refreshCredentials(ctx, oldToken); refreshErr != nil {
+						log.Printf("Credential refresh failed after auth rejection: %v", refreshErr)
+						if isAuthRejection(refreshErr) || errors.Is(refreshErr, context.Canceled) {
+							return classify(refreshErr)
+						}
+						if c.credentialStore == nil || !c.credentialStore.Enrolled() {
+							return classify(err)
+						}
+					} else {
+						if err := c.SubmitReport(ctx); err == nil {
+							nextInfoReport = time.Now().Add(infoInterval)
+							retry.Reset()
+							goto reportDone
+						}
+					}
+				}
 				if !isTransientRejection(err) {
 					return classify(err)
 				}
@@ -1091,6 +1349,7 @@ func (c *Client) runUnaryMetricLoop(ctx context.Context) error {
 			}
 			nextInfoReport = time.Now().Add(infoInterval)
 		}
+	reportDone:
 		retry.Reset()
 		interval := runtimeconfig.Current().ReportInterval
 		if interval <= 0 {
@@ -1106,15 +1365,17 @@ func (c *Client) runUnaryMetricLoop(ctx context.Context) error {
 	}
 }
 
-// logTransientRejection reports a rejection the Agent is riding out, naming the
-// reason so an operator reading Agent logs can tell a rate limit apart from a
-// rotated or revoked token without correlating against panel logs.
+// logTransientRejection reports a rejection or network failure the Agent is riding out,
+// naming the reason so an operator reading Agent logs can tell rate limits, auth errors,
+// and transport interruptions apart.
 func logTransientRejection(what string, err error) {
 	switch {
 	case isRateLimited(err):
 		log.Printf("Panel is rate limiting %s; backing off: %v", what, err)
-	default:
+	case isAuthRejection(err):
 		log.Printf("Panel rejected %s credential; backing off pending token recovery: %v", what, err)
+	default:
+		log.Printf("Panel %s transport failure; backing off: %v", what, err)
 	}
 }
 
@@ -1168,7 +1429,7 @@ func (c *Client) applyDesiredConfig(parent context.Context, desired *configv1.De
 }
 
 func (c *Client) authorize(headers http.Header) {
-	requestheaders.ApplyAgentAuthentication(headers, c.token, flags_pkg.GlobalConfig.CFAccessClientID, flags_pkg.GlobalConfig.CFAccessClientSecret)
+	requestheaders.ApplyAgentAuthentication(headers, c.tokenValue(), flags_pkg.GlobalConfig.CFAccessClientID, flags_pkg.GlobalConfig.CFAccessClientSecret)
 }
 
 func connectBaseURL(endpoint string) (string, error) {
