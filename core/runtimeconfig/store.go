@@ -12,6 +12,7 @@ import (
 	"time"
 
 	flags_pkg "github.com/komari-monitor/komari-agent/cmd/flags"
+	"github.com/komari-monitor/komari-agent/core/privileged"
 	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
 )
 
@@ -54,6 +55,12 @@ func FromFlags(config *flags_pkg.Config) Snapshot {
 	if interval == 0 {
 		interval = 3 * time.Second
 	}
+	// In zero-trust enrollment, remote control defaults to disabled until authorized.
+	// Legacy mode with explicit static token and no disable flags defaults to true for backwards compatibility.
+	remoteControl := false
+	if config.Token != "" && !config.DisableWebSsh && !config.DisableRemoteControl {
+		remoteControl = true
+	}
 	return Snapshot{
 		MemoryIncludeCache:   config.MemoryIncludeCache,
 		EnableGPU:            config.EnableGPU || config.LegacyDetailedGPU,
@@ -63,7 +70,7 @@ func FromFlags(config *flags_pkg.Config) Snapshot {
 		IncludeMountpoints:   split(config.IncludeMountpoints, ";"),
 		ReportInterval:       interval,
 		TrafficResetDay:      uint32(max(config.MonthRotate, 0)),
-		RemoteControlEnabled: !config.DisableWebSsh && !config.DisableRemoteControl,
+		RemoteControlEnabled: remoteControl,
 	}
 }
 
@@ -100,7 +107,16 @@ func Current() Snapshot {
 	return store.Current()
 }
 
-func RemoteControlEnabled() bool { return Current().RemoteControlEnabled }
+func RemoteControlEnabled() bool {
+	cfg := flags_pkg.GlobalConfig
+	if cfg != nil && (cfg.DisableRemoteControl || cfg.DisableWebSsh) {
+		return false
+	}
+	if privStore := privileged.ActiveStore(); privStore != nil {
+		return privStore.Active().RemoteControlEnabled
+	}
+	return Current().RemoteControlEnabled
+}
 
 func (s *Store) Current() Snapshot { return *clone(s.current.Load()) }
 

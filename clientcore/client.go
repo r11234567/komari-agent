@@ -243,6 +243,9 @@ func New(config *flags_pkg.Config, store *runtimeconfig.Store) (*Client, error) 
 	if credentialStore == nil {
 		privilegedStore = nil
 	}
+	if privilegedStore != nil {
+		privileged.SetActive(privilegedStore)
+	}
 	c := &Client{
 		endpoint:        endpoint,
 		token:           token,

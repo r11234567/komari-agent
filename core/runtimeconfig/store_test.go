@@ -5,7 +5,11 @@ import (
 	"testing"
 	"time"
 
+	flags_pkg "github.com/komari-monitor/komari-agent/cmd/flags"
+	"github.com/komari-monitor/komari-agent/core/privileged"
 	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
+	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 
@@ -56,5 +60,52 @@ func TestApplyRejectsInvalidAndStaleWithoutMutation(t *testing.T) {
 	}
 	if got := store.Current(); got.Revision != 4 || !got.RemoteControlEnabled {
 		t.Fatalf("rejected config changed current snapshot: %+v", got)
+	}
+}
+
+func TestRemoteControlDefaultsToDeniedForZeroTrustAndRespectsPrivilegedStore(t *testing.T) {
+	// For zero-trust mode without token flag, RemoteControlEnabled in FromFlags is false
+	cfg := &flags_pkg.Config{Interval: 3.0}
+	snap := FromFlags(cfg)
+	if snap.RemoteControlEnabled {
+		t.Fatal("expected remote control to default to false for zero-trust enrolled mode")
+	}
+
+	// Privileged store active state controls RemoteControlEnabled
+	privPath := filepath.Join(t.TempDir(), "privileged.json")
+	privStore, err := privileged.Open(privPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privileged.SetActive(privStore)
+	defer privileged.SetActive(nil)
+
+	if RemoteControlEnabled() {
+		t.Fatal("expected RemoteControlEnabled to be false when privileged store has default active settings")
+	}
+
+	// Deliver and promote a privileged revision enabling remote control
+	rev := &configv1.PrivilegedRevision{
+		Revision: 1,
+		Privileged: &configv1.PrivilegedConfig{
+			RemoteControlEnabled: proto.Bool(true),
+		},
+	}
+	if err := privStore.RecordPending(rev); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := privStore.Promote(reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT); err != nil {
+		t.Fatal(err)
+	}
+
+	if !RemoteControlEnabled() {
+		t.Fatal("expected RemoteControlEnabled to be true after promoting privileged revision")
+	}
+
+	// Flag override should disable it regardless
+	flags_pkg.GlobalConfig.DisableRemoteControl = true
+	defer func() { flags_pkg.GlobalConfig.DisableRemoteControl = false }()
+	if RemoteControlEnabled() {
+		t.Fatal("expected RemoteControlEnabled to be false when DisableRemoteControl flag is set")
 	}
 }

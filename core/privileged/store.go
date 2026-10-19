@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
@@ -84,6 +85,14 @@ type Store struct {
 	path  string
 	state State
 }
+
+var active atomic.Pointer[Store]
+
+// SetActive registers the process-wide active privileged store.
+func SetActive(store *Store) { active.Store(store) }
+
+// ActiveStore returns the active privileged store, if one has been set.
+func ActiveStore() *Store { return active.Load() }
 
 // DefaultPath sits beside the runtime config snapshot so an operator finds
 // both in one place.

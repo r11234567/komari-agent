@@ -23,6 +23,7 @@ import (
 	"github.com/komari-monitor/komari-agent/clientcore"
 	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
 	"github.com/komari-monitor/komari-agent/core/capability"
+	"github.com/komari-monitor/komari-agent/core/privileged"
 	"github.com/komari-monitor/komari-agent/core/runtimeconfig"
 )
 
@@ -55,6 +56,9 @@ var RootCmd = &cobra.Command{
 			return fmt.Errorf("failed to initialize runtime config: %w", err)
 		}
 		runtimeconfig.SetActive(runtimeStore)
+		if privStore, err := privileged.Open(flags.PrivilegedStateFile); err == nil && privStore != nil {
+			privileged.SetActive(privStore)
+		}
 		// 捕获中止信号，优雅退出
 		stopCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
