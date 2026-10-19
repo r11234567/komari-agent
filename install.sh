@@ -246,12 +246,11 @@ elif [ "$uninstall_only" != true ] && [ "$runtime_identity" = "service-account" 
 fi
 
 # Remote command execution and terminal access run with the Agent process
-# identity and therefore require root/administrator privileges. Keep the old
-# --disable-web-ssh spelling as an accepted alias, but persist the canonical
+# identity and therefore require root/administrator privileges. Persist the canonical
 # all-remote-control switch for every unprivileged installation.
 if [ "$runtime_identity" = "service-account" ]; then
     case " $komari_args " in
-        *" --disable-remote-control "*|*" --disable-web-ssh "*) ;;
+        *" --disable-remote-control "*) ;;
         *) komari_args="$komari_args --disable-remote-control" ;;
     esac
 fi
@@ -270,7 +269,7 @@ if [ "$rescue_enabled" = true ]; then
         exit 1
     fi
     case " $komari_args " in
-        *" --disable-remote-control "*|*" --disable-web-ssh "*) ;;
+        *" --disable-remote-control "*) ;;
         *)
             log_error "The rescue helper is available only when normal remote control is disabled"
             exit 1
@@ -357,7 +356,8 @@ uninstall_previous() {
         fi
     fi
     
-    # Remove old binary if it exists
+    # Remove old binary and symlinks
+    rm -f /usr/local/bin/komari-agent /usr/local/bin/komari-elevate /usr/local/bin/komari-uninstall
     if [ -f "$komari_agent_path" ]; then
         log_info "Removing old binary..."
         rm -f "$komari_agent_path"
@@ -547,19 +547,50 @@ log_success "Komari-agent installed to ${GREEN}$komari_agent_path${NC}"
 
 # Create a symlink in /usr/local/bin so operators can run komari-agent commands
 # directly (e.g. komari-agent login, komari-agent status) without knowing the
-# install path. Only attempted on Linux/macOS where /usr/local/bin is standard.
+# Install elevate.sh and uninstall.sh scripts
+elevate_script_path="${target_dir}/elevate.sh"
+uninstall_script_path="${target_dir}/uninstall.sh"
+script_source_dir="$(dirname "$0")"
+
+if [ -f "${script_source_dir}/scripts/elevate.sh" ]; then
+    cp "${script_source_dir}/scripts/elevate.sh" "$elevate_script_path"
+elif [ -f "${script_source_dir}/elevate.sh" ]; then
+    cp "${script_source_dir}/elevate.sh" "$elevate_script_path"
+else
+    elevate_download_url="https://raw.githubusercontent.com/${release_repository}/main/scripts/elevate.sh"
+    [ -n "$github_proxy" ] && elevate_download_url="${github_proxy}/${elevate_download_url}"
+    curl -fsSL -o "$elevate_script_path" "$elevate_download_url" 2>/dev/null || true
+fi
+if [ -f "$elevate_script_path" ]; then
+    chmod 750 "$elevate_script_path"
+    log_success "Host elevation script installed to ${GREEN}$elevate_script_path${NC}"
+fi
+
+if [ -f "${script_source_dir}/uninstall.sh" ]; then
+    cp "${script_source_dir}/uninstall.sh" "$uninstall_script_path"
+elif [ -f "${script_source_dir}/scripts/uninstall.sh" ]; then
+    cp "${script_source_dir}/scripts/uninstall.sh" "$uninstall_script_path"
+else
+    uninstall_download_url="https://raw.githubusercontent.com/${release_repository}/main/uninstall.sh"
+    [ -n "$github_proxy" ] && uninstall_download_url="${github_proxy}/${uninstall_download_url}"
+    curl -fsSL -o "$uninstall_script_path" "$uninstall_download_url" 2>/dev/null || true
+fi
+if [ -f "$uninstall_script_path" ]; then
+    chmod 750 "$uninstall_script_path"
+    log_success "Uninstaller script installed to ${GREEN}$uninstall_script_path${NC}"
+fi
+
+# Create symlinks in /usr/local/bin so operators can run commands directly
 if [ "$os_name" != "windows" ] && [ "$EUID" -eq 0 ]; then
     symlink_dir="/usr/local/bin"
-    symlink_path="${symlink_dir}/komari-agent"
     if [ -d "$symlink_dir" ]; then
-        ln -sf "$komari_agent_path" "$symlink_path"
-        log_success "Symlink created: ${GREEN}${symlink_path}${NC} -> ${komari_agent_path}"
-    else
-        log_warning "Skipping symlink: ${symlink_dir} does not exist"
+        ln -sf "$komari_agent_path" "${symlink_dir}/komari-agent"
+        [ -f "$elevate_script_path" ] && ln -sf "$elevate_script_path" "${symlink_dir}/komari-elevate"
+        [ -f "$uninstall_script_path" ] && ln -sf "$uninstall_script_path" "${symlink_dir}/komari-uninstall"
+        log_success "Symlinks created: komari-agent, komari-elevate, komari-uninstall in ${symlink_dir}"
     fi
 elif [ "$os_name" != "windows" ] && [ "$EUID" -ne 0 ]; then
-    log_info "Not running as root; skipping /usr/local/bin symlink."
-    log_info "To run komari-agent commands manually, use: ${CYAN}${komari_agent_path}${NC}"
+    log_info "Not running as root; skipping /usr/local/bin symlinks."
 fi
 
 # Keep the online-dispatch snapshot alongside this installation so the

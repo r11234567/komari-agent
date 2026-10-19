@@ -13,6 +13,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -90,9 +93,21 @@ method verified you.`,
 		privilegeMode := currentPrivilegeMode()
 		applied, err := store.Promote(privilegeMode)
 		if err != nil {
-			// The most common cause is a change that assumes root while the
-			// Agent still runs unprivileged, which means the service itself
-			// has to be reinstalled first.
+			// If unprivileged, invoke the platform elevation script to elevate service daemon
+			if script := findElevationScript(); script != "" {
+				fmt.Println("\nPending configuration widens privileges. Invoking host elevation script...")
+				if runErr := runElevationScript(script, state.PendingRevision, pendingNonce); runErr == nil {
+					privilegeMode = reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT
+					if runtime.GOOS == "windows" {
+						privilegeMode = reportv1.PrivilegeMode_PRIVILEGE_MODE_WINDOWS_ADMINISTRATOR
+					}
+					_ = reportPrivilegedOutcome(cmd.Context(), state.PendingRevision, pendingNonce,
+						configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_DELIVERED, privilegeMode, result)
+					return nil
+				} else {
+					return fmt.Errorf("host elevation script failed: %w", runErr)
+				}
+			}
 			return err
 		}
 
@@ -342,6 +357,47 @@ func reportPrivilegedOutcome(parent context.Context, revision uint64, pendingNon
 		}
 	}
 	return nil
+}
+
+func findElevationScript() string {
+	configDir := filepath.Dir(privilegedPath())
+	candidates := []string{
+		filepath.Join(configDir, "elevate.sh"),
+		"/usr/local/bin/komari-elevate",
+		"/opt/komari/elevate.sh",
+		filepath.Join(configDir, "elevate.ps1"),
+	}
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		candidates = append(candidates,
+			filepath.Join(exeDir, "elevate.sh"),
+			filepath.Join(exeDir, "scripts", "elevate.sh"),
+			filepath.Join(exeDir, "elevate.ps1"),
+			filepath.Join(exeDir, "scripts", "elevate.ps1"),
+		)
+	}
+	for _, c := range candidates {
+		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
+			return c
+		}
+	}
+	return ""
+}
+
+func runElevationScript(script string, revision uint64, nonce string) error {
+	configDir := filepath.Dir(privilegedPath())
+	var cmd *exec.Cmd
+	revStr := strconv.FormatUint(revision, 10)
+	if strings.HasSuffix(script, ".ps1") {
+		cmd = exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script,
+			"promote", "-Revision", revStr, "-Nonce", nonce, "-InstallDir", configDir)
+	} else {
+		cmd = exec.Command("bash", script, "promote", "--revision", revStr, "--nonce", nonce, "--config-dir", configDir)
+	}
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 func init() {

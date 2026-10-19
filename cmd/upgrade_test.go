@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -101,5 +102,22 @@ func TestReportPrivilegedOutcome_SuccessAndDPoP(t *testing.T) {
 	}
 	if dpopCompleteSig == "" {
 		t.Fatal("expected DPoP signature on CompleteManualUpgrade request")
+	}
+}
+
+func TestFindElevationScript(t *testing.T) {
+	tempDir := t.TempDir()
+	privFile := filepath.Join(tempDir, "privileged.json")
+	origFile := flags.PrivilegedStateFile
+	flags.PrivilegedStateFile = privFile
+	defer func() { flags.PrivilegedStateFile = origFile }()
+
+	// Create elevate.sh next to privileged.json
+	localScript := filepath.Join(tempDir, "elevate.sh")
+	if err := os.WriteFile(localScript, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if script := findElevationScript(); script != localScript {
+		t.Fatalf("expected %s, got %s", localScript, script)
 	}
 }

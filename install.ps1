@@ -46,7 +46,7 @@ for ($i = 0; $i -lt $args.Count; $i++) {
             $KomariArgs += $args[$i]
             continue
         }
-        { $_ -in @("--disable-remote-control", "--disable-web-ssh") } {
+        "--disable-remote-control" {
             $RemoteControlDisabled = $true
             $KomariArgs += $args[$i]
             continue
@@ -299,6 +299,30 @@ Remove-Item $AgentOutputLog, $AgentErrorLog -Force -ErrorAction SilentlyContinue
 
 $AgentFile = "komari-agent-windows-$Arch.exe"
 Invoke-WebRequest -Uri (Get-ReleaseUrl $Version $AgentFile) -OutFile $AgentPath -UseBasicParsing
+
+$ElevateScriptPath = Join-Path $InstallDir "elevate.ps1"
+$LocalElevateScript = Join-Path $PSScriptRoot "scripts\elevate.ps1"
+if (-not (Test-Path $LocalElevateScript)) {
+    $LocalElevateScript = Join-Path $PSScriptRoot "elevate.ps1"
+}
+if (Test-Path $LocalElevateScript) {
+    Copy-Item $LocalElevateScript $ElevateScriptPath -Force
+}
+else {
+    try {
+        $ElevateUrl = "https://raw.githubusercontent.com/$ReleaseRepository/main/scripts/elevate.ps1"
+        if (-not [string]::IsNullOrWhiteSpace($GitHubProxy)) {
+            $ElevateUrl = "$($GitHubProxy.TrimEnd('/'))/$ElevateUrl"
+        }
+        Invoke-WebRequest -Uri $ElevateUrl -OutFile $ElevateScriptPath -UseBasicParsing
+    }
+    catch {
+        Log-Info "Note: could not download elevate.ps1 directly: $_"
+    }
+}
+if (Test-Path $ElevateScriptPath) {
+    Log-Success "Host elevation script installed to $ElevateScriptPath"
+}
 $AgentArgumentLine = Join-Arguments $KomariArgs
 $RuntimeStateEnvironment = "AGENT_RUNTIME_STATE_FILE=$RuntimeStatePath"
 

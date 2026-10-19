@@ -58,13 +58,13 @@ func FromFlags(config *flags_pkg.Config) Snapshot {
 	// In zero-trust enrollment, remote control defaults to disabled until authorized.
 	// Legacy mode with explicit static token and no disable flags defaults to true for backwards compatibility.
 	remoteControl := false
-	if config.Token != "" && !config.DisableWebSsh && !config.DisableRemoteControl {
+	if config.Token != "" && !config.DisableRemoteControl {
 		remoteControl = true
 	}
 	return Snapshot{
 		MemoryIncludeCache:   config.MemoryIncludeCache,
-		EnableGPU:            config.EnableGPU || config.LegacyDetailedGPU,
-		DetailedGPU:          config.DetailedGPU || config.LegacyDetailedGPU,
+		EnableGPU:            config.EnableGPU,
+		DetailedGPU:          config.DetailedGPU,
 		IncludeNics:          split(config.IncludeNics, ","),
 		ExcludeNics:          split(config.ExcludeNics, ","),
 		IncludeMountpoints:   split(config.IncludeMountpoints, ";"),
@@ -109,7 +109,7 @@ func Current() Snapshot {
 
 func RemoteControlEnabled() bool {
 	cfg := flags_pkg.GlobalConfig
-	if cfg != nil && (cfg.DisableRemoteControl || cfg.DisableWebSsh) {
+	if cfg != nil && cfg.DisableRemoteControl {
 		return false
 	}
 	if privStore := privileged.ActiveStore(); privStore != nil {

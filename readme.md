@@ -8,156 +8,219 @@
 >
 > 上游项目的版权、许可证及贡献者署名均保持不变。
 
-# komari-agent
+# Komari Agent
 
-## 配置方式
+Komari Agent 是面向现代跨平台基础设施的监控与远程运维探针，支持 Linux、macOS、Windows 与 Docker。探针基于 **Connect-RPC / Protobuf / HTTP/2** 构建主干通信，具备零信任安全注册、双向流式指标上报、三级分级配置治理与严格的内核级特权控制体系。
 
-agent 参数可以通过命令行参数、环境变量或 JSON 配置文件传入。
+---
 
-最小启动示例：
+## 一、 快速安装与部署
 
-```bash
-./komari-agent --endpoint "https://example.com" --token "your-token"
-```
+探针默认遵循**最小权限原则（Zero-Trust Default-Deny）**：Linux 下以系统专用非登录账号 `komari` 运行，macOS 下以隐藏服务账号 `_komari` 运行，Windows 下以受限 `LocalService` 服务运行。首次部署时远程控制（WebSSH / 远程执行）默认完全关闭。
 
-使用环境变量：
+### 1. Linux 一键安装
 
 ```bash
-export AGENT_ENDPOINT="https://example.com"
-export AGENT_TOKEN="your-token"
-./komari-agent
+# 默认安全安装（非 root 账号 komari 运行）
+curl -fsSL 'https://raw.githubusercontent.com/r11234567/komari-agent/main/install.sh' | sudo bash
+
+# 指定面板地址并以零信任交互方式完成注册（推荐）
+curl -fsSL 'https://raw.githubusercontent.com/r11234567/komari-agent/main/install.sh' | sudo bash -s -- -e "https://panel.example.com"
 ```
 
-使用 JSON 配置文件：
-
-```bash
-./komari-agent --config ./config.json
-```
-
-`config.json` 示例：
-
-```json
-{
-  "endpoint": "https://example.com",
-  "token": "your-token",
-  "interval": 3,
-  "disable_auto_update": false,
-  "disable_web_ssh": false,
-  "ignore_unsafe_cert": false
-}
-```
-
-配置优先级从低到高为：默认值、命令行参数、环境变量、JSON 配置文件。配置文件会保存安装时边界设置；其中仅七项运行时参数可由兼容的 Komari Server 在线更新。
-
-常用配置项：
-
-表中支持版本表示该参数本身首次在发布 tag 中出现；环境变量和 JSON 配置文件方式从 `1.1.33` 起支持，早于最早 tag 的参数记为 `0.0.9`。
-
-| JSON 字段 | 环境变量 | 命令行参数 | 说明 | 支持版本 |
-| --- | --- | --- | --- | --- |
-| `endpoint` | `AGENT_ENDPOINT` | `--endpoint`, `-e` | 面板地址 | `0.0.9` |
-| `token` | `AGENT_TOKEN` | `--token`, `-t` | agent token | `0.0.9` |
-| `interval` | `AGENT_INTERVAL` | `--interval`, `-i` | 数据采集间隔，单位秒 | `0.0.9` |
-| `disable_auto_update` | `AGENT_DISABLE_AUTO_UPDATE` | `--disable-auto-update` | 禁用自动更新 | `0.0.9` |
-| `disable_web_ssh` | `AGENT_DISABLE_WEB_SSH` | `--disable-web-ssh` | 已弃用的“禁用远程控制”兼容别名；新部署使用 `disable_remote_control` | `0.0.9` |
-| `ignore_unsafe_cert` | `AGENT_IGNORE_UNSAFE_CERT` | `--ignore-unsafe-cert`, `-u` | 忽略不安全证书 | `0.0.9` |
-| `max_retries` | `AGENT_MAX_RETRIES` | `--max-retries`, `-r` | 旧协议兼容传输的最大连续重试次数 | 当前版本 |
-| `reconnect_interval` | `AGENT_RECONNECT_INTERVAL` | `--reconnect-interval`, `-c` | Connect 流与兼容传输重连间隔，单位秒 | 当前版本 |
-| `info_report_interval` | `AGENT_INFO_REPORT_INTERVAL` | `--info-report-interval` | 类型化系统身份/硬件报告周期，单位分钟 | 当前版本 |
-| `include_nics` | `AGENT_INCLUDE_NICS` | `--include-nics` | 仅统计指定网卡，逗号分隔 | `0.0.22` |
-| `exclude_nics` | `AGENT_EXCLUDE_NICS` | `--exclude-nics` | 排除指定网卡，逗号分隔 | `0.0.22` |
-| `include_mountpoints` | `AGENT_INCLUDE_MOUNTPOINTS` | `--include-mountpoint` | 仅统计指定挂载点，分号分隔 | `0.1.0` |
-| `month_rotate` | `AGENT_MONTH_ROTATE` | `--month-rotate` | 流量统计每月重置日期，`0` 为禁用 | `0.1.0` |
-| `memory_include_cache` | `AGENT_MEMORY_INCLUDE_CACHE` | `--memory-include-cache` | 内存使用量包含缓存和缓冲区 | 当前版本 |
-| `memory_report_raw_used` | `AGENT_MEMORY_REPORT_RAW_USED` | `--memory-exclude-bcf` | 使用排除 buffer/cache/free 的原始内存口径 | 当前版本 |
-| `auto_discovery_key` | `AGENT_AUTO_DISCOVERY_KEY` | `--auto-discovery` | 自动发现密钥 | `1.0.40` |
-| `server_name` | `AGENT_SERVER_NAME` | `--server-name` | 首次使用自动发现密钥注册时显示的服务器名称；未设置时使用系统主机名 | 未发布 |
-| `custom_dns` | `AGENT_CUSTOM_DNS` | `--custom-dns` | 自定义 DNS 服务器 | `1.0.80` |
-| `enable_gpu` | `AGENT_ENABLE_GPU` | `--enable-gpu` | 启用 GPU 采集；详细指标另用 `detailed_gpu` | `1.0.80` |
-| `protocol_version` | `AGENT_PROTOCOL_VERSION` | `--protocol-version` | 上报协议版本，默认 `2` | `1.2.10` |
-| `disable_compression` | `AGENT_DISABLE_COMPRESSION` | `--disable-compression` | 禁用 v2 传输压缩 | `1.2.10` |
-| `prefer_ip_version` | `AGENT_PREFER_IP_VERSION` | `--prefer-ip-version` | 优先使用 IP 版本，可选 `4` 或 `6` | 未发布 |
-| `disable_remote_control` | `AGENT_DISABLE_REMOTE_CONTROL` | `--disable-remote-control` | 禁用终端、文件管理与远程命令 | 当前版本 |
-| `detailed_gpu` | `AGENT_DETAILED_GPU` | `--detailed-gpu` | 启用详细 GPU 指标 | 当前版本 |
-| `custom_ipv4` | `AGENT_CUSTOM_IPV4` | `--custom-ipv4` | 自定义上报 IPv4 地址 | 当前版本 |
-| `custom_ipv6` | `AGENT_CUSTOM_IPV6` | `--custom-ipv6` | 自定义上报 IPv6 地址 | 当前版本 |
-| `get_ip_addr_from_nic` | `AGENT_GET_IP_ADDR_FROM_NIC` | `--get-ip-addr-from-nic` | 从网卡获取上报 IP 地址 | 当前版本 |
-| `cf_access_client_id` | `AGENT_CF_ACCESS_CLIENT_ID` | `--cf-access-client-id` | Cloudflare Access Service Token Client ID，必须与 Secret 一起配置 | 当前版本 |
-| `cf_access_client_secret` | `AGENT_CF_ACCESS_CLIENT_SECRET` | `--cf-access-client-secret` | Cloudflare Access Service Token Client Secret | 当前版本 |
-
-完整参数可运行：
-
-```bash
-./komari-agent --help
-```
-
-详见 `cmd/flags/flag.go` 及 `cmd/root.go`
-
-## Connect-RPC 主链
-
-支持 `Connect-RPC/Protobuf` 的 Komari Server 会作为主通信链路使用以下独立服务：类型化系统报告、指标上报、在线配置、Ping/回程探测、远程命令、远程终端/文件管理、救援操作和 Agent 生命周期事件。指标使用独立 bidi stream，Server 对每个带序号批次逐批 ACK，Agent 只在收到 ACK 后推进序号，流中断时重发尚未确认的批次；系统身份、硬件信息和 capability 则按 `info_report_interval` 通过独立的 unary report 周期更新。
-
-终端在 Agent 侧使用独立 bidi attach；浏览器使用创建会话、带序号 unary 命令和可续传的 server-stream 输出，因此无需将 Agent transport 暴露给 UI。浏览器和 Agent 的观察/租约流到达有界 deadline 后会携带游标重新连接，业务会话、执行状态和 PTY 生命周期不由单次 HTTP 流决定。
-
-远程命令具有不可变命令规格、最大输出、超时、租约、序列 ACK、重连重放和取消终态。远程终端与文件操作受 `remote_control_enabled` 双重限制；文件操作会拒绝符号链接、文件系统根目录、特殊文件、复制到自身和未经校验的上传。Cloudflare Access Service Token 会附加到普通 Agent、自动发现和救援 helper 的 Connect 请求；凭据只留在节点配置和 root-only helper 环境文件中，不上传到 Komari Server。
-
-仅当初始 Connect 配置或报告调用确认 endpoint 不可达，或服务端明确不支持 Connect 时，Agent 才进入旧 v1/v2 兼容传输；鉴权、权限、参数、取消或业务错误不会触发回退。单个可选 Connect service 不受旧 Server 支持时只停用该项能力，不会把新功能绕回旧协议。旧协议不承载新的 Connect 功能。
-
-## 重试与退避
-
-Agent 会区分「被拒绝」的类型，并据此决定重试节奏。这一点直接关系到部署在反向代理或
-IP 封禁系统之后的 Agent 是否会被误判为攻击流量：固定间隔的重连会让一次短暂的拒绝变成
-一条持续不断、周期恒定的 4xx 流，其形状与扫描器难以区分。
-
-- **429（限流）**：服务端返回的 `Retry-After` 优先生效，Agent 按其指示等待；该值会被
-  限制在合理区间内，避免异常的中间件把 Agent 长时间挂起。无该头部时按指数退避。
-- **401 / 403（凭证被拒）**：不会以连接间隔重试。等待时间从 60 秒起，按指数增长至
-  15 分钟上限——重试更频繁并不能修复凭证，而上限保证 token 轮换后无需人工干预即可恢复。
-- **其他传输错误**：从 `--reconnect-interval` 起按指数退避，上限 5 分钟。
-- **所有等待都带抖动**（只会缩短，不会超过上限），避免同一面板下的 Agent 集体同步重连。
-- 连接恢复正常后退避即重置，长期健康的连接不会因历史失败而逐渐拉长间隔。
-
-此外，单次上报失败不再重建整条连接。此前一次失败会一路回退到重新握手，并重新拉起
-配置同步、基础信息上报与六条订阅流，把一次被拒请求放大成一轮请求；现在 429/401/403
-会在原地等待恢复，只有确实需要新连接的错误才会重建会话。
-
-## 在线配置
-
-以下七项可以由兼容 Server 在线下发并由 Agent 回执实际应用结果，无需重启：
-
-- `memory_include_cache`
-- `detailed_gpu`
-- `include_nics`
-- `exclude_nics`
-- `include_mountpoints`
-- `interval`
-- `month_rotate`
-
-运行时配置会校验采集间隔为 1 至 3600 秒、流量重置日为 0 或 1 至 31；新 revision 优先，离线期间的旧 revision 不会覆盖最新配置。`disable_remote_control`、证书策略、自动更新、上报 IP 来源、安装目录、服务名和 GitHub 代理属于安装/安全边界，变更需要重新安装。
-
-## 服务账号与卸载
-
-Linux 默认创建不可登录的专用 `komari` 服务账号，macOS 默认创建隐藏且不可登录的 `_komari` 服务账号；Windows 默认使用不可交互登录的 `NT AUTHORITY\\LocalService` 受限服务账号。Docker 镜像固定以容器内的非 root `komari` 用户运行。专用服务账号无法执行需要 root 或管理员权限的远程控制操作；只有显式指定 `--install-runtime-identity root-or-administrator` 才以特权账号运行。
-
-Linux systemd 安装仅向普通 Agent 服务授予回程线路 ICMP 探测所需的 `CAP_NET_RAW`，不会授予 root 权限。Docker 仍以非 root 用户运行，启用回程线路监测时需添加 `--cap-add NET_RAW`；未提供该能力时，Agent 会向主控回报明确的探测错误，不影响指标上报和在线状态。
-
-Linux/macOS 卸载：
-
-```bash
-curl -fsSL 'https://raw.githubusercontent.com/r11234567/komari-agent/main/install.sh' | sudo bash -s -- --uninstall
-```
-
-Windows（管理员 PowerShell）卸载：
+### 2. Windows 管理员 PowerShell 安装
 
 ```powershell
+$script = irm 'https://raw.githubusercontent.com/r11234567/komari-agent/main/install.ps1'
+& ([scriptblock]::Create($script)) -e "https://panel.example.com"
+```
+
+### 3. Docker 容器安装
+
+```bash
+docker run -d \
+  --name komari-agent \
+  --restart unless-stopped \
+  --cap-add NET_RAW \
+  -e AGENT_ENDPOINT="https://panel.example.com" \
+  -e AGENT_TOKEN="your-agent-token" \
+  ghcr.io/r11234567/komari-agent:latest
+```
+
+---
+
+## 二、 零信任节点入网注册（Tailscale 风格）
+
+探针支持完全无需在命令行传递静态明文 Token 的零信任注册交互：
+
+1. 探针安装完成后，在终端执行注册命令：
+   ```bash
+   komari-agent login --endpoint "https://panel.example.com"
+   ```
+2. 探针会在终端输出一个专属的一次性设备授权链接与验证码：
+   ```text
+   Open this URL in your browser to approve this machine:
+   https://panel.example.com/nodes/claim?token=claim-xxxxxxxxxxxx
+   ```
+3. 管理员在浏览器打开链接并确认添加节点。
+4. 探针与主控完成双向 Ed25519 秘钥交换与 DPoP 签名绑定，凭据落盘于 `/opt/komari/credentials.json`（权限 0600）。
+5. 注册成功后启动或重启探针服务即可正常上报：
+   ```bash
+   sudo systemctl restart komari-agent
+   ```
+
+---
+
+## 三、 配置与参数说明
+
+参数可通过命令行参数、环境变量或 JSON 配置文件传入。优先级由低到高为：**默认值 < 命令行参数 < 环境变量 < JSON 配置文件**。
+
+### 常用核心参数一览表
+
+| 命令行参数 | 环境变量 | JSON 字段 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `--endpoint`, `-e` | `AGENT_ENDPOINT` | `endpoint` | 面板地址 |
+| `--token`, `-t` | `AGENT_TOKEN` | `token` | 探针接入 Token（零信任模式下由 login 命令管理） |
+| `--interval`, `-i` | `AGENT_INTERVAL` | `interval` | 指标采集间隔（秒），支持在线动态下发（1~3600） |
+| `--disable-remote-control` | `AGENT_DISABLE_REMOTE_CONTROL` | `disable_remote_control` | 禁用远程终端（WebSSH）与远程命令执行 |
+| `--disable-auto-update` | `AGENT_DISABLE_AUTO_UPDATE` | `disable_auto_update` | 禁用自动更新 |
+| `--ignore-unsafe-cert`, `-u` | `AGENT_IGNORE_UNSAFE_CERT` | `ignore_unsafe_cert` | 忽略 TLS 证书校验错误（测试/自签名环境） |
+| `--memory-include-cache` | `AGENT_MEMORY_INCLUDE_CACHE` | `memory_include_cache` | 内存占用计算口径包含系统 Cache/Buffer，支持在线下发 |
+| `--enable-gpu` | `AGENT_ENABLE_GPU` | `enable_gpu` | 启用基础 GPU 监控 |
+| `--detailed-gpu` | `AGENT_DETAILED_GPU` | `detailed_gpu` | 启用详细 GPU 指标监控（功耗、温度、风扇），支持在线下发 |
+| `--include-nics` | `AGENT_INCLUDE_NICS` | `include_nics` | 仅监控指定网卡（逗号分隔），支持在线下发 |
+| `--exclude-nics` | `AGENT_EXCLUDE_NICS` | `exclude_nics` | 监控排除网卡（逗号分隔），支持在线下发 |
+| `--include-mountpoint` | `AGENT_INCLUDE_MOUNTPOINTS` | `include_mountpoints` | 磁盘监控挂载点过滤（分号分隔），支持在线下发 |
+| `--month-rotate` | `AGENT_MONTH_ROTATE` | `month_rotate` | 流量统计每月重置日（0 为禁用，1~31），支持在线下发 |
+| `--custom-dns` | `AGENT_CUSTOM_DNS` | `custom_dns` | 自定义 DNS 服务器（如 `8.8.8.8`） |
+| `--prefer-ip-version` | `AGENT_PREFER_IP_VERSION` | `prefer_ip_version` | 面板连接优先使用的 IP 版本（`4` 或 `6`） |
+| `--cf-access-client-id` | `AGENT_CF_ACCESS_CLIENT_ID` | `cf_access_client_id` | Cloudflare Access 服务令牌 Client ID（须与 Secret 配对） |
+| `--cf-access-client-secret` | `AGENT_CF_ACCESS_CLIENT_SECRET` | `cf_access_client_secret` | Cloudflare Access 服务令牌 Client Secret |
+| `--reconnect-interval`, `-c` | `AGENT_RECONNECT_INTERVAL` | `reconnect_interval` | 断线重连基础间隔（秒），内部具备带抖动的指数退避 |
+| `--info-report-interval` | `AGENT_INFO_REPORT_INTERVAL` | `info_report_interval` | 静态硬件/系统信息全量上报周期（分钟） |
+
+> **提示**：旧版冗余及已弃用参数（如 `--disable-web-ssh`、`--gpu`、`--memory-exclude-bcf`、`-autoUpdate`）已全面清理剔除，请使用上述标准参数。
+
+---
+
+## 四、 探针配置三级分级治理体系
+
+为了防止“主控攻陷导致全集群失陷”，Komari 严格实施三级配置隔离模型：
+
+```mermaid
+flowchart TD
+    subgraph L1["第一级：动态运行时配置 (Online Runtime)"]
+        direction TB
+        L1_items["• 数据采集间隔 (interval)<br/>• 流量重置日 (month_rotate)<br/>• 内存口径 (memory_include_cache)<br/>• 详细GPU指标 (detailed_gpu)<br/>• 网卡过滤 (include_nics / exclude_nics)<br/>• 挂载点过滤 (include_mountpoint)"]
+        L1_flow["主控直接推送 Revision<br/>探针热加载生效，无需重启"]
+    end
+
+    subgraph L2["第二级：主机静态边界配置 (Local Boundary)"]
+        direction TB
+        L2_items["• 探针私钥与身份凭据<br/>• 服务名称与安装目录<br/>• 自定义DNS服务器<br/>• 自动更新策略<br/>• TLS证书安全策略"]
+        L2_flow["仅在本地安装/CLI配置文件中锁定<br/>主控无权远程下发篡改"]
+    end
+
+    subgraph L3["第三级：高危特权扩展配置 (Privileged Elevation)"]
+        direction TB
+        L3_items["• 远程终端与WebSSH (WebSSHEnabled)<br/>• 远程命令执行 (ExecutionEnabled)<br/>• 救援助手守护进程 (RescueHelperEnabled)"]
+        L3_flow["主控仅下发待审批配置与签名Nonce<br/>必须管理员在本地终端输入密码确认<br/>唤醒系统内核授权脚本完成提权"]
+    end
+```
+
+---
+
+## 五、 特权守护进程提权与降级机制（核心安全）
+
+探针在普通用户（非 root）下运行时，**任何远程控制与终端执行均处于硬件/系统隔离的关闭状态**。当主控下发包含特权扩展（如开启 WebSSH）的任务时，探针必须经过物理机/SSH 终端的人机交互内核认证：
+
+### 1. 提权限制与防篡改条件
+唤醒预留的提权脚本 `komari-elevate`（或 `/opt/komari/elevate.sh`）必须同时满足以下刚性安全准则：
+1. **下发过合法配置**：主控已对特权 Revision 进行了 Ed25519 签名分发，本地 `privileged.json` 中存在对应的未过期 Pending 任务和随机 Nonce。
+2. **强制内核/系统级授权**：**密码绝不经过探针二进制程序内存**！通过操作系统 PAM / sudo / Windows UAC 强制弹出交互式密码输入框。
+3. **绕过 sudo 免密与内核留痕**：脚本在验证前强制执行 `sudo -k` 作废凭据缓存；若系统配置了 `NOPASSWD` 或当前已处于 root，脚本仍强制要求输入 root/管理员密码，并将授权事件直接写入 Linux 内核环形缓冲区 `/dev/kmsg` 及 `authpriv` 系统日志。
+4. **服务重写与提权生效**：将 systemd 守护进程单元重写为 `User=root`，重载系统服务，向主控兑现 Nonce 证明完成升级。
+
+### 2. 管理员执行提权操作
+
+在受管服务器终端运行提权命令：
+
+```bash
+# 方式 A：通过探针 CLI 唤醒提权
+komari-agent upgrade
+
+# 方式 B：直接调用系统保留提权脚本
+sudo komari-elevate promote --revision <REV> --nonce <NONCE>
+```
+
+终端将弹出内核授权安全提示：
+```text
+=================================================================
+  [Komari Security Gateway] Kernel Privilege Elevation Request   
+=================================================================
+  Target Service:  komari-agent
+  Target Revision: 2
+  Target Nonce:    a1b2c3d4e5f6...
+  Operator:        admin
+=================================================================
+Enter [root] password to authorize kernel elevation: 
+[SECURITY AUDIT] Kernel authorization verified. Logged to /dev/kmsg and syslog.
+[INFO] Updating systemd service 'komari-agent' to root...
+[SUCCESS] Service komari-agent successfully elevated to root and running.
+```
+
+### 3. 一键平滑降级（切回非 root）
+
+撤销特权配置是安全的防御性操作，无需重复输入密码：
+
+```bash
+# 通过脚本一键降级回 komari 非特权账号运行
+sudo komari-elevate demote
+```
+系统守护进程将立即恢复为 `User=komari`，强制禁用所有远程控制指令并重启服务。
+
+---
+
+## 六、 完整卸载指南
+
+### 1. Linux / macOS 卸载
+
+```bash
+# 方式 A：使用一键卸载脚本（推荐）
+sudo komari-uninstall
+
+# 方式 B：使用安装脚本的卸载参数
+curl -fsSL 'https://raw.githubusercontent.com/r11234567/komari-agent/main/install.sh' | sudo bash -s -- --uninstall
+
+# 彻底清理（包括删除 komari 服务专用账号）
+sudo /opt/komari/uninstall.sh --purge-user
+```
+
+### 2. Windows 卸载
+
+以管理员身份打开 PowerShell：
+
+```powershell
+# 使用安装目录卸载
+& "$env:ProgramFiles\Komari\install.ps1" --uninstall
+
+# 或通过网络一键卸载
 $script = irm 'https://raw.githubusercontent.com/r11234567/komari-agent/main/install.ps1'
 & ([scriptblock]::Create($script)) '--uninstall'
 ```
 
-Docker 卸载只需删除对应容器、数据卷和按需删除镜像：
+### 3. Docker 卸载
 
 ```bash
 docker rm -f komari-agent
 docker volume rm komari-agent-data
 docker image rm ghcr.io/r11234567/komari-agent:latest
 ```
+
+---
+
+## 七、 技术主干与网络特性
+
+- **HTTP/2 & h2c 多路复用**：全面支持 TLS 及内网明文 h2c，AttachSession 终端双向流、Metrics 批次上报流与 Unary 请求在同一条持久 TCP 连接上多路复用，彻底规避 HTTP/1.1 长连接池饿死问题。
+- **平滑指数退避重连**：当主控服务重启或网络发生瞬时断连时，探针严格使用带随机抖动的指数退避重连，严禁守护进程异常退出，杜绝重连风暴。
+- **硬件级监控**：内存占用精细化识别（支持 Buffer/Cache 隔离计算），集成 Linux proc/sysfs、macOS host_statistics、Windows WMI/Pdh 及全平台 GPU 监控。

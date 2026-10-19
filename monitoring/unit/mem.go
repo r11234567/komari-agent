@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 
-	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
 	"github.com/komari-monitor/komari-agent/core/runtimeconfig"
 	"github.com/shirou/gopsutil/v4/mem"
 )
@@ -194,10 +193,6 @@ func Ram() RamInfo {
 			Used:  v.Total - v.Free,
 			Mode:  "includeCache",
 		}
-	}
-
-	if pkg_flags.GlobalConfig.MemoryReportRawUsed {
-		return GetMemHtopLike()
 	}
 
 	if runtime.GOOS == "linux" {
