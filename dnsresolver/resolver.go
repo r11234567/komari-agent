@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/net/http2"
+
 	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
 )
 
@@ -182,6 +184,21 @@ func GetHTTPClientWithPreference(timeout time.Duration, preferIPVersion string) 
 	return getHTTPClient(timeout, normalizeIPVersionPreference(preferIPVersion))
 }
 
+// SmartStreamTransport routes unencrypted http:// requests through h2c HTTP/2 transport
+// (essential for Connect-RPC bidirectional streaming like AttachSession),
+// while routing https:// requests through standard TLS transport (with HTTP/2 and HTTP/1.1).
+type SmartStreamTransport struct {
+	H2CTransport  *http2.Transport
+	BaseTransport *http.Transport
+}
+
+func (t *SmartStreamTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Scheme == "http" {
+		return t.H2CTransport.RoundTrip(req)
+	}
+	return t.BaseTransport.RoundTrip(req)
+}
+
 // GetStreamingHTTPClientWithPreference keeps connection establishment bounded
 // without applying http.Client.Timeout to the complete lifetime of a Connect
 // stream. Stream deadlines and cancellation are owned by the request context.
@@ -193,10 +210,45 @@ func GetStreamingHTTPClientWithPreference(preferIPVersion string) *http.Client {
 	if client := httpClients[key]; client != nil {
 		return client
 	}
-	client := &http.Client{Transport: buildTransportWithPreference(15*time.Second, &tls.Config{
+	baseTr := buildTransportWithPreference(15*time.Second, &tls.Config{
 		// This is controlled by the explicit --ignore-unsafe-cert compatibility option.
 		InsecureSkipVerify: flags.IgnoreUnsafeCert, // #nosec G402 // lgtm[go/disabled-certificate-check]
-	}, preferIPVersion)}
+	}, preferIPVersion)
+
+	customResolver := GetCustomResolver()
+	h2cTr := &http2.Transport{
+		AllowHTTP: true,
+		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			ips, err := customResolver.LookupHost(ctx, host)
+			if err != nil {
+				return nil, err
+			}
+			sortIPsByPreference(ips, preferIPVersion)
+			for _, ip := range ips {
+				dialer := &net.Dialer{
+					Timeout:   15 * time.Second,
+					KeepAlive: 30 * time.Second,
+					DualStack: true,
+				}
+				conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip, port))
+				if err == nil {
+					return conn, nil
+				}
+			}
+			return nil, fmt.Errorf("failed to dial to any of the resolved IPs for h2c")
+		},
+	}
+
+	client := &http.Client{
+		Transport: &SmartStreamTransport{
+			H2CTransport:  h2cTr,
+			BaseTransport: baseTr,
+		},
+	}
 	httpClients[key] = client
 	return client
 }

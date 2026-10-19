@@ -46,16 +46,21 @@ func TestGetStreamingHTTPClientWithPreference_HasH2CSupport(t *testing.T) {
 		t.Fatal("expected non-nil client")
 	}
 
-	tr, ok := client.Transport.(*http.Transport)
+	tr, ok := client.Transport.(*SmartStreamTransport)
 	if !ok {
-		t.Fatalf("expected *http.Transport, got %T", client.Transport)
+		t.Fatalf("expected *SmartStreamTransport, got %T", client.Transport)
 	}
 
-	if tr.MaxConnsPerHost != 0 {
-		t.Fatalf("expected MaxConnsPerHost == 0 on streaming transport, got %d", tr.MaxConnsPerHost)
+	if tr.H2CTransport == nil || !tr.H2CTransport.AllowHTTP {
+		t.Fatal("expected H2CTransport with AllowHTTP=true for cleartext bidi streaming")
 	}
 
-	if tr.Protocols == nil || !tr.Protocols.UnencryptedHTTP2() {
-		t.Fatal("streaming transport must have unencrypted HTTP/2 (h2c) enabled")
+	if tr.BaseTransport == nil || tr.BaseTransport.MaxConnsPerHost != 0 {
+		t.Fatalf("expected BaseTransport with MaxConnsPerHost == 0, got %v", tr.BaseTransport)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, "http://example.com/test", nil)
+	if err != nil || req.URL.Scheme != "http" {
+		t.Fatalf("failed to create http request: %v", err)
 	}
 }
