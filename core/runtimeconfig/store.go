@@ -34,6 +34,7 @@ type Snapshot struct {
 	ReportInterval       time.Duration `json:"report_interval"`
 	TrafficResetDay      uint32        `json:"traffic_reset_day"`
 	RemoteControlEnabled bool          `json:"remote_control_enabled"`
+	GetIPAddrFromNIC     bool          `json:"get_ip_addr_from_nic"`
 }
 
 type persistedState struct {
@@ -71,6 +72,7 @@ func FromFlags(config *flags_pkg.Config) Snapshot {
 		ReportInterval:       interval,
 		TrafficResetDay:      uint32(max(config.MonthRotate, 0)),
 		RemoteControlEnabled: remoteControl,
+		GetIPAddrFromNIC:     config.GetIpAddrFromNic,
 	}
 }
 
@@ -277,6 +279,9 @@ func fromProto(base Snapshot, revision uint64, value *configv1.RuntimeConfig) (S
 	result.IncludeMountpoints = clean(value.IncludeMountpoints)
 	if value.TrafficResetDay != nil {
 		result.TrafficResetDay = *value.TrafficResetDay
+	}
+	if value.GetIpAddrFromNic != nil {
+		result.GetIPAddrFromNIC = *value.GetIpAddrFromNic
 	}
 	if value.RemoteControlEnabled != nil {
 		return Snapshot{}, errors.New("remote control is install-only and requires reinstalling the Agent")

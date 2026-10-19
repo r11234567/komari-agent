@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/komari-monitor/komari-agent/core/runtimeconfig"
 	"github.com/komari-monitor/komari-agent/dnsresolver"
 )
 
@@ -121,8 +122,8 @@ func GetIPv6Address() (string, error) {
 }
 
 func GetIPAddress() (ipv4, ipv6 string, err error) {
-
-	if flags.GetIpAddrFromNic {
+	getIPFromNic := flags.GetIpAddrFromNic || runtimeconfig.Current().GetIPAddrFromNIC
+	if getIPFromNic {
 		allowNics, err := InterfaceList()
 		if err != nil {
 			log.Printf("Get Interface List Error: %v", err)
