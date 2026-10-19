@@ -8,10 +8,12 @@
 package enrollment
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -26,6 +28,7 @@ import (
 	enrollmentv1 "github.com/r11234567/komari-proto/gen/go/komari/enrollment/v1"
 	"github.com/r11234567/komari-proto/gen/go/komari/enrollment/v1/enrollmentv1connect"
 	securityv1 "github.com/r11234567/komari-proto/gen/go/komari/security/v1"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -238,19 +241,27 @@ func (c *Client) Refresh(ctx context.Context, identity credentials.Identity) (cr
 	if err != nil {
 		return identity, fmt.Errorf("refresh credentials: %w", err)
 	}
-	// If the panel signed its response, verify it before accepting the new
-	// credentials. A response without a proof is accepted on its own: not all
-	// panel versions sign yet, and refusing a valid rotation because the proof
-	// is absent would lock out more agents than the verification protects.
-	// Once panels universally sign, this can be tightened to require a proof.
-	if envelope := response.Msg.GetProof(); envelope != nil && len(identity.ControlPlaneKeys) > 0 {
-		if err := verifyResponseEnvelope(envelope, identity); err != nil {
-			return identity, fmt.Errorf("refresh response signature rejected: %w", err)
-		}
-	}
 	issued := response.Msg.GetCredentials()
 	if issued == nil {
 		return identity, errors.New("control plane returned no credentials")
+	}
+
+	if envelope := response.Msg.GetProof(); envelope != nil {
+		if len(identity.ControlPlaneKeys) == 0 {
+			keys, algorithms, requireAll, minimum, fetchErr := c.FetchTrustBundle(ctx, identity.AgentID)
+			if fetchErr == nil && len(keys) > 0 {
+				identity.ControlPlaneKeys = keys
+				identity.PolicyAlgorithms = algorithms
+				identity.PolicyRequireAll = requireAll
+				identity.PolicyMinimumSignatures = minimum
+			}
+		}
+		if len(identity.ControlPlaneKeys) == 0 {
+			return identity, errors.New("cannot verify refresh response proof: no control plane keys are pinned")
+		}
+		if err := verifyResponseEnvelope(envelope, identity, issued); err != nil {
+			return identity, fmt.Errorf("refresh response signature rejected: %w", err)
+		}
 	}
 	next := identity
 	if id := issued.GetAgentId(); id != "" {
@@ -303,11 +314,12 @@ func (c *Client) FetchTrustBundle(ctx context.Context, agentID string) ([]creden
 // simpler than the full signing.Verifier: refresh responses carry no nonce or
 // agent-binding fields, so replay and binding checks are omitted here; the
 // request proof already binds the exchange to this agent and this token.
-func verifyResponseEnvelope(envelope *securityv1.SignedEnvelope, identity credentials.Identity) error {
+func verifyResponseEnvelope(envelope *securityv1.SignedEnvelope, identity credentials.Identity, issued *enrollmentv1.AgentCredentials) error {
 	payload := envelope.GetPayload()
 	if len(payload) == 0 {
 		return errors.New("signed response envelope has no payload")
 	}
+	verified := false
 	for _, sig := range envelope.GetSignatures() {
 		alg := sig.GetAlgorithm()
 		if alg != securityv1.SignatureAlgorithm_SIGNATURE_ALGORITHM_ED25519 {
@@ -328,11 +340,53 @@ func verifyResponseEnvelope(envelope *securityv1.SignedEnvelope, identity creden
 				continue
 			}
 			if ed25519.Verify(ed25519.PublicKey(raw), payload, sig.GetValue()) {
-				return nil
+				verified = true
+				break
 			}
 		}
+		if verified {
+			break
+		}
 	}
-	return errors.New("no pinned control-plane key verified the refresh response signature")
+	if !verified {
+		return errors.New("no pinned control-plane key verified the refresh response signature")
+	}
+
+	// Verify that the signed payload binds to the newly issued credentials
+	if issued != nil {
+		matched := false
+		var instruction securityv1.SignedInstruction
+		if err := proto.Unmarshal(payload, &instruction); err == nil && (instruction.AgentId != "" || len(instruction.Body) > 0) {
+			agentMatch := instruction.AgentId == identity.AgentID || instruction.AgentId == issued.GetAgentId()
+			if agentMatch {
+				bodyStr := string(instruction.Body)
+				tokenDigest := sha256.Sum256([]byte(issued.GetAccessToken()))
+				tokenHashHex := hex.EncodeToString(tokenDigest[:])
+				if strings.Contains(bodyStr, issued.GetAccessToken()) ||
+					strings.Contains(bodyStr, tokenHashHex) ||
+					bytes.Equal(instruction.Body, []byte(issued.GetAccessToken())) {
+					matched = true
+				}
+			}
+		}
+		if !matched {
+			payloadStr := string(payload)
+			agentMatch := strings.Contains(payloadStr, identity.AgentID) || (issued.GetAgentId() != "" && strings.Contains(payloadStr, issued.GetAgentId()))
+			tokenMatch := strings.Contains(payloadStr, issued.GetAccessToken())
+			if !tokenMatch && issued.GetAccessToken() != "" {
+				tokenDigest := sha256.Sum256([]byte(issued.GetAccessToken()))
+				tokenMatch = strings.Contains(payloadStr, hex.EncodeToString(tokenDigest[:]))
+			}
+			if agentMatch && tokenMatch {
+				matched = true
+			}
+		}
+		if !matched {
+			return errors.New("refresh response proof payload does not match the issued credentials")
+		}
+	}
+
+	return nil
 }
 
 

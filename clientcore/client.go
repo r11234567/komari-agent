@@ -6,18 +6,12 @@ package clientcore
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -92,6 +86,24 @@ type Client struct {
 	// replayGuard remembers which instruction nonces were already carried out,
 	// persisted so a restart cannot reopen the window.
 	replayGuard *signing.ReplayGuard
+	cfg         *flags_pkg.Config
+
+	probeCancelMu sync.Mutex
+	probeCancel   context.CancelFunc
+}
+
+func (c *Client) setProbeCancel(cancel context.CancelFunc) {
+	c.probeCancelMu.Lock()
+	defer c.probeCancelMu.Unlock()
+	c.probeCancel = cancel
+}
+
+func (c *Client) cancelProbes() {
+	c.probeCancelMu.Lock()
+	defer c.probeCancelMu.Unlock()
+	if c.probeCancel != nil {
+		c.probeCancel()
+	}
 }
 
 // identity returns the enrolled identity, if this Agent has one.
@@ -151,102 +163,14 @@ func (c *Client) refreshCredentials(ctx context.Context, oldToken string) error 
 	return nil
 }
 
-type dpopTransport struct {
-	base   http.RoundTripper
-	client *Client
-}
-
 func wrapWithDPoP(httpClient *http.Client, client *Client) *http.Client {
-	transport := httpClient.Transport
-	if transport == nil {
-		transport = http.DefaultTransport
-	}
-	return &http.Client{
-		Transport: &dpopTransport{
-			base:   transport,
-			client: client,
-		},
-		Timeout: httpClient.Timeout,
-	}
-}
-
-func (d *dpopTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if d.client == nil {
-		return d.base.RoundTrip(req)
-	}
-
-	identity, ok := d.client.identity()
-	if !ok || identity.PrivateKey == "" {
-		return d.base.RoundTrip(req)
-	}
-
-	privKey, err := identity.SigningKey()
-	if err != nil || len(privKey) != ed25519.PrivateKeySize {
-		return d.base.RoundTrip(req)
-	}
-
-	token := d.client.tokenValue()
-	if token == "" {
-		auth := req.Header.Get("Authorization")
-		if strings.HasPrefix(auth, "Bearer ") {
-			token = strings.TrimPrefix(auth, "Bearer ")
-		}
-	}
-	if token == "" {
-		return d.base.RoundTrip(req)
-	}
-
-	// Do not buffer if it's an unbounded client-streaming body
-	if req.Body != nil && req.Body != http.NoBody && req.ContentLength < 0 && req.GetBody == nil {
-		return d.base.RoundTrip(req)
-	}
-
-	var bodyBytes []byte
-	if req.Body != nil && req.Body != http.NoBody {
-		var readErr error
-		bodyBytes, readErr = io.ReadAll(req.Body)
-		if readErr != nil {
-			return nil, readErr
-		}
-		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-	}
-
-	signRequest := func(curToken string) {
-		tokenDigest := sha256.Sum256([]byte(curToken))
-		tokenHash := hex.EncodeToString(tokenDigest[:])
-		bodyDigest := sha256.Sum256(bodyBytes)
-		bodyHash := hex.EncodeToString(bodyDigest[:])
-		tsStr := strconv.FormatInt(time.Now().Unix(), 10)
-		nonce := uuid.NewString()
-
-		payload := fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n%s", req.Method, req.URL.Path, tsStr, nonce, tokenHash, bodyHash)
-		sig := ed25519.Sign(privKey, []byte(payload))
-
-		req.Header.Set("Authorization", "Bearer "+curToken)
-		req.Header.Set("X-Komari-Signature", base64.StdEncoding.EncodeToString(sig))
-		req.Header.Set("X-Komari-Timestamp", tsStr)
-		req.Header.Set("X-Komari-Nonce", nonce)
-	}
-
-	signRequest(token)
-
-	resp, err := d.base.RoundTrip(req)
-	if err == nil && resp.StatusCode == http.StatusUnauthorized {
-		// Attempt auto-refresh on 401
-		if refreshErr := d.client.refreshCredentials(req.Context(), token); refreshErr == nil {
-			newToken := d.client.tokenValue()
-			if newToken != "" && newToken != token {
-				_ = resp.Body.Close()
-				signRequest(newToken)
-				if bodyBytes != nil {
-					req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-				}
-				return d.base.RoundTrip(req)
-			}
-		}
-	}
-
-	return resp, err
+	return requestheaders.WrapWithDPoP(httpClient, func() (credentials.Identity, bool) {
+		return client.identity()
+	}, func() string {
+		return client.tokenValue()
+	}, func(ctx context.Context, oldToken string) error {
+		return client.refreshCredentials(ctx, oldToken)
+	})
 }
 
 func (c *Client) agentIDValue() string {
@@ -276,25 +200,28 @@ func New(config *flags_pkg.Config, store *runtimeconfig.Store) (*Client, error) 
 		credentialStore = nil
 	}
 
-	endpoint := strings.TrimSpace(config.Endpoint)
-	token := strings.TrimSpace(config.Token)
-	agentID := ""
-
+	var endpoint, token, agentID string
 	if credentialStore != nil {
-		if identity, ok := credentialStore.Identity(); ok && identity.AgentID != "" {
-			if endpoint == "" {
-				endpoint = identity.Endpoint
-			}
-			if token == "" {
-				token = identity.AccessToken
-			}
-			agentID = identity.AgentID
+		if identity, ok := credentialStore.Identity(); ok && identity.AgentID != "" && identity.AccessToken != "" {
+			endpoint = strings.TrimSpace(identity.Endpoint)
+			token = strings.TrimSpace(identity.AccessToken)
+			agentID = strings.TrimSpace(identity.AgentID)
 		}
+	}
+
+	if endpoint == "" {
+		endpoint = strings.TrimSpace(config.Endpoint)
+	}
+	if token == "" {
+		token = strings.TrimSpace(config.Token)
 	}
 
 	if endpoint == "" || token == "" {
 		return nil, ErrLegacyFallback
 	}
+
+	config.Endpoint = endpoint
+	config.Token = token
 
 	baseURL, err := connectBaseURL(endpoint)
 	if err != nil {
@@ -320,6 +247,7 @@ func New(config *flags_pkg.Config, store *runtimeconfig.Store) (*Client, error) 
 		privilegedStore: privilegedStore,
 		credentialStore: credentialStore,
 		replayGuard:     signing.NewReplayGuard(config.ReplayStateFile),
+		cfg:             config,
 	}
 	httpClient := dnsresolver.GetHTTPClientWithPreference(requestDeadline, config.PreferIPVersion)
 	networkHTTPClient := dnsresolver.GetHTTPClientWithPreference(35*time.Second, config.PreferIPVersion)
@@ -338,6 +266,9 @@ func New(config *flags_pkg.Config, store *runtimeconfig.Store) (*Client, error) 
 }
 
 func (c *Client) Run(ctx context.Context) error {
+	// Startup trust bundle self-healing: ensure control plane keys are pinned
+	_ = c.ensureTrustBundle(ctx)
+
 	// Startup is where a rejection is most expensive: returning an error here
 	// sends the caller back through New + the whole handshake, so a panel that
 	// is rate limiting or briefly refusing the token would be re-handshaked at
@@ -348,6 +279,10 @@ func (c *Client) Run(ctx context.Context) error {
 		err := c.SyncConfig(ctx)
 		if err == nil {
 			break
+		}
+		if isPermissionDenied(err) {
+			log.Printf("[FATAL] Panel revoked credentials or permission was denied (HTTP 403 / PERMISSION_DENIED). Stopping. Please re-enroll via 'komari-agent login'")
+			return classify(err)
 		}
 		if !isTransientRejection(err) {
 			return classify(err)
@@ -362,6 +297,10 @@ func (c *Client) Run(ctx context.Context) error {
 		if err == nil {
 			break
 		}
+		if isPermissionDenied(err) {
+			log.Printf("[FATAL] Panel revoked credentials or permission was denied (HTTP 403 / PERMISSION_DENIED). Stopping. Please re-enroll via 'komari-agent login'")
+			return classify(err)
+		}
 		if !isTransientRejection(err) {
 			return classify(err)
 		}
@@ -374,6 +313,8 @@ func (c *Client) Run(ctx context.Context) error {
 		log.Printf("Failed to publish Agent lifecycle event: %v", err)
 	}
 	probeCtx, stopProbes := context.WithCancel(ctx)
+	c.setProbeCancel(stopProbes)
+
 	var probes sync.WaitGroup
 	start := func(worker func(context.Context)) {
 		probes.Add(1)
@@ -399,6 +340,7 @@ func (c *Client) Run(ctx context.Context) error {
 		start(c.runReturnRouteProbes)
 	}
 	defer func() {
+		c.setProbeCancel(nil)
 		stopProbes()
 		probes.Wait()
 		if ctx.Err() == nil {
@@ -414,6 +356,56 @@ func (c *Client) Run(ctx context.Context) error {
 	// end-to-end HTTP/2 support and can stall behind otherwise valid HTTP/3 or
 	// HTTP/1.1 reverse proxies, while unary Connect works across all transports.
 	return c.runUnaryMetricLoop(ctx)
+}
+
+func (c *Client) ensureTrustBundle(ctx context.Context) error {
+	if c.credentialStore == nil {
+		return nil
+	}
+	identity, ok := c.credentialStore.Identity()
+	if !ok || identity.AgentID == "" {
+		return nil
+	}
+	if len(identity.ControlPlaneKeys) > 0 {
+		return nil
+	}
+	return c.fetchAndPinTrustBundle(ctx, identity.AgentID)
+}
+
+func (c *Client) fetchAndPinTrustBundle(ctx context.Context, agentID string) error {
+	if c.credentialStore == nil {
+		return nil
+	}
+	endpoint := c.endpoint
+	if endpoint == "" && c.cfg != nil {
+		endpoint = c.cfg.Endpoint
+	}
+	if endpoint == "" {
+		if id, ok := c.credentialStore.Identity(); ok && id.Endpoint != "" {
+			endpoint = id.Endpoint
+		}
+	}
+	if endpoint == "" {
+		return errors.New("cannot fetch trust bundle: empty endpoint")
+	}
+	enrollClient, err := enrollment.New(endpoint, nil)
+	if err != nil {
+		return err
+	}
+	fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	keys, algorithms, requireAll, minimum, err := enrollClient.FetchTrustBundle(fetchCtx, agentID)
+	if err != nil {
+		return err
+	}
+	if len(keys) == 0 {
+		return errors.New("control plane returned empty trust bundle")
+	}
+	if err := c.credentialStore.PinTrustBundle(keys, algorithms, requireAll, minimum); err != nil {
+		return err
+	}
+	log.Printf("[SECURITY] Successfully self-healed and pinned %d control plane keys", len(keys))
+	return nil
 }
 
 func (c *Client) runAgentEvents(ctx context.Context) {
@@ -629,7 +621,12 @@ func (c *Client) reportPrivilegedState(parent context.Context, revision uint64, 
 func (c *Client) verifyPrivilegedRevision(revision *configv1.PrivilegedRevision) error {
 	identity, ok := c.identity()
 	if !ok || len(identity.ControlPlaneKeys) == 0 {
-		return nil
+		if err := c.ensureTrustBundle(context.Background()); err == nil {
+			identity, ok = c.identity()
+		}
+	}
+	if !ok || len(identity.ControlPlaneKeys) == 0 {
+		return errors.New("no control plane signing keys are pinned; cannot verify privileged revision")
 	}
 	envelope := revision.GetSignature()
 	if envelope == nil {
@@ -799,6 +796,11 @@ func (c *Client) verifyExecutionAssignment(assignment *execv1.ExecutionAssignmen
 		return nil, errors.New("the panel sent an execution assignment without a SignedEnvelope")
 	}
 	identity, ok := c.identity()
+	if !ok || len(identity.ControlPlaneKeys) == 0 {
+		if err := c.ensureTrustBundle(context.Background()); err == nil {
+			identity, ok = c.identity()
+		}
+	}
 	if !ok || len(identity.ControlPlaneKeys) == 0 {
 		return nil, errors.New("no panel signing keys are pinned; cannot verify signed execution assignment")
 	}
@@ -1291,10 +1293,20 @@ func (c *Client) runUnaryMetricLoop(ctx context.Context) error {
 	var retry retryPolicy
 	for {
 		if err := c.SubmitMetrics(ctx); err != nil {
+			if isPermissionDenied(err) {
+				log.Printf("[FATAL] Panel revoked credentials or permission was denied (HTTP 403 / PERMISSION_DENIED). Stopping all probes and polling. Please re-enroll via 'komari-agent login'")
+				c.cancelProbes()
+				return classify(err)
+			}
 			if isAuthRejection(err) {
 				oldToken := c.tokenValue()
 				if refreshErr := c.refreshCredentials(ctx, oldToken); refreshErr != nil {
 					log.Printf("Credential refresh failed after auth rejection: %v", refreshErr)
+					if isPermissionDenied(refreshErr) {
+						log.Printf("[FATAL] Panel revoked credentials during refresh (HTTP 403 / PERMISSION_DENIED). Stopping all probes and polling.")
+						c.cancelProbes()
+						return classify(refreshErr)
+					}
 					if isAuthRejection(refreshErr) || errors.Is(refreshErr, context.Canceled) {
 						return classify(refreshErr)
 					}
@@ -1320,10 +1332,20 @@ func (c *Client) runUnaryMetricLoop(ctx context.Context) error {
 	metricsDone:
 		if !time.Now().Before(nextInfoReport) {
 			if err := c.SubmitReport(ctx); err != nil {
+				if isPermissionDenied(err) {
+					log.Printf("[FATAL] Panel revoked credentials or permission was denied (HTTP 403 / PERMISSION_DENIED). Stopping all probes and polling. Please re-enroll via 'komari-agent login'")
+					c.cancelProbes()
+					return classify(err)
+				}
 				if isAuthRejection(err) {
 					oldToken := c.tokenValue()
 					if refreshErr := c.refreshCredentials(ctx, oldToken); refreshErr != nil {
 						log.Printf("Credential refresh failed after auth rejection: %v", refreshErr)
+						if isPermissionDenied(refreshErr) {
+							log.Printf("[FATAL] Panel revoked credentials during refresh (HTTP 403 / PERMISSION_DENIED). Stopping all probes and polling.")
+							c.cancelProbes()
+							return classify(refreshErr)
+						}
 						if isAuthRejection(refreshErr) || errors.Is(refreshErr, context.Canceled) {
 							return classify(refreshErr)
 						}
@@ -1466,4 +1488,12 @@ func classify(err error) error {
 		return fmt.Errorf("%w: %v", ErrLegacyFallback, err)
 	}
 	return err
+}
+
+func isPermissionDenied(err error) bool {
+	var connectErr *connect.Error
+	if errors.As(err, &connectErr) {
+		return connectErr.Code() == connect.CodePermissionDenied
+	}
+	return false
 }

@@ -16,10 +16,13 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
+	"github.com/komari-monitor/komari-agent/core/credentials"
+	"github.com/komari-monitor/komari-agent/core/signing"
 	"github.com/komari-monitor/komari-agent/requestheaders"
 	commonv1 "github.com/r11234567/komari-proto/gen/go/komari/common/v1"
 	rescuev1 "github.com/r11234567/komari-proto/gen/go/komari/rescue/v1"
 	rescuev1connect "github.com/r11234567/komari-proto/gen/go/komari/rescue/v1/rescuev1connect"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -41,6 +44,8 @@ type Config struct {
 	IgnoreUnsafeCert     bool
 	CFAccessClientID     string
 	CFAccessClientSecret string
+	CredentialsFile      string
+	ReplayFile           string
 	Action               ActionConfig
 }
 
@@ -53,9 +58,29 @@ type Helper struct {
 	cfAccessClientID     string
 	cfAccessClientSecret string
 	action               ActionConfig
+	credStore            *credentials.Store
+	identity             credentials.Identity
+	replayGuard          *signing.ReplayGuard
 }
 
 func New(config Config) (*Helper, error) {
+	credStore, _ := credentials.Open(config.CredentialsFile)
+	var identity credentials.Identity
+	if credStore != nil {
+		if id, ok := credStore.Identity(); ok && id.AccessToken != "" {
+			identity = id
+			if id.Endpoint != "" {
+				config.Endpoint = id.Endpoint
+			}
+			if id.AccessToken != "" {
+				config.Token = id.AccessToken
+			}
+			if id.AgentID != "" {
+				config.AgentID = id.AgentID
+			}
+		}
+	}
+
 	baseURL, err := normalizeEndpoint(config.Endpoint)
 	if err != nil {
 		return nil, err
@@ -78,13 +103,29 @@ func New(config Config) (*Helper, error) {
 	transport.ForceAttemptHTTP2 = true
 	// This is controlled by the explicit --ignore-unsafe-cert compatibility option.
 	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: config.IgnoreUnsafeCert} // #nosec G402 // lgtm[go/disabled-certificate-check]
+
+	guard := signing.NewReplayGuard(config.ReplayFile)
+
+	baseClient := &http.Client{Transport: transport}
+	var httpClient *http.Client
+	if identity.PrivateKey != "" {
+		httpClient = requestheaders.WrapWithStaticDPoP(baseClient, identity)
+	} else {
+		httpClient = baseClient
+	}
+
 	return &Helper{
-		client: rescuev1connect.NewRescueServiceClient(&http.Client{Transport: transport}, baseURL),
-		token:  strings.TrimSpace(config.Token), agentID: strings.TrimSpace(config.AgentID),
-		instanceID: instanceID, version: config.Version,
+		client:               rescuev1connect.NewRescueServiceClient(httpClient, baseURL),
+		token:                strings.TrimSpace(config.Token),
+		agentID:              strings.TrimSpace(config.AgentID),
+		instanceID:           instanceID,
+		version:              config.Version,
 		cfAccessClientID:     strings.TrimSpace(config.CFAccessClientID),
 		cfAccessClientSecret: strings.TrimSpace(config.CFAccessClientSecret),
 		action:               config.Action,
+		credStore:            credStore,
+		identity:             identity,
+		replayGuard:          guard,
 	}, nil
 }
 
@@ -165,8 +206,64 @@ func (h *Helper) lease(parent context.Context, afterAssignmentID string) (*rescu
 	return stream.Msg().Assignment, nil
 }
 
+func (h *Helper) verifyRescueAssignment(assignment *rescuev1.RescueAssignment) (*rescuev1.RescueSession, error) {
+	if assignment == nil {
+		return nil, errors.New("nil rescue assignment")
+	}
+
+	envelope := assignment.GetEnvelope()
+	if envelope == nil {
+		return nil, errors.New("the panel sent a rescue assignment without a SignedEnvelope")
+	}
+
+	identity := h.identity
+	if len(identity.ControlPlaneKeys) == 0 && h.credStore != nil {
+		if id, ok := h.credStore.Identity(); ok && len(id.ControlPlaneKeys) > 0 {
+			identity = id
+			h.identity = id
+		}
+	}
+	if len(identity.ControlPlaneKeys) == 0 {
+		return nil, errors.New("no panel signing keys are pinned; cannot verify signed rescue assignment")
+	}
+	if identity.AgentID == "" {
+		identity.AgentID = h.agentID
+	}
+
+	verifier := signing.New(identity, h.replayGuard)
+	instruction, err := verifier.Verify(envelope)
+	if err != nil {
+		return nil, fmt.Errorf("verify rescue envelope: %w", err)
+	}
+	if instruction.InstructionType != "rescue:v1" {
+		return nil, fmt.Errorf("the signature authorizes %q, not a rescue instruction (rescue:v1)", instruction.InstructionType)
+	}
+
+	var sessionProto rescuev1.RescueSession
+	if err := proto.Unmarshal(instruction.Body, &sessionProto); err != nil {
+		return nil, fmt.Errorf("unmarshal signed rescue session: %w", err)
+	}
+
+	if assignment.Session != nil {
+		if assignment.Session.SessionId != "" && assignment.Session.SessionId != sessionProto.SessionId {
+			return nil, errors.New("rescue session ID mismatch between envelope and assignment")
+		}
+		if assignment.Session.Action != sessionProto.Action {
+			return nil, errors.New("rescue session action mismatch between envelope and assignment")
+		}
+		if assignment.Session.GetSshPort() != sessionProto.GetSshPort() {
+			return nil, errors.New("rescue session SSH port mismatch between envelope and assignment")
+		}
+	}
+
+	return &sessionProto, nil
+}
+
 func (h *Helper) execute(parent context.Context, assignment *rescuev1.RescueAssignment) error {
-	session := assignment.Session
+	session, err := h.verifyRescueAssignment(assignment)
+	if err != nil {
+		return err
+	}
 	deadline := deadlineForAssignment(time.Time{})
 	if assignment.LeaseExpiresAt != nil && assignment.LeaseExpiresAt.IsValid() {
 		deadline = assignment.LeaseExpiresAt.AsTime()

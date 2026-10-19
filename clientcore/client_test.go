@@ -22,6 +22,7 @@ import (
 	flags_pkg "github.com/komari-monitor/komari-agent/cmd/flags"
 	"github.com/komari-monitor/komari-agent/core/credentials"
 	"github.com/komari-monitor/komari-agent/core/runtimeconfig"
+	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
 	enrollmentv1 "github.com/r11234567/komari-proto/gen/go/komari/enrollment/v1"
 	execv1 "github.com/r11234567/komari-proto/gen/go/komari/exec/v1"
 	securityv1 "github.com/r11234567/komari-proto/gen/go/komari/security/v1"
@@ -442,3 +443,173 @@ func TestDPoP_AutoRefreshOn401(t *testing.T) {
 	}
 	t.Log("Token auto-refresh state machine on 401 verified successfully")
 }
+
+func TestCredentialPriority_FileOverridesFlags(t *testing.T) {
+	tempDir := t.TempDir()
+	credPath := filepath.Join(tempDir, "credentials.json")
+
+	store, err := credentials.Open(credPath)
+	if err != nil {
+		t.Fatalf("failed to open credentials: %v", err)
+	}
+
+	identity := credentials.Identity{
+		Endpoint:    "https://panel.file-priority.com",
+		AgentID:     "agent-id-from-file",
+		AccessToken: "access-token-from-file",
+	}
+	if err := store.Save(identity); err != nil {
+		t.Fatalf("failed to save identity: %v", err)
+	}
+
+	// Flags have conflicting values
+	cfg := &flags_pkg.Config{
+		Endpoint:        "https://panel.flags-ignored.com",
+		Token:           "token-from-flags",
+		CredentialsFile: credPath,
+	}
+
+	rStore, err := runtimeconfig.New(runtimeconfig.FromFlags(cfg), filepath.Join(tempDir, "runtime.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client, err := New(cfg, rStore)
+	if err != nil {
+		t.Fatalf("expected New to succeed, got %v", err)
+	}
+
+	// Verify priority: credentials.json must win!
+	if client.endpoint != "https://panel.file-priority.com" {
+		t.Fatalf("expected endpoint %q, got %q", "https://panel.file-priority.com", client.endpoint)
+	}
+	if client.token != "access-token-from-file" {
+		t.Fatalf("expected token %q, got %q", "access-token-from-file", client.token)
+	}
+	if client.agentID != "agent-id-from-file" {
+		t.Fatalf("expected agentID %q, got %q", "agent-id-from-file", client.agentID)
+	}
+}
+
+func TestVerifyPrivilegedRevision_RejectsZeroKeys(t *testing.T) {
+	tempDir := t.TempDir()
+	credPath := filepath.Join(tempDir, "credentials.json")
+
+	store, err := credentials.Open(credPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Identity with ZERO pinned keys
+	identity := credentials.Identity{
+		Endpoint:         "https://panel.example.com",
+		AgentID:          "agent-zero-keys",
+		AccessToken:      "token-123",
+		ControlPlaneKeys: []credentials.PinnedKey{},
+	}
+	if err := store.Save(identity); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &flags_pkg.Config{
+		Endpoint:        "https://panel.example.com",
+		Token:           "token-123",
+		CredentialsFile: credPath,
+	}
+	rStore, _ := runtimeconfig.New(runtimeconfig.FromFlags(cfg), filepath.Join(tempDir, "runtime.json"))
+	client, err := New(cfg, rStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Call verifyPrivilegedRevision with zero pinned keys and no mock server
+	err = client.verifyPrivilegedRevision(&configv1.PrivilegedRevision{
+		Revision: 10,
+	})
+
+	// Must NOT return nil! It must reject with an error!
+	if err == nil {
+		t.Fatal("verifyPrivilegedRevision with 0 pinned keys must fail, but succeeded with nil")
+	}
+	t.Logf("verifyPrivilegedRevision correctly rejected zero pinned keys: %v", err)
+}
+
+func TestVerifyExecutionAssignment_RejectsZeroKeys(t *testing.T) {
+	tempDir := t.TempDir()
+	credPath := filepath.Join(tempDir, "credentials.json")
+
+	store, err := credentials.Open(credPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Identity with ZERO pinned keys
+	identity := credentials.Identity{
+		Endpoint:         "https://panel.example.com",
+		AgentID:          "agent-zero-keys",
+		AccessToken:      "token-123",
+		ControlPlaneKeys: []credentials.PinnedKey{},
+	}
+	if err := store.Save(identity); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &flags_pkg.Config{
+		Endpoint:        "https://panel.example.com",
+		Token:           "token-123",
+		CredentialsFile: credPath,
+	}
+	rStore, _ := runtimeconfig.New(runtimeconfig.FromFlags(cfg), filepath.Join(tempDir, "runtime.json"))
+	client, err := New(cfg, rStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assignment := &execv1.ExecutionAssignment{
+		AssignmentId: "assign-zero-keys",
+		Execution: &execv1.Execution{
+			ExecutionId: "exec-zero-keys",
+		},
+		Envelope: &securityv1.SignedEnvelope{
+			Payload: []byte("some-payload"),
+		},
+	}
+
+	_, err = client.verifyExecutionAssignment(assignment)
+	if err == nil {
+		t.Fatal("verifyExecutionAssignment with 0 pinned keys must fail, but succeeded with nil")
+	}
+	t.Logf("verifyExecutionAssignment correctly rejected zero pinned keys: %v", err)
+}
+
+func TestProbeCancellationOnFatalError(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := &flags_pkg.Config{
+		Endpoint: "https://panel.example.com",
+		Token:    "token-123",
+	}
+	rStore, _ := runtimeconfig.New(runtimeconfig.FromFlags(cfg), filepath.Join(tempDir, "runtime.json"))
+	client, err := New(cfg, rStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	client.setProbeCancel(cancel)
+
+	select {
+	case <-ctx.Done():
+		t.Fatal("context should not be cancelled yet")
+	default:
+	}
+
+	client.cancelProbes()
+
+	select {
+	case <-ctx.Done():
+		// Success! Context was cancelled by cancelProbes()
+	case <-time.After(1 * time.Second):
+		t.Fatal("probe context was not cancelled within timeout")
+	}
+}
+

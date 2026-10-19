@@ -366,6 +366,9 @@ func pinTrust(ctx context.Context, client *enrollment.Client, store *credentials
 	if err != nil {
 		return err
 	}
+	if len(keys) == 0 {
+		return errors.New("control plane returned an empty trust bundle: no panel signing keys found")
+	}
 	if err := store.PinTrustBundle(keys, algorithms, requireAll, minimum); err != nil {
 		return err
 	}

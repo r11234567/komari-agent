@@ -69,15 +69,7 @@ func Verify(options Options) (Result, error) {
 		options.Timeout = defaultTimeout
 	}
 
-	// Already root means the operator authenticated to become root, typically
-	// via sudo or a root login, and demanding another password would only
-	// train people to retype it without reading the prompt. The interesting
-	// case is the non-root one below.
-	if os.Geteuid() == 0 && operator != "" && operator != "root" {
-		return Result{Method: MethodSudoPassword, Operator: operator}, nil
-	}
-
-	state, err := inspectSudo()
+	state, err := inspectSudo(operator)
 	if err != nil {
 		return Result{}, err
 	}
@@ -114,31 +106,34 @@ type sudoState struct {
 }
 
 // inspectSudo asks sudo what it would do, without running anything.
-func inspectSudo() (sudoState, error) {
+func inspectSudo(operator string) (sudoState, error) {
 	binary, err := exec.LookPath("sudo")
 	if err != nil {
 		return sudoState{}, nil
 	}
-	// -l lists the invoking user's permitted commands. A NOPASSWD entry in the
-	// output means sudo would not prompt, which is what has to be detected.
-	command := exec.Command(binary, "-ln")
+	var command *exec.Cmd
+	if os.Geteuid() == 0 && operator != "" && operator != "root" {
+		command = exec.Command(binary, "-l", "-U", operator, "-n")
+	} else {
+		command = exec.Command(binary, "-ln")
+	}
 	command.Stdin = nil
 	output, err := command.CombinedOutput()
+	return parseSudoOutput(output, err), nil
+}
+
+func parseSudoOutput(output []byte, err error) sudoState {
 	if err != nil {
-		// Listing fails when the user has no sudo rights at all, or when sudo
-		// itself wants a password it cannot read without a terminal. Treat the
-		// former as "no sudo" and the latter as "sudo needs a password", which
-		// is distinguishable by whether the error text mentions a password.
 		text := strings.ToLower(string(output))
 		if strings.Contains(text, "password") {
-			return sudoState{available: true, requiresPassword: true}, nil
+			return sudoState{available: true, requiresPassword: true}
 		}
-		return sudoState{}, nil
+		return sudoState{}
 	}
 	return sudoState{
 		available:        true,
 		requiresPassword: !strings.Contains(string(output), "NOPASSWD"),
-	}, nil
+	}
 }
 
 // verifyThroughSudo makes sudo perform its own prompt.
@@ -161,9 +156,18 @@ func verifyThroughSudo(options Options, operator string) error {
 	if options.Prompt != "" {
 		fmt.Fprintln(terminal, options.Prompt)
 	}
-	command := exec.Command(binary, "-v")
+	var command *exec.Cmd
+	if os.Geteuid() == 0 && operator != "" && operator != "root" {
+		_ = exec.Command(binary, "-u", operator, "-k").Run()
+		command = exec.Command(binary, "-u", operator, "sudo", "-v")
+	} else {
+		command = exec.Command(binary, "-v")
+	}
 	command.Stdin, command.Stdout, command.Stderr = terminal, terminal, terminal
 	if err := runBounded(command, options.Timeout); err != nil {
+		if os.Geteuid() == 0 && operator != "" && operator != "root" {
+			return verifyPassword(options, operator)
+		}
 		return fmt.Errorf("sudo could not verify %s: %w", operator, err)
 	}
 	return nil

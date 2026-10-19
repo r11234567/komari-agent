@@ -86,6 +86,7 @@ method verified you.`,
 			return err
 		}
 
+		pendingNonce := state.PendingNonce
 		privilegeMode := currentPrivilegeMode()
 		applied, err := store.Promote(privilegeMode)
 		if err != nil {
@@ -104,7 +105,7 @@ method verified you.`,
 		// Reporting is best-effort on purpose. The change is already active
 		// locally, and a panel that cannot be reached must not make the host
 		// disagree with itself about what it is running.
-		if err := reportPrivilegedOutcome(cmd.Context(), state.PendingRevision,
+		if err := reportPrivilegedOutcome(cmd.Context(), state.PendingRevision, pendingNonce,
 			configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_DELIVERED, privilegeMode, result); err != nil {
 			fmt.Fprintf(os.Stderr, "\nNote: could not tell the panel yet: %v\n", err)
 			fmt.Fprintln(os.Stderr, "The change is applied locally and the Agent will report it when it reconnects.")
@@ -160,7 +161,7 @@ mistake can itself be undone.`,
 		describeSettings(restored)
 		fmt.Println("\nRestart the Agent for the change to take effect: systemctl restart komari-agent")
 
-		if err := reportPrivilegedOutcome(cmd.Context(), state.AppliedRevision,
+		if err := reportPrivilegedOutcome(cmd.Context(), state.AppliedRevision, "",
 			configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_ROLLED_BACK, privilegeMode, localauth.Result{}); err != nil {
 			fmt.Fprintf(os.Stderr, "\nNote: could not tell the panel yet: %v\n", err)
 			fmt.Fprintln(os.Stderr, "The rollback is applied locally and the Agent will report it when it reconnects.")
@@ -294,7 +295,7 @@ func writeAuditLog(message string) {
 // It carries the privilege mode the Agent actually ended up with, so the panel
 // can check the outcome against what the revision assumed instead of trusting
 // the reported state alone.
-func reportPrivilegedOutcome(parent context.Context, revision uint64, state configv1.PrivilegedDeliveryState, mode reportv1.PrivilegeMode, auth localauth.Result) error {
+func reportPrivilegedOutcome(parent context.Context, revision uint64, pendingNonce string, state configv1.PrivilegedDeliveryState, mode reportv1.PrivilegeMode, auth localauth.Result) error {
 	credentialStore, err := credentials.Open(credentialsPath())
 	if err != nil {
 		return err
@@ -303,8 +304,9 @@ func reportPrivilegedOutcome(parent context.Context, revision uint64, state conf
 	if !ok {
 		return errors.New("this machine is not enrolled")
 	}
-	client := configv1connect.NewPrivilegedDeliveryServiceClient(
-		dnsresolver.GetHTTPClientWithPreference(30*time.Second, flags.PreferIPVersion), identity.Endpoint)
+	baseHTTPClient := dnsresolver.GetHTTPClientWithPreference(30*time.Second, flags.PreferIPVersion)
+	dpopHTTPClient := requestheaders.WrapWithStaticDPoP(baseHTTPClient, identity)
+	client := configv1connect.NewPrivilegedDeliveryServiceClient(dpopHTTPClient, identity.Endpoint)
 
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
@@ -325,24 +327,18 @@ func reportPrivilegedOutcome(parent context.Context, revision uint64, state conf
 	// A manual upgrade additionally redeems its nonce, which is what proves to
 	// the panel that the upgrade ran on this machine rather than being claimed
 	// from somewhere else.
-	if state == configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_DELIVERED && auth.Method != "" {
-		store, storeErr := privileged.Open(privilegedPath())
-		if storeErr != nil {
-			return nil
-		}
-		if nonce := store.State().PendingNonce; nonce != "" {
-			complete := connect.NewRequest(&configv1.CompleteManualUpgradeRequest{
-				AgentId:                identity.AgentID,
-				Nonce:                  nonce,
-				LocalAuthentication:    string(auth.Method),
-				Operator:               auth.Operator,
-				ResultingPrivilegeMode: mode,
-			})
-			requestheaders.ApplyAgentAuthentication(complete.Header(), identity.AccessToken,
-				flags.CFAccessClientID, flags.CFAccessClientSecret)
-			if _, err := client.CompleteManualUpgrade(ctx, complete); err != nil {
-				return err
-			}
+	if state == configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_DELIVERED && auth.Method != "" && pendingNonce != "" {
+		complete := connect.NewRequest(&configv1.CompleteManualUpgradeRequest{
+			AgentId:                identity.AgentID,
+			Nonce:                  pendingNonce,
+			LocalAuthentication:    string(auth.Method),
+			Operator:               auth.Operator,
+			ResultingPrivilegeMode: mode,
+		})
+		requestheaders.ApplyAgentAuthentication(complete.Header(), identity.AccessToken,
+			flags.CFAccessClientID, flags.CFAccessClientSecret)
+		if _, err := client.CompleteManualUpgrade(ctx, complete); err != nil {
+			return err
 		}
 	}
 	return nil
