@@ -56,7 +56,11 @@ const (
 	configPollInterval = 5 * time.Minute
 )
 
-var ErrLegacyFallback = errors.New("Connect transport is unavailable; use legacy compatibility transport")
+var (
+	ErrLegacyFallback   = errors.New("Connect transport is unavailable; use legacy compatibility transport")
+	ErrUnconfigured     = errors.New("neither endpoint nor token is configured; specify --endpoint and --token or enroll via 'komari-agent login'")
+	ErrPermissionDenied = errors.New("panel revoked credentials or permission was denied (HTTP 403 / PERMISSION_DENIED)")
+)
 
 type Client struct {
 	config     configv1connect.ConfigServiceClient
@@ -217,7 +221,7 @@ func New(config *flags_pkg.Config, store *runtimeconfig.Store) (*Client, error) 
 	}
 
 	if endpoint == "" || token == "" {
-		return nil, ErrLegacyFallback
+		return nil, ErrUnconfigured
 	}
 
 	config.Endpoint = endpoint
@@ -1472,6 +1476,9 @@ func classify(err error) error {
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
+	}
+	if isPermissionDenied(err) {
+		return fmt.Errorf("%w: %v", ErrPermissionDenied, err)
 	}
 	var connectErr *connect.Error
 	if errors.As(err, &connectErr) {

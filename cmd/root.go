@@ -139,12 +139,8 @@ var RootCmd = &cobra.Command{
 			if err == nil {
 				err = connectClient.Run(stopCtx)
 			}
-			if errors.Is(err, clientcore.ErrLegacyFallback) {
-				log.Printf("Connect endpoint unavailable; the legacy WebSocket transport has been removed. Please upgrade the panel or configure a valid Connect endpoint: %v", err)
-				return err
-			}
-			if err != nil {
-				log.Printf("Connect agent transport stopped: %v", err)
+			if shouldExit, exitErr := handleSessionOutcome(err); shouldExit {
+				return exitErr
 			}
 			// A session that ran for a useful stretch was healthy, whatever
 			// ended it. Only rapid consecutive failures escalate.
@@ -262,4 +258,30 @@ func loadFromEnv() {
 			}
 		}
 	}
+}
+
+// handleSessionOutcome decides whether an error returned by clientcore should
+// cause the daemon to exit immediately or be retried with exponential backoff.
+//
+// Transient transport failures (such as server restart, network drop, timeout,
+// or connect.CodeUnavailable wrapped into ErrLegacyFallback) must never cause
+// the daemon to exit.
+func handleSessionOutcome(err error) (shouldExit bool, exitErr error) {
+	if errors.Is(err, clientcore.ErrUnconfigured) {
+		log.Printf("Connect agent cannot start: %v", err)
+		return true, err
+	}
+	if errors.Is(err, clientcore.ErrPermissionDenied) {
+		log.Printf("Connect agent credentials revoked (HTTP 403 / PERMISSION_DENIED): %v. Please re-enroll via 'komari-agent login'", err)
+		return true, err
+	}
+	if errors.Is(err, clientcore.ErrLegacyFallback) {
+		log.Printf("Connect endpoint temporarily unavailable (will retry with backoff): %v", err)
+		return false, nil
+	}
+	if err != nil {
+		log.Printf("Connect agent transport stopped (will retry with backoff): %v", err)
+		return false, nil
+	}
+	return false, nil
 }

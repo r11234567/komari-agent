@@ -130,8 +130,14 @@ func buildTransportWithPreference(timeout time.Duration, tlsConfig *tls.Config, 
 		timeout = 30 * time.Second
 	}
 	customResolver := GetCustomResolver()
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetHTTP2(true)
+	protocols.SetUnencryptedHTTP2(true)
+
 	return &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
+		Proxy:     http.ProxyFromEnvironment,
+		Protocols: protocols,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			host, port, err := net.SplitHostPort(addr)
 			if err != nil {
@@ -155,9 +161,9 @@ func buildTransportWithPreference(timeout time.Duration, tlsConfig *tls.Config, 
 			}
 			return nil, fmt.Errorf("failed to dial to any of the resolved IPs")
 		},
-		MaxIdleConns:          32,
-		MaxIdleConnsPerHost:   4,
-		MaxConnsPerHost:       8,
+		MaxIdleConns:          128,
+		MaxIdleConnsPerHost:   32,
+		MaxConnsPerHost:       0, // 0 = no limit, eliminates connection starvation under HTTP/1.1
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
