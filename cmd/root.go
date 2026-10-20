@@ -33,6 +33,19 @@ var RootCmd = &cobra.Command{
 	Use:   "komari-agent",
 	Short: "komari agent",
 	Long:  `komari agent`,
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		executable, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		installedService, err = readServiceConfig(executable)
+		if err != nil {
+			return err
+		}
+		installedService.apply(flags)
+		loadFromEnv()
+		return nil
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		loadFromEnv() // 从环境变量加载配置，覆盖解析
 		if flags.ConfigFile != "" {

@@ -66,11 +66,14 @@ is the step where a human decides this machine may join.`,
 
 		store, err := credentials.Open(credentialsPath())
 		if err != nil {
-			return err
+			return loginStoreError(credentialsPath(), err)
 		}
 		if existing, ok := store.Identity(); ok && existing.AgentID != "" {
 			return fmt.Errorf("this machine is already enrolled with %s as agent %s\nrun 'komari-agent logout' first if you want to enroll somewhere else",
 				existing.Endpoint, existing.AgentID)
+		}
+		if err := prepareLoginStore(store.Path()); err != nil {
+			return err
 		}
 
 		client, err := enrollment.New(endpoint, dnsresolver.GetHTTPClientWithPreference(30*time.Second, flags.PreferIPVersion))
@@ -109,7 +112,11 @@ is the step where a human decides this machine may join.`,
 			fmt.Printf("Sign-in valid until %s (renewed automatically)\n",
 				identity.RefreshTokenExpiresAt.Local().Format("2006-01-02 15:04"))
 		}
-		fmt.Println("\nStart the Agent with: komari-agent")
+		if installedService != nil && store.Path() == installedService.CredentialsFile {
+			fmt.Printf("\nStart the installed Agent service with: %s\n", installedService.restartCommand())
+		} else {
+			fmt.Printf("\nStart the Agent with: komari-agent --credentials-file %s\n", shellQuote(store.Path()))
+		}
 		return nil
 	},
 }
@@ -178,6 +185,7 @@ running.`,
 			return err
 		}
 		fmt.Printf("Agent version:   %s\n", update.CurrentVersion)
+		fmt.Printf("Credentials:     %s\n", store.Path())
 
 		identity, ok := store.Identity()
 		if !ok {

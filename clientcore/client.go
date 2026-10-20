@@ -221,7 +221,14 @@ func New(config *flags_pkg.Config, store *runtimeconfig.Store) (*Client, error) 
 	}
 
 	if endpoint == "" || token == "" {
-		return nil, ErrUnconfigured
+		path := config.CredentialsFile
+		if path == "" {
+			path = credentials.DefaultPath()
+		}
+		if credentialErr != nil {
+			return nil, fmt.Errorf("%w; credentials file %s: %v", ErrUnconfigured, path, credentialErr)
+		}
+		return nil, fmt.Errorf("%w; no usable credentials at %s (login must use the same --credentials-file and service account)", ErrUnconfigured, path)
 	}
 
 	config.Endpoint = endpoint

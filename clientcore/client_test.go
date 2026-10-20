@@ -13,7 +13,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,6 +31,23 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+func TestUnconfiguredErrorIdentifiesServiceCredentialFile(t *testing.T) {
+	for _, corrupt := range []bool{false, true} {
+		t.Run(fmt.Sprintf("corrupt=%t", corrupt), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "service-credentials.json")
+			if corrupt {
+				if err := os.WriteFile(path, []byte("invalid json"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err := New(&flags_pkg.Config{CredentialsFile: path}, nil)
+			if !errors.Is(err, ErrUnconfigured) || !strings.Contains(err.Error(), path) {
+				t.Fatalf("missing service identity must identify its file and remain fatal: %v", err)
+			}
+		})
+	}
+}
 
 func TestClassifyFallsBackOnlyForTransportOrMissingService(t *testing.T) {
 	if !errors.Is(classify(connect.NewError(connect.CodeUnavailable, errors.New("offline"))), ErrLegacyFallback) {
@@ -612,4 +631,3 @@ func TestProbeCancellationOnFatalError(t *testing.T) {
 		t.Fatal("probe context was not cancelled within timeout")
 	}
 }
-

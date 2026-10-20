@@ -24,7 +24,7 @@ Komari Agent 是面向现代跨平台基础设施的监控与远程运维探针�
 # 默认安全安装（非 root 账号 komari 运行）
 curl -fsSL 'https://raw.githubusercontent.com/r11234567/komari-agent/main/install.sh' | sudo bash
 
-# 指定面板地址并以零信任交互方式完成注册（推荐）
+# 指定面板地址；安装后按提示执行 login 完成注册
 curl -fsSL 'https://raw.githubusercontent.com/r11234567/komari-agent/main/install.sh' | sudo bash -s -- -e "https://panel.example.com"
 ```
 
@@ -35,7 +35,15 @@ $script = irm 'https://raw.githubusercontent.com/r11234567/komari-agent/main/ins
 & ([scriptblock]::Create($script)) -e "https://panel.example.com"
 ```
 
-### 3. Docker 容器安装
+### 3. macOS 安装
+
+```bash
+curl -fsSL 'https://raw.githubusercontent.com/r11234567/komari-agent/main/install.sh' | sudo bash -s -- -e "https://panel.example.com"
+sudo -u _komari /usr/local/komari/agent login --endpoint "https://panel.example.com"
+sudo launchctl kickstart -k system/com.komari.komari-agent
+```
+
+### 4. Docker 容器安装
 
 ```bash
 docker run -d \
@@ -53,9 +61,9 @@ docker run -d \
 
 探针支持完全无需在命令行传递静态明文 Token 的零信任注册交互：
 
-1. 探针安装完成后，在终端执行注册命令：
+1. 探针安装完成后，使用安装器提示的命令注册。Linux 默认安装应以服务账号运行：
    ```bash
-   komari-agent login --endpoint "https://panel.example.com"
+   sudo -u komari /opt/komari/agent login --endpoint "https://panel.example.com"
    ```
 2. 探针会在终端输出一个专属的一次性设备授权链接与验证码：
    ```text
@@ -63,11 +71,24 @@ docker run -d \
    https://panel.example.com/nodes/claim?token=claim-xxxxxxxxxxxx
    ```
 3. 管理员在浏览器打开链接并确认添加节点。
-4. 探针与主控完成双向 Ed25519 秘钥交换与 DPoP 签名绑定，凭据落盘于 `/opt/komari/credentials.json`（权限 0600）。
+4. 探针生成本机 Ed25519 密钥，并保存与密钥绑定的凭据，后续通过 DPoP 证明身份。Linux 默认凭据位于 `/opt/komari/credentials.json`（权限 0600，所有者 `komari`）。
 5. 注册成功后启动或重启探针服务即可正常上报：
    ```bash
+   sudo systemctl reset-failed komari-agent
    sudo systemctl restart komari-agent
    ```
+
+安装器在可执行文件旁写入不含密钥的 `service-config.json`。服务与 `login`、`status`、`refresh`、`trust`、`upgrade` 等 CLI 命令由此使用相同的凭据、运行配置、特权状态和防重放记录路径，不再依赖启动账号的 HOME/APPDATA。显式路径参数和环境变量仍可覆盖这些默认值。单独下载、没有此文件的二进制继续使用用户配置目录。
+
+| 平台（默认安装） | 登录命令 | 凭据文件 | 启动/重启 |
+| :--- | :--- | :--- | :--- |
+| Linux/systemd | `sudo -u komari /opt/komari/agent login --endpoint <面板地址>` | `/opt/komari/credentials.json` | `sudo systemctl restart komari-agent` |
+| macOS/launchd | `sudo -u _komari /usr/local/komari/agent login --endpoint <面板地址>` | `/usr/local/komari/credentials.json` | `sudo launchctl kickstart -k system/com.komari.komari-agent` |
+| Windows/NSSM | 管理员 PowerShell：`& "$env:ProgramFiles\Komari\komari-agent.exe" login --endpoint <面板地址>` | `%ProgramData%\Komari\credentials.json` | 管理员 PowerShell：`Restart-Service komari-agent` |
+
+Linux/macOS 使用安装器创建的服务账号写入凭据，避免 root 登录后生成服务账号无法读取的 0600 文件。Windows 凭据目录通过 ACL 向 SYSTEM、Administrators 和 LocalService 授权。Windows 的特权状态默认放在安装目录的 `privileged.json`，与提权脚本保持一致；其余状态放在 ProgramData。
+
+未注册时，systemd 和 Windows 安装器仅启用自动启动，等待登录后再启动；launchd 加载任务后等待注册。安装器不会把尚未注册视为成功在线。详细诊断和旧版本迁移见 [守护进程启动排查](docs/service-startup.md)。
 
 ---
 

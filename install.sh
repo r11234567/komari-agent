@@ -82,6 +82,7 @@ esac
 
 # Parse install-specific arguments
 komari_args=""
+komari_argv=()
 while [[ $# -gt 0 ]]; do
     case $1 in
         --install-dir)
@@ -114,27 +115,56 @@ while [[ $# -gt 0 ]]; do
             ;;
         -e|--endpoint)
             rescue_endpoint="$2"
+            komari_argv+=("$1" "$2")
             komari_args="$komari_args $1 $2"
             shift 2
             ;;
         -t|--token)
             rescue_token="$2"
+            komari_argv+=("$1" "$2")
+            komari_args="$komari_args $1 $2"
+            shift 2
+            ;;
+        --auto-discovery)
+            auto_discovery_key="$2"
+            komari_argv+=("$1" "$2")
             komari_args="$komari_args $1 $2"
             shift 2
             ;;
         --cf-access-client-id)
             cf_access_client_id="$2"
+            komari_argv+=("$1" "$2")
             komari_args="$komari_args $1 $2"
             shift 2
             ;;
         --cf-access-client-secret)
             cf_access_client_secret="$2"
+            komari_argv+=("$1" "$2")
             komari_args="$komari_args $1 $2"
             shift 2
             ;;
         -u|--ignore-unsafe-cert)
             ignore_unsafe_cert=true
+            komari_argv+=("$1")
             komari_args="$komari_args $1"
+            shift
+            ;;
+        --runtime-state-file|--credentials-file|--privileged-state-file|--replay-state-file)
+            case "$1" in
+                --runtime-state-file) runtime_state_override="$2" ;;
+                --credentials-file) credentials_override="$2" ;;
+                --privileged-state-file) privileged_state_override="$2" ;;
+                --replay-state-file) replay_state_override="$2" ;;
+            esac
+            shift 2
+            ;;
+        --runtime-state-file=*|--credentials-file=*|--privileged-state-file=*|--replay-state-file=*)
+            case "${1%%=*}" in
+                --runtime-state-file) runtime_state_override="${1#*=}" ;;
+                --credentials-file) credentials_override="${1#*=}" ;;
+                --privileged-state-file) privileged_state_override="${1#*=}" ;;
+                --replay-state-file) replay_state_override="${1#*=}" ;;
+            esac
             shift
             ;;
         --install*)
@@ -143,6 +173,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             # Non-install arguments go to komari_args
+            komari_argv+=("$1")
             komari_args="$komari_args $1"
             shift
             ;;
@@ -251,7 +282,10 @@ fi
 if [ "$runtime_identity" = "service-account" ]; then
     case " $komari_args " in
         *" --disable-remote-control "*) ;;
-        *) komari_args="$komari_args --disable-remote-control" ;;
+        *)
+            komari_args="$komari_args --disable-remote-control"
+            komari_argv+=("--disable-remote-control")
+            ;;
     esac
 fi
 
@@ -284,15 +318,24 @@ fi
 # Remove leading space from komari_args if present
 komari_args="${komari_args# }"
 
+if [[ ! "$service_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
+    log_error "Invalid service name: $service_name"
+    exit 1
+fi
+[[ "$target_dir" = /* ]] || target_dir="$PWD/$target_dir"
 komari_agent_path="${target_dir}/agent"
-runtime_state_path="${target_dir}/runtime-config.json"
+runtime_state_path="${runtime_state_override:-${target_dir}/runtime-config.json}"
 # Credentials and privileged state live beside the installation rather than in
 # a user home. The service runs as an unprivileged account whose home may not
 # exist, and the separately privileged helper has to read the same files
 # without guessing which user installed the Agent.
-credentials_path="${target_dir}/credentials.json"
-privileged_state_path="${target_dir}/privileged.json"
-replay_state_path="${target_dir}/nonces.json"
+credentials_path="${credentials_override:-${target_dir}/credentials.json}"
+privileged_state_path="${privileged_state_override:-${target_dir}/privileged.json}"
+replay_state_path="${replay_state_override:-${target_dir}/nonces.json}"
+[[ "$runtime_state_path" = /* ]] || runtime_state_path="$target_dir/$runtime_state_path"
+[[ "$credentials_path" = /* ]] || credentials_path="$target_dir/$credentials_path"
+[[ "$privileged_state_path" = /* ]] || privileged_state_path="$target_dir/$privileged_state_path"
+[[ "$replay_state_path" = /* ]] || replay_state_path="$target_dir/$replay_state_path"
 
 echo -e "${WHITE}===========================================${NC}"
 echo -e "${WHITE}    Komari Agent Installation Script     ${NC}"
@@ -533,7 +576,7 @@ else
     log_step "Downloading $file_name directly..."
     log_info "URL: ${CYAN}$download_url${NC}"
 fi
-if ! curl -L -o "$komari_agent_path" "$download_url"; then
+if ! curl -fL -o "$komari_agent_path" "$download_url"; then
     log_error "Download failed"
     exit 1
 fi
@@ -551,13 +594,15 @@ log_success "Komari-agent installed to ${GREEN}$komari_agent_path${NC}"
 elevate_script_path="${target_dir}/elevate.sh"
 uninstall_script_path="${target_dir}/uninstall.sh"
 script_source_dir="$(dirname "$0")"
+elevate_source_name="elevate.sh"
+[ "$os_name" = "darwin" ] && elevate_source_name="elevate_darwin.sh"
 
-if [ -f "${script_source_dir}/scripts/elevate.sh" ]; then
-    cp "${script_source_dir}/scripts/elevate.sh" "$elevate_script_path"
-elif [ -f "${script_source_dir}/elevate.sh" ]; then
-    cp "${script_source_dir}/elevate.sh" "$elevate_script_path"
+if [ -f "${script_source_dir}/scripts/${elevate_source_name}" ]; then
+    cp "${script_source_dir}/scripts/${elevate_source_name}" "$elevate_script_path"
+elif [ -f "${script_source_dir}/${elevate_source_name}" ]; then
+    cp "${script_source_dir}/${elevate_source_name}" "$elevate_script_path"
 else
-    elevate_download_url="https://raw.githubusercontent.com/${release_repository}/main/scripts/elevate.sh"
+    elevate_download_url="https://raw.githubusercontent.com/${release_repository}/main/scripts/${elevate_source_name}"
     [ -n "$github_proxy" ] && elevate_download_url="${github_proxy}/${elevate_download_url}"
     curl -fsSL -o "$elevate_script_path" "$elevate_download_url" 2>/dev/null || true
 fi
@@ -593,24 +638,38 @@ elif [ "$os_name" != "windows" ] && [ "$EUID" -ne 0 ]; then
     log_info "Not running as root; skipping /usr/local/bin symlinks."
 fi
 
-# Keep the online-dispatch snapshot alongside this installation so the
-# separately privileged helper can roll it back without reading a user home.
-case " $komari_args " in
-    *" --runtime-state-file "*) ;;
-    *) komari_args="$komari_args --runtime-state-file ${runtime_state_path}" ;;
-esac
-case " $komari_args " in
-    *" --credentials-file "*) ;;
-    *) komari_args="$komari_args --credentials-file ${credentials_path}" ;;
-esac
-case " $komari_args " in
-    *" --privileged-state-file "*) ;;
-    *) komari_args="$komari_args --privileged-state-file ${privileged_state_path}" ;;
-esac
-case " $komari_args " in
-    *" --replay-state-file "*) ;;
-    *) komari_args="$komari_args --replay-state-file ${replay_state_path}" ;;
-esac
+komari_argv+=("--runtime-state-file" "$runtime_state_path" "--credentials-file" "$credentials_path"
+    "--privileged-state-file" "$privileged_state_path" "--replay-state-file" "$replay_state_path")
+
+# Preserve argument boundaries in service definitions (paths may contain spaces).
+shell_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+komari_args=""
+systemd_args=""
+systemd_quote() {
+    local escaped="${1//\\/\\\\}"
+    escaped="${escaped//\"/\\\"}"
+    escaped="${escaped//%/%%}"
+    escaped="${escaped//\$/\$\$}"
+    printf '"%s"' "$escaped"
+}
+for argument in "${komari_argv[@]}"; do
+    komari_args="$komari_args $(shell_quote "$argument")"
+    systemd_args="$systemd_args $(systemd_quote "$argument")"
+done
+komari_args="${komari_args# }"
+shell_args_literal=$(shell_quote "$komari_args")
+xml_escape() {
+    printf '%s' "$1" | sed 's/\&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g; s/'"'"'/\&apos;/g'
+}
+json_string() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\n'/\\n}"
+    value="${value//$'\r'/\\r}"
+    value="${value//$'\t'/\\t}"
+    printf '"%s"' "$value"
+}
 
 # Detect init system and configure service
 log_step "Configuring system service..."
@@ -711,6 +770,39 @@ if [ "$rescue_enabled" = true ] && [ "$init_system" != "systemd" ]; then
     exit 1
 fi
 
+# Share the exact state paths with every CLI subcommand. This manifest contains
+# no tokens or private keys and is readable by operators without exposing them.
+service_config_path="${target_dir}/service-config.json"
+if ! (umask 022; cat > "$service_config_path" << EOF
+{
+  "service_name": $(json_string "$service_name"),
+  "service_user": $(json_string "$service_user"),
+  "init_system": $(json_string "$init_system"),
+  "credentials_file": $(json_string "$credentials_path"),
+  "runtime_state_file": $(json_string "$runtime_state_path"),
+  "privileged_state_file": $(json_string "$privileged_state_path"),
+  "replay_state_file": $(json_string "$replay_state_path")
+}
+EOF
+); then
+    log_error "Could not write installed service configuration"
+    exit 1
+fi
+chmod 644 "$service_config_path"
+if [ "$service_user" != "root" ]; then
+    chown "$service_user" "$service_config_path"
+fi
+
+agent_ready=false
+if [ -s "$credentials_path" ] || [ -n "$rescue_token" ] || [ -n "$auto_discovery_key" ]; then
+    agent_ready=true
+fi
+for argument in "${komari_argv[@]}"; do
+    case "$argument" in
+        --token=?*|-t=?*|--auto-discovery=?*|--config|--config=?*) agent_ready=true ;;
+    esac
+done
+
 # Handle each init system
 if [ "$init_system" = "nixos" ]; then
     log_warning "NixOS detected. System services must be configured declaratively."
@@ -742,10 +834,10 @@ elif [ "$init_system" = "openrc" ]; then
 
 name="Komari Agent Service"
 description="Komari monitoring agent"
-command="${komari_agent_path}"
-command_args="${komari_args}"
+command=$(shell_quote "$komari_agent_path")
+command_args=${shell_args_literal}
 command_user="${service_user}"
-directory="${target_dir}"
+directory=$(shell_quote "$target_dir")
 pidfile="/run/${service_name}.pid"
 retry="SIGTERM/30"
 supervisor=supervise-daemon
@@ -759,8 +851,10 @@ EOF
     # Set permissions and enable service
     chmod +x "$service_file"
     rc-update add ${service_name} default
-    rc-service ${service_name} start
-    log_success "OpenRC service configured and started"
+    if [ "$agent_ready" = true ]; then
+        rc-service "${service_name}" start || exit 1
+    fi
+    log_success "OpenRC service configured"
 elif [ "$init_system" = "systemd" ]; then
     # Systemd service configuration
     log_info "Using systemd for service management"
@@ -768,13 +862,15 @@ elif [ "$init_system" = "systemd" ]; then
     cat > "$service_file" << EOF
 [Unit]
 Description=Komari Agent Service
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${komari_agent_path} ${komari_args}
-WorkingDirectory=${target_dir}
+ExecStart=$(systemd_quote "$komari_agent_path")${systemd_args}
+WorkingDirectory=${target_dir//%/%%}
 Restart=always
+RestartSec=5
 User=${service_user}
 AmbientCapabilities=CAP_NET_RAW
 CapabilityBoundingSet=CAP_NET_RAW
@@ -785,10 +881,24 @@ WantedBy=multi-user.target
 EOF
 
     # Reload systemd and start service
-    systemctl daemon-reload
-    systemctl enable ${service_name}.service
-    systemctl start ${service_name}.service
-    log_success "Systemd service configured and started"
+    systemctl daemon-reload || exit 1
+    systemctl enable "${service_name}.service" || exit 1
+    systemctl reset-failed "${service_name}.service" 2>/dev/null || true
+    if [ "$agent_ready" = true ]; then
+        if ! systemctl start "${service_name}.service"; then
+            journalctl -u "${service_name}.service" -n 30 --no-pager
+            exit 1
+        fi
+        sleep 2
+        if ! systemctl is-active --quiet "${service_name}.service"; then
+            log_error "Agent service failed to stay running"
+            journalctl -u "${service_name}.service" -n 30 --no-pager
+            exit 1
+        fi
+        log_success "Systemd service started"
+    else
+        log_info "Systemd service enabled; waiting for enrollment before starting"
+    fi
 elif [ "$init_system" = "procd" ]; then
     # procd service configuration (OpenWrt)
     log_info "Using procd for service management"
@@ -801,12 +911,11 @@ STOP=10
 
 USE_PROCD=1
 
-PROG="${komari_agent_path}"
-ARGS="${komari_args}"
+PROG=$(shell_quote "$komari_agent_path")
 
 start_service() {
     procd_open_instance
-    procd_set_param command \$PROG \$ARGS
+    procd_set_param command "\$PROG" ${komari_args}
     procd_set_param respawn
     procd_set_param stdout 1
     procd_set_param stderr 1
@@ -827,8 +936,10 @@ EOF
     # Set permissions and enable service
     chmod +x "$service_file"
     /etc/init.d/${service_name} enable
-    /etc/init.d/${service_name} start
-    log_success "procd service configured and started"
+    if [ "$agent_ready" = true ]; then
+        /etc/init.d/${service_name} start || exit 1
+    fi
+    log_success "procd service configured"
 elif [ "$init_system" = "launchd" ]; then
     # macOS launchd service configuration
     log_info "Using launchd for service management"
@@ -848,18 +959,17 @@ elif [ "$init_system" = "launchd" ]; then
     <string>com.komari.${service_name}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${komari_agent_path}</string>
+        <string>$(xml_escape "$komari_agent_path")</string>
 EOF
     
-    # Add program arguments if provided
-    if [ -n "$komari_args" ]; then
-        echo "$komari_args" | xargs -n1 printf "        <string>%s</string>\n" >> "$plist_file"
-    fi
+    for argument in "${komari_argv[@]}"; do
+        printf '        <string>%s</string>\n' "$(xml_escape "$argument")" >> "$plist_file"
+    done
     
     cat >> "$plist_file" << EOF
     </array>
     <key>WorkingDirectory</key>
-    <string>${target_dir}</string>
+    <string>$(xml_escape "$target_dir")</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -874,12 +984,24 @@ EOF
 </plist>
 EOF
     
-    # Load and start the service
-    if launchctl bootstrap system "$plist_file"; then
-        log_success "System launchd service configured and started as ${service_user}"
-    else
+    # launchd requires a root-owned, non-writable plist. Loading a job does not
+    # by itself prove that its child process has stayed alive.
+    chown root:wheel "$plist_file"
+    chmod 644 "$plist_file"
+    if ! plutil -lint "$plist_file" || ! launchctl bootstrap system "$plist_file"; then
         log_error "Failed to load system-level launchd service"
         exit 1
+    fi
+    if [ "$agent_ready" = true ]; then
+        sleep 2
+        if ! launchctl print "system/com.komari.${service_name}" | grep -q 'state = running'; then
+            log_error "Agent service failed to stay running; see ${log_dir}/${service_name}.log"
+            tail -n 30 "${log_dir}/${service_name}.log" 2>/dev/null
+            exit 1
+        fi
+        log_success "System launchd service started as ${service_user}"
+    else
+        log_info "System launchd service loaded; waiting for enrollment"
     fi
 elif [ "$init_system" = "upstart" ]; then
     # Upstart service configuration
@@ -907,13 +1029,15 @@ end script
 
 # Start
 script
-    exec ${komari_agent_path} ${komari_args}
+    exec $(shell_quote "$komari_agent_path") ${komari_args}
 end script
 EOF
     # enable Upstart unit
     initctl reload-configuration
-    initctl start ${service_name}
-    log_success "Upstart service configured and started"
+    if [ "$agent_ready" = true ]; then
+        initctl start ${service_name} || exit 1
+    fi
+    log_success "Upstart service configured"
 else
     log_error "Unsupported or unknown init system detected: $init_system"
     log_error "Supported init systems: systemd, openrc, procd, launchd"
@@ -1031,9 +1155,7 @@ echo -e "${WHITE}===========================================${NC}"
 # An Agent installed without a token is not yet enrolled. Enrolment is a
 # separate, deliberate step: it needs a human to approve this machine in the
 # panel, so the installer explains it rather than trying to automate it away.
-case " $komari_args " in
-    *" --token "*|*" -t "*) ;;
-    *)
+if [ "$agent_ready" != true ]; then
         echo ""
         log_step "This machine is not enrolled yet."
         echo ""
@@ -1042,13 +1164,20 @@ case " $komari_args " in
             # The credentials file belongs to the service account, so writing it
             # as anyone else would leave the daemon unable to read its own
             # identity.
-            echo -e "    ${GREEN}sudo -u ${service_user} ${komari_agent_path} login --endpoint panel.example.com --credentials-file ${credentials_path}${NC}"
+            printf '    sudo -u %s %s login --endpoint %s\n' "$service_user" "$(shell_quote "$komari_agent_path")" "$(shell_quote "${rescue_endpoint:-panel.example.com}")"
         else
-            echo -e "    ${GREEN}${komari_agent_path} login --endpoint panel.example.com --credentials-file ${credentials_path}${NC}"
+            printf '    sudo %s login --endpoint %s\n' "$(shell_quote "$komari_agent_path")" "$(shell_quote "${rescue_endpoint:-panel.example.com}")"
         fi
         echo ""
         log_info "That prints a link. Open it, sign in to the panel, and approve this machine."
-        log_info "Then start the service: ${GREEN}systemctl restart ${service_name}${NC}"
+        case "$init_system" in
+            launchd) restart_command="sudo launchctl kickstart -k system/com.komari.${service_name}" ;;
+            openrc) restart_command="sudo rc-service ${service_name} restart" ;;
+            procd) restart_command="sudo /etc/init.d/${service_name} restart" ;;
+            upstart) restart_command="sudo initctl restart ${service_name}" ;;
+            nixos) restart_command="sudo nixos-rebuild switch" ;;
+            *) restart_command="sudo systemctl reset-failed ${service_name} && sudo systemctl restart ${service_name}" ;;
+        esac
+        log_info "Then start the service: ${GREEN}${restart_command}${NC}"
         echo -e "${WHITE}===========================================${NC}"
-        ;;
-esac
+fi

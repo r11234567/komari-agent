@@ -63,6 +63,9 @@ if ($RuntimeIdentity -notin @("root-or-administrator", "service-account")) {
     Log-Error "--install-runtime-identity must be root-or-administrator or service-account"
     exit 1
 }
+if ($ServiceName -notmatch '^[a-zA-Z0-9][a-zA-Z0-9_.-]*$') {
+    throw "Invalid service name: $ServiceName"
+}
 if (-not $IsAdministrator) {
     Log-Error "Administrator privileges are required to install or uninstall the Agent service."
     exit 1
@@ -89,6 +92,7 @@ if ($InstallRescue) {
 if ([string]::IsNullOrWhiteSpace($InstallDir)) {
     $InstallDir = Join-Path $env:ProgramFiles "Komari"
 }
+$InstallDir = [IO.Path]::GetFullPath($InstallDir)
 
 switch ($env:PROCESSOR_ARCHITECTURE) {
     "AMD64" { $Arch = "amd64" }
@@ -118,12 +122,27 @@ function Get-ReleaseUrl([string]$Version, [string]$FileName) {
 }
 
 function Quote-Argument([string]$Value) {
+    if ($Value -eq "") { return '""' }
     if ($Value -notmatch '[\s"]') { return $Value }
     return '"' + ($Value -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1') + '"'
 }
 
 function Join-Arguments([string[]]$Values) {
     return (($Values | ForEach-Object { Quote-Argument $_ }) -join ' ')
+}
+
+function Get-AgentOption([string]$Name, [string]$Default) {
+    $Value = $Default
+    for ($Index = 0; $Index -lt $KomariArgs.Count; $Index++) {
+        if ($KomariArgs[$Index] -eq $Name) {
+            $Value = $KomariArgs[++$Index]
+        }
+        elseif ($KomariArgs[$Index].StartsWith("${Name}=")) {
+            $Value = $KomariArgs[$Index].Substring($Name.Length + 1)
+        }
+    }
+    if (-not [IO.Path]::IsPathRooted($Value)) { $Value = Join-Path $InstallDir $Value }
+    return [IO.Path]::GetFullPath($Value)
 }
 
 function Assert-NativeCommand([string]$Description) {
@@ -163,6 +182,9 @@ function Start-ServiceAndWait([string]$Name) {
         [System.ServiceProcess.ServiceControllerStatus]::Running,
         [TimeSpan]::FromSeconds(30)
     )
+    # NSSM can enter Running before its application immediately exits. Give
+    # startup errors time to reach the configured restart delay/Paused state.
+    Start-Sleep -Seconds 2
     $InstalledService.Refresh()
     if ($InstalledService.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Running) {
         throw "Service $Name did not reach the Running state (status: $($InstalledService.Status))"
@@ -249,8 +271,9 @@ function Ensure-Nssm {
     Invoke-WebRequest -Uri "https://nssm.cc/release/nssm-2.24.zip" -OutFile $ZipPath -UseBasicParsing
     Remove-Item $ExtractPath -Recurse -Force -ErrorAction SilentlyContinue
     Expand-Archive -Path $ZipPath -DestinationPath $ExtractPath -Force
+    $NssmArch = if ($Arch -eq "386") { "win32" } else { "win64" }
     $Source = Get-ChildItem -Path $ExtractPath -Recurse -Filter nssm.exe |
-        Where-Object { $_.FullName -match '\\win(32|64)\\nssm.exe$' } |
+        Where-Object { $_.FullName -like "*\$NssmArch\nssm.exe" } |
         Select-Object -First 1
     if (-not $Source) { throw "nssm.exe was not found in the downloaded archive" }
     Copy-Item $Source.FullName $NssmPath -Force
@@ -262,7 +285,12 @@ function Ensure-Nssm {
 $Version = Get-ReleaseVersion
 $AgentPath = Join-Path $InstallDir "komari-agent.exe"
 $RuntimeStateDir = Join-Path $env:ProgramData "Komari"
-$RuntimeStatePath = Join-Path $RuntimeStateDir "runtime-config.json"
+if ($ServiceName -ne "komari-agent") { $RuntimeStateDir = Join-Path $RuntimeStateDir $ServiceName }
+$RuntimeStatePath = Get-AgentOption "--runtime-state-file" (Join-Path $RuntimeStateDir "runtime-config.json")
+$CredentialsPath = Get-AgentOption "--credentials-file" (Join-Path $RuntimeStateDir "credentials.json")
+$PrivilegedStatePath = Get-AgentOption "--privileged-state-file" (Join-Path $InstallDir "privileged.json")
+$ReplayStatePath = Get-AgentOption "--replay-state-file" (Join-Path $RuntimeStateDir "nonces.json")
+$ServiceConfigPath = Join-Path $InstallDir "service-config.json"
 $LegacyRuntimeStatePath = Join-Path $InstallDir "runtime-config.json"
 $LogDir = Join-Path $InstallDir "logs"
 $AgentOutputLog = Join-Path $LogDir "agent-stdout.log"
@@ -323,16 +351,27 @@ else {
 if (Test-Path $ElevateScriptPath) {
     Log-Success "Host elevation script installed to $ElevateScriptPath"
 }
+# Pass all paths explicitly to NSSM, and record the same defaults for the CLI.
+# Neither LocalService nor LocalSystem shares the enrolling user's APPDATA.
+$KomariArgs += @("--runtime-state-file", $RuntimeStatePath, "--credentials-file", $CredentialsPath,
+    "--privileged-state-file", $PrivilegedStatePath, "--replay-state-file", $ReplayStatePath)
+$ServiceConfig = @{
+    service_name = $ServiceName
+    service_user = $(if ($RuntimeIdentity -eq "service-account") { $ServiceAccount } else { "LocalSystem" })
+    init_system = "windows"
+    credentials_file = $CredentialsPath
+    runtime_state_file = $RuntimeStatePath
+    privileged_state_file = $PrivilegedStatePath
+    replay_state_file = $ReplayStatePath
+}
+[IO.File]::WriteAllText($ServiceConfigPath, ($ServiceConfig | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
 $AgentArgumentLine = Join-Arguments $KomariArgs
-$RuntimeStateEnvironment = "AGENT_RUNTIME_STATE_FILE=$RuntimeStatePath"
 
 $Nssm = Ensure-Nssm
 & $Nssm install $ServiceName $AgentPath | Out-Null
 Assert-NativeCommand "Installing service $ServiceName"
 & $Nssm set $ServiceName AppParameters $AgentArgumentLine | Out-Null
 Assert-NativeCommand "Configuring Agent arguments"
-& $Nssm set $ServiceName AppEnvironmentExtra $RuntimeStateEnvironment | Out-Null
-Assert-NativeCommand "Configuring the Agent runtime state environment"
 & $Nssm set $ServiceName AppDirectory $InstallDir | Out-Null
 Assert-NativeCommand "Configuring the working directory for $ServiceName"
 & $Nssm set $ServiceName AppStdout $AgentOutputLog | Out-Null
@@ -343,29 +382,41 @@ Assert-NativeCommand "Configuring stderr logging for $ServiceName"
 Assert-NativeCommand "Configuring log rotation for $ServiceName"
 if ($RuntimeIdentity -eq "service-account") {
     Set-ServiceAccount $ServiceName "LocalService" $Nssm
-    & icacls.exe $InstallDir /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "${ServiceAccountSid}:(OI)(CI)M" | Out-Null
-    Assert-NativeCommand "Granting the service account access to $InstallDir"
-    & icacls.exe $RuntimeStateDir /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "${ServiceAccountSid}:(OI)(CI)M" | Out-Null
-    Assert-NativeCommand "Granting the service account access to $RuntimeStateDir"
     Log-Success "Ordinary Agent installed as the non-login $ServiceAccount service account."
 }
 else {
     Set-ServiceAccount $ServiceName "LocalSystem" $Nssm
     Log-Success "Ordinary Agent installed as a LocalSystem service."
 }
+# Retain LocalService access through later promotion/demotion, and prevent
+# ordinary users from inheriting read access to the enrollment private key.
+foreach ($Directory in @($InstallDir, $RuntimeStateDir)) {
+    & icacls.exe $Directory /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "${ServiceAccountSid}:(OI)(CI)M" | Out-Null
+    Assert-NativeCommand "Restricting access to $Directory"
+}
 & $Nssm set $ServiceName Start SERVICE_AUTO_START | Out-Null
 Assert-NativeCommand "Configuring automatic startup for $ServiceName"
 & $Nssm set $ServiceName AppExit Default Restart | Out-Null
 Assert-NativeCommand "Configuring restart behavior for $ServiceName"
-try {
-    Start-ServiceAndWait $ServiceName
-}
-catch {
-    $failureDetails = Get-ServiceFailureDetails $ServiceName $AgentErrorLog
-    if ($failureDetails) {
-        throw "Starting service $ServiceName failed: $failureDetails"
+& $Nssm set $ServiceName AppRestartDelay 5000 | Out-Null
+Assert-NativeCommand "Configuring the restart delay for $ServiceName"
+$AgentReady = (Test-Path $CredentialsPath) -or -not [string]::IsNullOrWhiteSpace($AgentToken) -or
+    (@($KomariArgs | Where-Object { $_ -eq '--auto-discovery' -or $_ -like '--auto-discovery=?*' -or $_ -like '--token=?*' -or
+        $_ -like '-t=?*' -or $_ -eq '--config' -or $_ -like '--config=?*' }).Count -gt 0)
+if ($AgentReady) {
+    try {
+        Start-ServiceAndWait $ServiceName
     }
-    throw
+    catch {
+        $failureDetails = Get-ServiceFailureDetails $ServiceName $AgentErrorLog
+        if ($failureDetails) {
+            throw "Starting service $ServiceName failed: $failureDetails"
+        }
+        throw
+    }
+}
+else {
+    Log-Info "Agent service configured for automatic startup; waiting for enrollment before starting."
 }
 
 if ($InstallRescue) {
@@ -411,3 +462,10 @@ if ($InstallRescue) {
 Log-Success "Komari Agent $Version installation completed."
 Log-Info "Runtime identity: $RuntimeIdentity"
 Log-Info "Install directory: $InstallDir"
+Log-Info "Credentials file: $CredentialsPath"
+if (-not $AgentReady) {
+    $LoginEndpoint = if ($AgentEndpoint) { $AgentEndpoint } else { "https://panel.example.com" }
+    Log-Info "Enroll in Administrator PowerShell:"
+    Log-Info ("  & '" + $AgentPath.Replace("'", "''") + "' login --endpoint '" + $LoginEndpoint.Replace("'", "''") + "'")
+    Log-Info "Then start the service: Restart-Service -Name '$ServiceName'"
+}
