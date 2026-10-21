@@ -38,6 +38,9 @@ sudo systemctl daemon-reload
 sudo "$rootdir/komari-host" migrate --service "$legacy" --legacy-disable preserve
 sum=$(sha256sum "$rootdir/komari-agent");sum=${sum%% *}
 sudo "$rootdir/komari-host" migrate --service "$legacy" --legacy-disable preserve --agent-artifact "$rootdir/komari-agent" --sha256 "$sum" --commit
+if sudo "$rootdir/komari-agent" --service-manifest "/etc/komari/services/$legacy.json" upgrade; then
+  echo 'Root CLI must not declare a non-root daemon upgraded' >&2; exit 1
+fi
 sudo sha256sum -c ci-artifacts/migration-state-before.sha256
 sudo -u komari-ci-test test ! -w "/usr/lib/komari/$legacy/komari-host"
 sudo test -f "/var/lib/komari-host/$legacy/unit-0.backup"
