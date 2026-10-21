@@ -24,6 +24,9 @@ var errSavedHostObservationInvalid = errors.New("saved host observation no longe
 
 func (c *Client) validateSavedHostObservation(r *configv1.ReportPrivilegedDeliveryRequest) error {
 	o := r.GetObservation()
+	if c.cfg != nil && c.cfg.DisableRemoteControl && (o.GetEffectiveCapabilities().GetRemoteControl().GetAvailable() || o.GetEffectiveCapabilities().GetWebssh().GetAvailable() || o.GetEffectiveCapabilities().GetExecution().GetAvailable()) {
+		return errSavedHostObservationInvalid
+	}
 	if o.GetOperationId() == "" {
 		return nil
 	}

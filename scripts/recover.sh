@@ -6,7 +6,7 @@ action="${1:-diagnostics}"
 shift || true
 
 case "$action" in
-  version|verify|diagnostics|show-config|rollback-config) ;;
+  version|verify|diagnostics) ;;
   *) echo "unsupported recovery action: $action" >&2; exit 64 ;;
 esac
 

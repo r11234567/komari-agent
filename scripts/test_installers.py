@@ -66,7 +66,10 @@ launchctl() {{
 }}
 """
         parser = "# Parse install-specific arguments" + between(SH, "# Parse install-specific arguments", '\nif { [ -n "$cf_access_client_id"')
-        paths = 'if [[ ! "$service_name"' + between(SH, 'if [[ ! "$service_name"', '\necho -e "${WHITE}===')
+        # Select the legacy renderer's standalone validation block. The trusted
+        # Linux installer has its own earlier, nested validation; selecting it
+        # accidentally executes a real installer instead of rendering fixtures.
+        paths = 'if [[ ! "$service_name"' + SH.rsplit('if [[ ! "$service_name"', 1)[1].split('\necho -e "${WHITE}===', 1)[0]
         serializer = 'komari_argv+=("--runtime-state-file"' + between(SH, 'komari_argv+=("--runtime-state-file"', "# Detect init system and configure service")
         manifest = "# Share the exact state paths" + between(SH, "# Share the exact state paths", "# Handle each init system")
         if manager == "systemd":

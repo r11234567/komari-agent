@@ -584,6 +584,9 @@ func executeTransaction(ctx context.Context, m *hostops.Manifest, p *hostops.Pol
 	bootstrap.ConfigFile = ""
 	bootstrap.HostProc = ""
 	bootstrap.IgnoreUnsafeCert = false
+	// A reviewed transaction may release a historical argv restriction only
+	// after the administrator has explicitly released its protected policy deny.
+	bootstrap.DisableRemoteControl = p.ForceDenyRemoteControl
 	bootstrap.DisableAutoUpdate = true
 	bootstrap.Token = ""
 	bootstrap.AutoDiscoveryKey = ""

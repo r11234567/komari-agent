@@ -19,7 +19,6 @@ import (
 // Parse legacy service arguments only as data. This migration parser remains
 // private to the host tool when the public daemon CLI is reduced later.
 func captureBootstrap(m *hostops.Manifest, o serviceObservation, t *hostops.Trust) (*flags.Config, error) {
-	c := &flags.Config{Interval: 3, InfoReportInterval: 5, ReconnectInterval: 5, MaxRetries: 3}
 	args, err := parseExecStart(o.ExecStart)
 	if err != nil {
 		return nil, err
@@ -27,6 +26,30 @@ func captureBootstrap(m *hostops.Manifest, o serviceObservation, t *hostops.Trus
 	if args[0] != m.Executable {
 		return nil, errors.New("service executable differs from trusted manifest")
 	}
+	c, err := parseLegacyBootstrap(args)
+	if err != nil {
+		return nil, err
+	}
+	// Environment files can carry additional unreviewed bootstrap paths and
+	// secrets. Refuse instead of copying untrusted shell/environment into root.
+	env, err := systemctl("show", m.ServiceName, "--property=Environment,EnvironmentFiles,PassEnvironment")
+	if err != nil {
+		return nil, err
+	}
+	for _, line := range strings.Split(env, "\n") {
+		_, val, ok := strings.Cut(line, "=")
+		if ok && val != "" {
+			return nil, errors.New("service environment overrides must be migrated into a reviewed bootstrap before host conversion")
+		}
+	}
+	c.Endpoint = t.Endpoint
+	return c, nil
+}
+
+// parseLegacyBootstrap is used only by the administrator's offline migration.
+// Retired flags are never registered on the public daemon CLI.
+func parseLegacyBootstrap(args []string) (*flags.Config, error) {
+	c := &flags.Config{Interval: 3, InfoReportInterval: 5, ReconnectInterval: 5, MaxRetries: 3}
 	v := reflect.ValueOf(c).Elem()
 	typ := v.Type()
 	fields := map[string]int{}
@@ -41,6 +64,11 @@ func captureBootstrap(m *hostops.Manifest, o serviceObservation, t *hostops.Trus
 	}
 	for i := 1; i < len(args); i++ {
 		key, value, has := strings.Cut(args[i], "=")
+		if len(key) == 2 && strings.HasPrefix(key, "-") {
+			if name, ok := map[string]string{"e": "endpoint", "t": "token", "i": "interval", "r": "max-retries", "u": "ignore-unsafe-cert", "c": "reconnect-interval"}[key[1:]]; ok {
+				key = "--" + name
+			}
+		}
 		if key == "--service-manifest" {
 			if !has {
 				i++
@@ -89,6 +117,7 @@ func captureBootstrap(m *hostops.Manifest, o serviceObservation, t *hostops.Trus
 			f.SetFloat(n)
 		}
 	}
+	localDeny := c.DisableRemoteControl
 	if c.ConfigFile != "" {
 		data, err := hostops.ReadCandidate(c.ConfigFile)
 		if err != nil {
@@ -98,19 +127,7 @@ func captureBootstrap(m *hostops.Manifest, o serviceObservation, t *hostops.Trus
 			return nil, err
 		}
 	}
-	// Environment files can carry additional unreviewed bootstrap paths and
-	// secrets. Refuse instead of copying untrusted shell/environment into root.
-	env, err := systemctl("show", m.ServiceName, "--property=Environment,EnvironmentFiles,PassEnvironment")
-	if err != nil {
-		return nil, err
-	}
-	for _, line := range strings.Split(env, "\n") {
-		_, val, ok := strings.Cut(line, "=")
-		if ok && val != "" {
-			return nil, errors.New("service environment overrides must be migrated into a reviewed bootstrap before host conversion")
-		}
-	}
-	c.Endpoint = t.Endpoint
+	c.DisableRemoteControl = c.DisableRemoteControl || localDeny
 	return c, nil
 }
 

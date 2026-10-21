@@ -34,9 +34,15 @@ func PolicyAllows(settings privileged.Settings, p *hostops.Policy) bool {
 		(!settings.EnableGPU || p.AllowGPU) && (!settings.RescueHelperEnabled || p.AllowRescueHelper && p.HelperInstalled && p.HelperAuthorized)
 }
 func Effective() EffectiveConfig {
-	raw := FromFlags(flags_pkg.GlobalConfig)
-	if store := active.Load(); store != nil {
-		raw = store.Current()
+	return Inspect(flags_pkg.GlobalConfig, active.Load(), privileged.ActiveStore())
+}
+
+// Inspect evaluates a disk view without changing the process-wide stores or
+// claiming that the querying process is the running daemon.
+func Inspect(config *flags_pkg.Config, runtimeStore *Store, privilegedStore *privileged.Store) EffectiveConfig {
+	raw := FromFlags(config)
+	if runtimeStore != nil {
+		raw = runtimeStore.Current()
 	}
 	result := EffectiveConfig{Runtime: raw, Source: "bootstrap flags", Sources: map[string]string{}, Blocked: map[string]string{}}
 	runtimeSource := "bootstrap flags"
@@ -47,15 +53,19 @@ func Effective() EffectiveConfig {
 		result.Sources[field] = runtimeSource
 	}
 	result.Privileged = privileged.Settings{RemoteControlEnabled: raw.RemoteControlEnabled, WebSSHEnabled: raw.RemoteControlEnabled, ExecutionEnabled: raw.RemoteControlEnabled, EnableGPU: raw.EnableGPU}
-	if store := privileged.ActiveStore(); store != nil {
-		result.Privileged = store.Effective()
+	if privilegedStore != nil {
+		result.Privileged = privilegedStore.Effective()
 		result.Source = "applied privileged snapshot intersected with signed pending restrictions"
 	}
 	for _, field := range []string{"remote_control_enabled", "webssh_enabled", "execution_enabled", "enable_gpu", "rescue_helper_enabled", "required_privilege_mode"} {
 		result.Sources[field] = result.Source
 	}
-	if flags_pkg.GlobalConfig.ServiceManifestFile != "" {
-		p, err := CurrentPolicy()
+	if config.ServiceManifestFile != "" {
+		m, err := hostops.ReadManifest(config.ServiceManifestFile)
+		var p *hostops.Policy
+		if err == nil {
+			p, err = hostops.ReadPolicy(m)
+		}
 		if err != nil {
 			result.Privileged = privileged.Settings{}
 			result.BlockedReason = "protected installation policy unavailable: " + err.Error()
@@ -78,7 +88,7 @@ func Effective() EffectiveConfig {
 			s.RescueHelperEnabled = s.RescueHelperEnabled && p.AllowRescueHelper && p.HelperInstalled && p.HelperAuthorized
 			// Formerly writable historical state must not revive a capability
 			// during restart, before the current host-approved target loads.
-			if store := privileged.ActiveStore(); store != nil && p.HostSettings != nil && store.State().AppliedRevision <= p.HostRevision {
+			if privilegedStore != nil && p.HostSettings != nil && privilegedStore.State().AppliedRevision <= p.HostRevision {
 				target := p.HostSettings
 				s.RemoteControlEnabled = s.RemoteControlEnabled && target.RemoteControlEnabled
 				s.WebSSHEnabled = s.WebSSHEnabled && target.WebSSHEnabled
@@ -91,6 +101,11 @@ func Effective() EffectiveConfig {
 				result.BlockedReason = "protected local force-deny"
 			}
 		}
+	}
+	if config.DisableRemoteControl {
+		result.Privileged.RemoteControlEnabled = false
+		result.Blocked["remote_control_enabled"] = "local force-deny"
+		result.Sources["remote_control_enabled"] = "local force-deny"
 	}
 	if result.BlockedReason != "" {
 		result.Blocked["privileged"] = result.BlockedReason

@@ -19,20 +19,21 @@ sudo -u komari-ci-test test ! -w "$rootdir/komari-agent"
 sudo -u komari-ci-test test ! -w "/etc/komari/services/$service.policy.json"
 sudo -u komari-ci-test test -w "/var/lib/komari/$service"
 sudo "$rootdir/komari-host" diagnose --manifest "/etc/komari/services/$service.json"
-if sudo "$rootdir/komari-host" apply --manifest "/etc/komari/services/$service.json"; then echo 'Unimplemented apply must fail' >&2; exit 1; fi
+if sudo "$rootdir/komari-host" apply --manifest "/etc/komari/services/$service.json"; then echo 'Apply without a revision and approved trust must fail' >&2; exit 1; fi
 legacy="komari-migrate-${GITHUB_RUN_ID}"
 legacydir="/var/lib/$legacy"
 sudo install -d -m 755 "$legacydir"
-for file in credentials runtime-config privileged nonces; do
-  printf '{"fixture":"preserve-node-id-and-r4","revision":4}\n' | sudo tee "$legacydir/$file.json" >/dev/null
-done
+printf '{"fixture":"preserve-node-id"}\n' | sudo tee "$legacydir/credentials.json" >/dev/null
+printf '{"current":{"revision":4,"report_interval":3000000000}}\n' | sudo tee "$legacydir/runtime-config.json" >/dev/null
+printf '{"applied_revision":0}\n' | sudo tee "$legacydir/privileged.json" >/dev/null
+printf '{}\n' | sudo tee "$legacydir/nonces.json" >/dev/null
 sudo cp "$rootdir/komari-agent" "$legacydir/agent"
 sudo chown -R komari-ci-test "$legacydir"
 sudo sha256sum "$legacydir/"*.json > ci-artifacts/migration-state-before.sha256
 sudo tee "/etc/systemd/system/$legacy.service" >/dev/null <<UNIT
 [Service]
 User=komari-ci-test
-ExecStart=$legacydir/agent --endpoint https://panel.invalid --credentials-file $legacydir/credentials.json --runtime-state-file $legacydir/runtime-config.json --privileged-state-file $legacydir/privileged.json --replay-state-file $legacydir/nonces.json --disable-remote-control
+ExecStart=$legacydir/agent --endpoint https://panel.invalid --credentials-file $legacydir/credentials.json --runtime-state-file $legacydir/runtime-config.json --privileged-state-file $legacydir/privileged.json --replay-state-file $legacydir/nonces.json --disable-remote-control --interval 12 --include-nics eth0 --detailed-gpu
 UNIT
 sudo systemctl daemon-reload
 sudo "$rootdir/komari-host" migrate --service "$legacy" --legacy-disable preserve
@@ -41,7 +42,19 @@ sudo "$rootdir/komari-host" migrate --service "$legacy" --legacy-disable preserv
 if sudo "$rootdir/komari-agent" --service-manifest "/etc/komari/services/$legacy.json" upgrade; then
   echo 'Root CLI must not declare a non-root daemon upgraded' >&2; exit 1
 fi
+sudo -u komari-ci-test "/usr/lib/komari/$legacy/komari-agent" config show --json > ci-artifacts/migration-config.json
+sudo -u komari-ci-test "/usr/lib/komari/$legacy/komari-agent" recover version
+sudo systemctl show "$legacy" --property=ExecStart > ci-artifacts/migration-execstart.log
+python3 - <<'CHECK'
+import json
+from pathlib import Path
+p=json.loads(Path('ci-artifacts/migration-config.json').read_text())
+assert p['runtime']['revision']==4, 'migration lost applied runtime revision'
+unit=Path('ci-artifacts/migration-execstart.log').read_text()
+assert '--interval' not in unit and '--detailed-gpu' not in unit and '--include-nics' not in unit
+assert '--config' in unit and '.migration-bootstrap.json' in unit
+CHECK
 sudo sha256sum -c ci-artifacts/migration-state-before.sha256
 sudo -u komari-ci-test test ! -w "/usr/lib/komari/$legacy/komari-host"
 sudo test -f "/var/lib/komari-host/$legacy/unit-0.backup"
-echo 'Trusted fresh install, custom legacy migration, preserved node/revision files, and unsupported host apply verified.'
+echo 'Trusted install, retired-argv migration, service-account config query, preserved node/revision files, and invalid host apply verified.'

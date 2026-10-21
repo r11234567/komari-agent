@@ -85,6 +85,10 @@ komari_args=""
 komari_argv=()
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --interval|--interval=*|-i|-i[0-9]*|--memory-include-cache|--memory-include-cache=*|--include-nics|--include-nics=*|--exclude-nics|--exclude-nics=*|--include-mountpoint|--include-mountpoint=*|--month-rotate|--month-rotate=*|--get-ip-addr-from-nic|--get-ip-addr-from-nic=*|--enable-gpu|--enable-gpu=*|--gpu|--gpu=*|--detailed-gpu|--detailed-gpu=*|--max-retries|--max-retries=*|-r|-r[0-9]*|--disable-compression|--disable-compression=*)
+            log_error "Removed agent option: $1; use panel configuration or administrator migration"
+            exit 64
+            ;;
         --install-dir)
             target_dir="$2"
             shift 2

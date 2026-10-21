@@ -31,8 +31,8 @@ func auditAppliedStore(t *testing.T) *privileged.Store {
 func TestRegressionAppliedPrivilegeBlockedByInstallFlag(t *testing.T) {
 	auditAppliedStore(t)
 	flags_pkg.GlobalConfig.DisableRemoteControl = true
-	if !RemoteControlEnabled() {
-		t.Fatal("locally approved remote_control=true is still overridden by installer --disable-remote-control")
+	if RemoteControlEnabled() {
+		t.Fatal("applied snapshot bypassed explicit local force-deny")
 	}
 }
 

@@ -9,8 +9,6 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/komari-monitor/komari-agent/core/capability"
-	"github.com/komari-monitor/komari-agent/core/runtimeconfig"
 	"github.com/komari-monitor/komari-agent/update"
 	"github.com/spf13/cobra"
 )
@@ -19,6 +17,8 @@ const recoverOutputLimit = 64 << 10
 
 var recoverCmd = &cobra.Command{
 	Use:   "recover",
+	Args:  cobra.NoArgs,
+	RunE:  func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
 	Short: "Run bounded recovery and diagnostics actions",
 	Long:  "Runs one short-lived, auditable recovery action. It never starts an Agent daemon or accepts arbitrary commands.",
 }
@@ -26,6 +26,7 @@ var recoverCmd = &cobra.Command{
 var recoverVersionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Print the installed Agent version",
+	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return writeRecoverOutput(fmt.Sprintf("version=%s\nplatform=%s/%s\n", update.CurrentVersion, runtime.GOOS, runtime.GOARCH))
 	},
@@ -34,6 +35,7 @@ var recoverVersionCmd = &cobra.Command{
 var recoverVerifyCmd = &cobra.Command{
 	Use:   "verify --file PATH --sha256 HEX",
 	Short: "Verify a file SHA-256 checksum",
+	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		path, _ := cmd.Flags().GetString("file")
 		expected, _ := cmd.Flags().GetString("sha256")
@@ -54,56 +56,25 @@ var recoverVerifyCmd = &cobra.Command{
 var recoverDiagnosticsCmd = &cobra.Command{
 	Use:   "diagnostics",
 	Short: "Print bounded local diagnostic state",
+	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		store, err := runtimeStoreForRecovery()
+		store, err := runtimeStoreForInspection()
 		if err != nil {
 			return err
 		}
 		config := store.Current()
-		capabilities := capability.Detect(config.RemoteControlEnabled)
 		return writeRecoverOutput(fmt.Sprintf(
-			"version=%s\nplatform=%s/%s\nconfig_revision=%d\nremote_control_enabled=%t\nprivilege_mode=%s\n",
-			update.CurrentVersion, runtime.GOOS, runtime.GOARCH, config.Revision, config.RemoteControlEnabled, capabilities.PrivilegeMode,
+			"version=%s\nplatform=%s/%s\nconfig_revision=%d\nremote_control_enabled=%t\ndaemon_identity=unavailable (disk inspection)\n",
+			update.CurrentVersion, runtime.GOOS, runtime.GOARCH, config.Revision, config.RemoteControlEnabled,
 		))
-	},
-}
-
-var recoverShowConfigCmd = &cobra.Command{
-	Use:   "show-config",
-	Short: "Show the active persisted runtime configuration snapshot",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		store, err := runtimeStoreForRecovery()
-		if err != nil {
-			return err
-		}
-		return writeRecoverOutput(fmt.Sprintf("%+v\n", store.Current()))
-	},
-}
-
-var recoverRollbackConfigCmd = &cobra.Command{
-	Use:   "rollback-config",
-	Short: "Restore the previous persisted runtime configuration snapshot",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return fmt.Errorf("runtime state has a single daemon writer; restore settings through a new panel revision")
 	},
 }
 
 func init() {
 	recoverVerifyCmd.Flags().String("file", "", "File to verify")
 	recoverVerifyCmd.Flags().String("sha256", "", "Expected SHA-256 checksum")
-	recoverCmd.AddCommand(recoverVersionCmd, recoverVerifyCmd, recoverDiagnosticsCmd, recoverShowConfigCmd, recoverRollbackConfigCmd)
+	recoverCmd.AddCommand(recoverVersionCmd, recoverVerifyCmd, recoverDiagnosticsCmd)
 	RootCmd.AddCommand(recoverCmd)
-}
-
-func runtimeStoreForRecovery() (*runtimeconfig.Store, error) {
-	loadFromEnv()
-	path := flags.RuntimeStateFile
-	store, err := runtimeconfig.New(runtimeconfig.FromFlags(flags), path)
-	if err != nil {
-		return nil, fmt.Errorf("open runtime config snapshot: %w", err)
-	}
-	runtimeconfig.SetActive(store)
-	return store, nil
 }
 
 func fileSHA256(path string) (string, error) {

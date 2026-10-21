@@ -78,7 +78,7 @@ docker run -d \
    sudo systemctl restart komari-agent
    ```
 
-安装器在可执行文件旁写入不含密钥的 `service-config.json`。服务与 `login`、`status`、`refresh`、`trust`、`upgrade` 等 CLI 命令由此使用相同的凭据、运行配置、特权状态和防重放记录路径，不再依赖启动账号的 HOME/APPDATA。显式路径参数和环境变量仍可覆盖这些默认值。单独下载、没有此文件的二进制继续使用用户配置目录。
+安装器在可执行文件旁写入不含密钥的 `service-config.json`。服务与 `login`、`status`、`refresh`、`trust`、`config show` 等 CLI 命令由此使用相同的凭据、运行配置、特权状态和防重放记录路径，不再依赖启动账号的 HOME/APPDATA。显式路径参数和环境变量仍可覆盖这些默认值。单独下载、没有此文件的二进制继续使用用户配置目录。
 
 | 平台（默认安装） | 登录命令 | 凭据文件 | 启动/重启 |
 | :--- | :--- | :--- | :--- |
@@ -94,7 +94,7 @@ Linux/macOS 使用安装器创建的服务账号写入凭据，避免 root 登�
 
 ## 三、 配置与参数说明
 
-参数可通过命令行参数、环境变量或 JSON 配置文件传入。优先级由低到高为：**默认值 < 命令行参数 < 环境变量 < JSON 配置文件**。
+本机连接和服务定位参数可通过命令行、环境变量或 JSON 配置文件传入，优先级为：**默认值 < 命令行参数 < 环境变量 < JSON 配置文件**。`disable-remote-control` 是本机否决：任一本机来源为 true 即禁用，在线批准不能解除。可在线下发的监控与特权字段已从公开 CLI、环境变量和普通 JSON 输入删除。历史字段只由管理员的受保护迁移配置读取。
 
 ### 常用核心参数一览表
 
@@ -102,17 +102,9 @@ Linux/macOS 使用安装器创建的服务账号写入凭据，避免 root 登�
 | :--- | :--- | :--- | :--- |
 | `--endpoint`, `-e` | `AGENT_ENDPOINT` | `endpoint` | 面板地址 |
 | `--token`, `-t` | `AGENT_TOKEN` | `token` | 探针接入 Token（零信任模式下由 login 命令管理） |
-| `--interval`, `-i` | `AGENT_INTERVAL` | `interval` | 指标采集间隔（秒），支持在线动态下发（1~3600） |
 | `--disable-remote-control` | `AGENT_DISABLE_REMOTE_CONTROL` | `disable_remote_control` | 禁用远程终端（WebSSH）与远程命令执行 |
 | `--disable-auto-update` | `AGENT_DISABLE_AUTO_UPDATE` | `disable_auto_update` | 禁用自动更新 |
 | `--ignore-unsafe-cert`, `-u` | `AGENT_IGNORE_UNSAFE_CERT` | `ignore_unsafe_cert` | 忽略 TLS 证书校验错误（测试/自签名环境） |
-| `--memory-include-cache` | `AGENT_MEMORY_INCLUDE_CACHE` | `memory_include_cache` | 内存占用计算口径包含系统 Cache/Buffer，支持在线下发 |
-| `--enable-gpu` | `AGENT_ENABLE_GPU` | `enable_gpu` | 启用基础 GPU 监控 |
-| `--detailed-gpu` | `AGENT_DETAILED_GPU` | `detailed_gpu` | 启用详细 GPU 指标监控（功耗、温度、风扇），支持在线下发 |
-| `--include-nics` | `AGENT_INCLUDE_NICS` | `include_nics` | 仅监控指定网卡（逗号分隔），支持在线下发 |
-| `--exclude-nics` | `AGENT_EXCLUDE_NICS` | `exclude_nics` | 监控排除网卡（逗号分隔），支持在线下发 |
-| `--include-mountpoint` | `AGENT_INCLUDE_MOUNTPOINTS` | `include_mountpoints` | 磁盘监控挂载点过滤（分号分隔），支持在线下发 |
-| `--month-rotate` | `AGENT_MONTH_ROTATE` | `month_rotate` | 流量统计每月重置日（0 为禁用，1~31），支持在线下发 |
 | `--custom-dns` | `AGENT_CUSTOM_DNS` | `custom_dns` | 自定义 DNS 服务器（如 `8.8.8.8`） |
 | `--prefer-ip-version` | `AGENT_PREFER_IP_VERSION` | `prefer_ip_version` | 面板连接优先使用的 IP 版本（`4` 或 `6`） |
 | `--cf-access-client-id` | `AGENT_CF_ACCESS_CLIENT_ID` | `cf_access_client_id` | Cloudflare Access 服务令牌 Client ID（须与 Secret 配对） |
@@ -120,7 +112,15 @@ Linux/macOS 使用安装器创建的服务账号写入凭据，避免 root 登�
 | `--reconnect-interval`, `-c` | `AGENT_RECONNECT_INTERVAL` | `reconnect_interval` | 断线重连基础间隔（秒），内部具备带抖动的指数退避 |
 | `--info-report-interval` | `AGENT_INFO_REPORT_INTERVAL` | `info_report_interval` | 静态硬件/系统信息全量上报周期（分钟） |
 
-> **提示**：旧版冗余及已弃用参数（如 `--disable-web-ssh`、`--gpu`、`--memory-exclude-bcf`、`-autoUpdate`）已全面清理剔除，请使用上述标准参数。
+查询本机保存的配置：
+
+```sh
+komari-agent config show --json
+# 多安装时明确选择服务
+komari-agent --service-manifest /etc/komari/services/SERVICE.json config show
+```
+
+查询输出标明磁盘来源和时间，不等同于实时 daemon 认证或服务端 desired。`upgrade`、`update-conf`、`rollback`、`status privileged`、`recover show-config` 和 `recover rollback-config` 已删除。旧 unit 的在线参数需先通过管理员迁移工具转换；新安装直接报错。完整清单见 [CLI 迁移说明](docs/privileged-cli-migration-inventory.md)。
 
 ---
 
@@ -145,60 +145,28 @@ flowchart TD
     subgraph L3["第三级：高危特权扩展配置 (Privileged Elevation)"]
         direction TB
         L3_items["• 远程终端与WebSSH (WebSSHEnabled)<br/>• 远程命令执行 (ExecutionEnabled)<br/>• 救援助手守护进程 (RescueHelperEnabled)"]
-        L3_flow["主控仅下发待审批配置与签名Nonce<br/>必须管理员在本地终端输入密码确认<br/>唤醒系统内核授权脚本完成提权"]
+        L3_flow["主控仅下发待审批配置与签名Nonce<br/>必须管理员在本地终端输入密码确认<br/>独立 host 工具验证签名、PAM 与租约后执行本机事务"]
     end
 ```
 
 ---
 
-## 五、 特权守护进程提权与降级机制（核心安全）
+## 五、 本机特权事务
 
-探针在普通用户（非 root）下运行时，**任何远程控制与终端执行均处于硬件/系统隔离的关闭状态**。当主控下发包含特权扩展（如开启 WebSSH）的任务时，探针必须经过物理机/SSH 终端的人机交互内核认证：
+Linux/systemd 使用独立 root-owned `komari-host` 工具。管理员先核实并固定面板与发布者公钥，安装固定 PAM profile；面板保存并完成新鲜 2FA 批准后，再在本机执行：
 
-### 1. 提权限制与防篡改条件
-唤醒预留的提权脚本 `komari-elevate`（或 `/opt/komari/elevate.sh`）必须同时满足以下刚性安全准则：
-1. **下发过合法配置**：主控已对特权 Revision 进行了 Ed25519 签名分发，本地 `privileged.json` 中存在对应的未过期 Pending 任务和随机 Nonce。
-2. **强制内核/系统级授权**：**密码绝不经过探针二进制程序内存**！通过操作系统 PAM / sudo / Windows UAC 强制弹出交互式密码输入框。
-3. **绕过 sudo 免密与内核留痕**：脚本在验证前强制执行 `sudo -k` 作废凭据缓存；若系统配置了 `NOPASSWD` 或当前已处于 root，脚本仍强制要求输入 root/管理员密码，并将授权事件直接写入 Linux 内核环形缓冲区 `/dev/kmsg` 及 `authpriv` 系统日志。
-4. **服务重写与提权生效**：将 systemd 守护进程单元重写为 `User=root`，重载系统服务，向主控兑现 Nonce 证明完成升级。
-
-### 2. 管理员执行提权操作
-
-在受管服务器终端运行提权命令：
-
-```bash
-# 方式 A：通过探针 CLI 唤醒提权
-komari-agent upgrade
-
-# 方式 B：直接调用系统保留提权脚本
-sudo komari-elevate promote --revision <REV> --nonce <NONCE>
+```sh
+sudo komari-host apply --manifest /etc/komari/services/SERVICE.json --revision N
+# 中断后的继续或本地恢复
+sudo komari-host resume --manifest /etc/komari/services/SERVICE.json
+sudo komari-host restore --manifest /etc/komari/services/SERVICE.json
 ```
 
-终端将弹出内核授权安全提示：
-```text
-=================================================================
-  [Komari Security Gateway] Kernel Privilege Elevation Request   
-=================================================================
-  Target Service:  komari-agent
-  Target Revision: 2
-  Target Nonce:    a1b2c3d4e5f6...
-  Operator:        admin
-=================================================================
-Enter [root] password to authorize kernel elevation: 
-[SECURITY AUDIT] Kernel authorization verified. Logged to /dev/kmsg and syslog.
-[INFO] Updating systemd service 'komari-agent' to root...
-[SUCCESS] Service komari-agent successfully elevated to root and running.
-```
+口令由终端直接交给 PAM，daemon、面板、RPC、argv、环境和日志均不携带口令。工具核验签名、agent/service、批准代次、hash、操作集和执行租约后，才修改本机服务。实际 PID/UID、capabilities、NoNewPrivileges 和 helper 观察通过后，还必须由 daemon 独立 ACK；root CLI 运行不等于 daemon 已提权，内核日志也不代替认证。
 
-### 3. 一键平滑降级（切回非 root）
+救援 helper 默认不安装，按需验证发布签名和固定版本 artifact，再执行批准后的独立安装事务。普通 daemon 可继续以普通账号运行。恢复日志保留原文件 UID/GID/mode，异常恢复可在断网时执行，回执恢复联网后重发。
 
-撤销特权配置是安全的防御性操作，无需重复输入密码：
-
-```bash
-# 通过脚本一键降级回 komari 非特权账号运行
-sudo komari-elevate demote
-```
-系统守护进程将立即恢复为 `User=komari`，强制禁用所有远程控制指令并重启服务。
+配置步骤、缓存/离线 artifact、支持边界和发布签名要求见 [阶段 6 本机事务说明](docs/privileged-host-stage6.md)。Windows、macOS、FreeBSD 的 host actions 当前明确不支持；不能使用旧 elevation 脚本。
 
 ---
 

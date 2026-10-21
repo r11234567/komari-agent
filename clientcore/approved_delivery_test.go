@@ -16,6 +16,7 @@ import (
 	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
 	"github.com/r11234567/komari-proto/gen/go/komari/config/v1/configv1connect"
 	hostv1 "github.com/r11234567/komari-proto/gen/go/komari/host/v1"
+	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
 	securityv1 "github.com/r11234567/komari-proto/gen/go/komari/security/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -203,5 +204,21 @@ func TestApprovedDeliveryUsesCurrentSignaturePolicyAndRetriesExactReceipt(t *tes
 	flags_pkg.GlobalConfig.ServiceManifestFile = filepath.Join(dir, "missing.json")
 	if ok, _ := capability.WebSSHAllowed(); ok || runtimeconfig.Current().EnableGPU {
 		t.Fatal("missing protected policy did not fail closed")
+	}
+}
+
+func TestLocalDenyInvalidatesQueuedSuccessObservation(t *testing.T) {
+	c := &Client{cfg: &flags_pkg.Config{DisableRemoteControl: true}}
+	r := &configv1.ReportPrivilegedDeliveryRequest{Observation: &hostv1.DaemonObservation{EffectiveCapabilities: &reportv1.AgentCapabilities{RemoteControl: &reportv1.CapabilityState{Available: true}}}}
+	if !errors.Is(c.validateSavedHostObservation(r), errSavedHostObservationInvalid) {
+		t.Fatal("queued success bypassed current local deny")
+	}
+}
+
+func TestLocalDenyConstrainsInitialBaseline(t *testing.T) {
+	c := &Client{cfg: &flags_pkg.Config{DisableRemoteControl: true}, hostPolicy: &hostops.Policy{BaselineRemoteControl: true, BaselineWebSSH: true, BaselineExecution: true, AllowRemoteControl: true, AllowWebSSH: true, AllowExecution: true}}
+	local := c.localBaseline()
+	if local.RemoteControlEnabled || local.WebSSHEnabled || local.ExecutionEnabled {
+		t.Fatal("initial baseline bypassed local deny")
 	}
 }

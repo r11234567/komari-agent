@@ -1,4 +1,4 @@
-# Linux host transactions (stage 6, pending acceptance)
+# Linux host transactions (stage 6)
 
 This development implementation supports Linux with systemd only. The host tool and daemon are separate processes; a root CLI never establishes that the daemon runs as root. Windows, macOS and FreeBSD do not advertise host actions. Cross compilation is not host-operation acceptance.
 
@@ -59,4 +59,4 @@ Actual signed helper release publishing requires repository secret `KOMARI_RELEA
 
 `scripts/ci/test-host-transactions.sh` runs only on disposable GitHub runners. It uses actual PAM, real daemon/host/helper binaries, actual systemd services, `/proc` observations and explicit network/process/startup faults. Only the panel is a fixture; its metrics and host-operation contracts must agree with the production API. Backend recovery and error-mapping tests separately exercise the real service/database implementation.
 
-Failure artifacts include build errors, test output, journald/kernel logs and sanitized journal metadata, retained for 30 days. Raw credentials, state backups, signed authorization bundles and passwords are not exported. See the backend's `docs/privileged-stage6-failure-review.md` for the failure analysis. Stage 6 remains pending until the complete current CI passes; CLI removal belongs to the following stage.
+Failure artifacts include build errors, test output, journald/kernel logs and sanitized journal metadata, retained for 30 days. Raw credentials, state backups, signed authorization bundles and passwords are not exported. See the backend's `docs/privileged-stage6-failure-review.md` for the failure analysis. Stage 6 at source `9fe5463` passed complete acceptance in [run 39625269490](https://github.com/r11234567/komari-agent/actions/runs/39625269490), including actual PAM/systemd, promotion/demotion, helper lifecycle, lost receipts, process kills and restoration after a lost final daemon ACK. Subsequent CLI changes have their own regression checks; see [CLI migration](privileged-cli-migration-inventory.md).

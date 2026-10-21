@@ -18,7 +18,9 @@ jobs:
       - name: Compile host and daemon contracts before executing tests
         run: bash scripts/ci/check-stage6-compile.sh
       - name: Existing behavior regression tests
-        run: scripts/ci/run-go-tests.sh ./cmd ./core/hostops ./core/statelock ./internal/hostcmd ./core/runtimeconfig ./core/privileged ./core/capability ./core/localauth ./clientcore ./server ./terminal ./rescue ./update ./monitoring/unit
+        run: scripts/ci/run-go-tests.sh ./cmd ./cmd/flags ./core/hostops ./core/statelock ./internal/hostcmd ./core/runtimeconfig ./core/privileged ./core/capability ./core/localauth ./clientcore ./server ./terminal ./rescue ./update ./monitoring/unit
+      - name: Public CLI surface, redaction and read-only inspection
+        run: bash scripts/ci/test-cli-surface.sh
       - name: Signed approval, protected policy, final gates and lost ACK recovery
         run: scripts/ci/test-approved-delivery.sh
       - name: Trusted installation and migration on disposable systemd runner

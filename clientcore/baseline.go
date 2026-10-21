@@ -27,7 +27,8 @@ import (
 
 func (c *Client) localBaseline() privileged.Settings {
 	p := c.hostPolicy
-	return privileged.Settings{RequiredPrivilegeMode: reportv1.PrivilegeMode(p.PrivilegeMode), RemoteControlEnabled: p.BaselineRemoteControl && !p.ForceDenyRemoteControl && p.AllowRemoteControl, WebSSHEnabled: p.BaselineWebSSH && p.AllowWebSSH, ExecutionEnabled: p.BaselineExecution && p.AllowExecution, EnableGPU: p.BaselineGPU && p.AllowGPU}
+	remote := p.BaselineRemoteControl && !p.ForceDenyRemoteControl && p.AllowRemoteControl && (c.cfg == nil || !c.cfg.DisableRemoteControl)
+	return privileged.Settings{RequiredPrivilegeMode: reportv1.PrivilegeMode(p.PrivilegeMode), RemoteControlEnabled: remote, WebSSHEnabled: remote && p.BaselineWebSSH && p.AllowWebSSH, ExecutionEnabled: remote && p.BaselineExecution && p.AllowExecution, EnableGPU: p.BaselineGPU && p.AllowGPU}
 }
 func (c *Client) initializeHost(parent context.Context) error {
 	if c.hostManifest == nil || c.hostPolicy == nil || c.privilegedStore == nil {

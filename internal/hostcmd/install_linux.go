@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	flags "github.com/komari-monitor/komari-agent/cmd/flags"
 	"github.com/komari-monitor/komari-agent/core/hostops"
 	"io"
 	"os"
@@ -23,6 +24,9 @@ func install(args []string, out io.Writer) error {
 	bindir := fs.String("binary-dir", "/usr/lib/komari/komari-agent", "root-owned binary directory")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if err := flags.ValidateInstallArgs(fs.Args()); err != nil {
+		return fmt.Errorf("invalid daemon options: %w", err)
 	}
 	if err := requireRoot(); err != nil {
 		return err
@@ -80,20 +84,6 @@ func install(args []string, out io.Writer) error {
 			p.ForceDenyRemoteControl = true
 			if has {
 				p.ForceDenyRemoteControl, err = strconv.ParseBool(val)
-				if err != nil {
-					return err
-				}
-			}
-		case "--enable-gpu", "--gpu":
-			if key == "--gpu" {
-				argv[i] = "--enable-gpu"
-				if has {
-					argv[i] += "=" + val
-				}
-			}
-			p.BaselineGPU = true
-			if has {
-				p.BaselineGPU, err = strconv.ParseBool(val)
 				if err != nil {
 					return err
 				}

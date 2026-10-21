@@ -5,12 +5,14 @@ package hostcmd
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"github.com/komari-monitor/komari-agent/core/hostops"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -27,7 +29,7 @@ func diagnose(m *hostops.Manifest, p *hostops.Policy, out io.Writer) error {
 	}
 	// ExecStart may contain legacy tokens. Never print it or copy it into a
 	// world-readable diagnostic document.
-	_, err = fmt.Fprintf(out, "service=%s\nservice_user=%s\nmain_pid=%s\npolicy_mode=%d\nhost_actions=unsupported\n", m.ServiceName, o.User, o.MainPID, p.PrivilegeMode)
+	_, err = fmt.Fprintf(out, "service=%s\nservice_user=%s\nmain_pid=%s\npolicy_mode=%d\nhost_actions_ready=%t\n", m.ServiceName, o.User, o.MainPID, p.PrivilegeMode, hostops.HostActionsReady(m))
 	return err
 }
 
@@ -225,6 +227,29 @@ func buildMigration(service string, o serviceObservation, deny string) (migratio
 			cleaned = append(cleaned, a)
 		}
 	}
+	// Resolve the effective legacy JSON/argv before deciding which existing
+	// state files to preserve. A JSON override may differ from the unit argv.
+	legacy, err := parseLegacyBootstrap(cleaned)
+	if err != nil {
+		return plan, nil, err
+	}
+	remoteDisabled = remoteDisabled || legacy.DisableRemoteControl
+	gpu = legacy.EnableGPU
+	for target, value := range map[*string]string{
+		&m.CredentialsFile: legacy.CredentialsFile, &m.RuntimeStateFile: legacy.RuntimeStateFile,
+		&m.PrivilegedStateFile: legacy.PrivilegedStateFile, &m.ReplayStateFile: legacy.ReplayStateFile,
+	} {
+		if value == "" {
+			continue
+		}
+		if !filepath.IsAbs(value) {
+			if !filepath.IsAbs(o.WorkingDirectory) {
+				return plan, nil, errors.New("relative legacy JSON state requires absolute WorkingDirectory")
+			}
+			value = filepath.Join(o.WorkingDirectory, value)
+		}
+		*target = value
+	}
 	// Legacy installers used these files; absence is not permission to invent
 	// HOME defaults or enroll again. Explicit paths always win.
 	for _, entry := range []struct {
@@ -242,6 +267,7 @@ func buildMigration(service string, o serviceObservation, deny string) (migratio
 	p := hostops.Policy{Version: 2, ServiceID: service, PrivilegeMode: mode, AllowRemoteControl: true, AllowWebSSH: true, AllowExecution: true, AllowGPU: true, ForceDenyRemoteControl: remoteDisabled && deny == "preserve", BaselineGPU: gpu, DisableSource: "legacy-unknown-" + deny}
 	// Migration never infers grants from old install flags or daemon euid. Existing
 	// revision files remain byte-for-byte intact; no new baseline is granted here.
+	m.ConfigFile = filepath.Join(hostops.Registry, service+".migration-bootstrap.json")
 	plan = migrationPlan{Manifest: m, Policy: p, RestartRequired: true}
 	return plan, cleaned, nil
 }
@@ -300,8 +326,36 @@ func migrate(args []string, out io.Writer) error {
 		return err
 	}
 	m := &plan.Manifest
+	// Capture retired argv as data before replacing the unit. No state snapshot,
+	// credential or receipt is rewritten, and the new daemon sees only local flags.
+	bootstrap, err := parseLegacyBootstrap(argv)
+	if err != nil {
+		return err
+	}
+	bootstrap.ConfigFile = ""
+	bootstrap.ServiceManifestFile = ""
+	bootstrap.CredentialsFile = m.CredentialsFile
+	bootstrap.RuntimeStateFile = m.RuntimeStateFile
+	bootstrap.PrivilegedStateFile = m.PrivilegedStateFile
+	bootstrap.ReplayStateFile = m.ReplayStateFile
+	if *deny == "release" {
+		bootstrap.DisableRemoteControl = false
+	}
+	serviceAccount, err := user.Lookup(m.ServiceUser)
+	if err != nil {
+		return err
+	}
+	bootstrapGID, err := strconv.Atoi(serviceAccount.Gid)
+	if err != nil {
+		return err
+	}
+	bootstrapData, err := json.MarshalIndent(bootstrap, "", "  ")
+	if err != nil {
+		return err
+	}
+	argv = []string{m.Executable, "--config", m.ConfigFile}
 	manifestPath := filepath.Join(hostops.Registry, m.ServiceName+".json")
-	for _, path := range []string{manifestPath, m.HostPolicyFile, filepath.Join(filepath.Dir(m.Executable), "service-config.json")} {
+	for _, path := range []string{manifestPath, m.HostPolicyFile, m.ConfigFile, filepath.Join(filepath.Dir(m.Executable), "service-config.json")} {
 		if _, err = os.Lstat(path); !os.IsNotExist(err) {
 			return fmt.Errorf("migration destination exists or is inaccessible; inspect journal before retry: %s", path)
 		}
@@ -338,6 +392,9 @@ func migrate(args []string, out io.Writer) error {
 		return err
 	}
 	if err = hostops.AtomicWrite(m.HostTool, hostBinary, 0o755); err != nil {
+		return err
+	}
+	if err = hostops.AtomicWriteOwned(m.ConfigFile, bootstrapData, 0o640, 0, bootstrapGID); err != nil {
 		return err
 	}
 	if err = hostops.WriteJSON(m.HostPolicyFile, plan.Policy, 0o644); err != nil {

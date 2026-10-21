@@ -95,6 +95,9 @@ func (c *Client) recordPrivilegedRevision(ctx context.Context, r *configv1.Privi
 	if err != nil {
 		return c.failPrivileged(ctx, r, err)
 	}
+	if c.cfg != nil && c.cfg.DisableRemoteControl && r.Privileged.GetRemoteControlEnabled() {
+		return c.failPrivileged(ctx, r, errors.New("approved settings blocked by explicit local remote-control deny"))
+	}
 	if !runtimeconfig.PolicyAllows(privileged.SettingsFromProto(r.Privileged), policy) {
 		return c.failPrivileged(ctx, r, errors.New("approved settings exceed protected local policy"))
 	}

@@ -91,10 +91,10 @@ func TestRemoteControlDefaultsToDeniedForZeroTrustAndRespectsPrivilegedStore(t *
 		t.Fatal("expected RemoteControlEnabled to be true after promoting privileged revision")
 	}
 
-	// Bootstrap flags cannot override an approved snapshot.
+	// An explicit local deny remains authoritative after online approval.
 	flags_pkg.GlobalConfig.DisableRemoteControl = true
 	defer func() { flags_pkg.GlobalConfig.DisableRemoteControl = false }()
-	if !RemoteControlEnabled() {
-		t.Fatal("bootstrap disable flag overrode the approved privileged snapshot")
+	if RemoteControlEnabled() {
+		t.Fatal("approved privileged snapshot bypassed local force-deny")
 	}
 }
