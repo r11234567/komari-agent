@@ -10,7 +10,7 @@ import (
 )
 
 func diagnoseMissingManifest(executable string) error {
-	if os.Getenv("INVOCATION_ID") != "" {
+	if os.Getppid() == 1 && os.Getenv("INVOCATION_ID") != "" {
 		return fmt.Errorf("installed systemd service has no manifest; run komari-host migrate --service <service> --legacy-disable preserve")
 	}
 	for _, dir := range []string{"/etc/systemd/system", "/usr/lib/systemd/system"} {
