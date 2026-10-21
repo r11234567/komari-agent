@@ -324,13 +324,7 @@ func (s *Store) commit(next State) error {
 	if err := os.Rename(name, s.path); err != nil {
 		return fmt.Errorf("replace privileged state: %w", err)
 	}
-	dir, err := os.Open(directory)
-	if err != nil {
-		return err
-	}
-	err = dir.Sync()
-	dir.Close()
-	if err != nil {
+	if err := statelock.SyncDirectory(directory); err != nil {
 		return err
 	}
 	s.state = next

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	flags_pkg "github.com/komari-monitor/komari-agent/cmd/flags"
+	"github.com/komari-monitor/komari-agent/core/statelock"
 	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
@@ -239,12 +240,7 @@ func (s *Store) persist(state persistedState) error {
 	if err := os.Rename(tmpName, s.path); err != nil {
 		return err
 	}
-	dir, err := os.Open(filepath.Dir(s.path))
-	if err != nil {
-		return err
-	}
-	defer dir.Close()
-	return dir.Sync()
+	return statelock.SyncDirectory(filepath.Dir(s.path))
 }
 
 func writeBackup(path string, data []byte) error {

@@ -36,3 +36,27 @@ jobs:
           name: privileged-agent-${{ github.run_id }}-${{ github.run_attempt }}
           path: ci-artifacts/
           retention-days: 30
+
+  windows-state-regressions:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Windows state persistence and process locks
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force ci-artifacts | Out-Null
+          $env:GOMAXPROCS = '2'
+          go test -p=2 -json -count=1 -timeout=5m ./core/statelock ./core/privileged ./core/runtimeconfig 2> ci-artifacts/windows-build.log | Tee-Object -FilePath ci-artifacts/windows-tests.jsonl
+          $testExit = $LASTEXITCODE
+          $testExit | Out-File ci-artifacts/windows-exit.txt
+          exit $testExit
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: privileged-windows-state-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
