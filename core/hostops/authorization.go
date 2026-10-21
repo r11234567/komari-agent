@@ -21,13 +21,38 @@ import (
 // Trust is pinned explicitly by a local administrator. Daemon enrollment TOFU
 // keys must never silently become keys allowed to authorize root operations.
 type Trust struct {
-	Version     int                     `json:"version"`
-	AgentID     string                  `json:"agent_id"`
-	Endpoint    string                  `json:"endpoint"`
-	ServiceID   string                  `json:"service_id"`
-	ServiceUser string                  `json:"service_user"`
-	PanelKeys   []credentials.PinnedKey `json:"panel_keys"`
-	ReleaseKeys []credentials.PinnedKey `json:"release_keys"`
+	Version          int                     `json:"version"`
+	AgentID          string                  `json:"agent_id"`
+	Endpoint         string                  `json:"endpoint"`
+	ServiceID        string                  `json:"service_id"`
+	ServiceUser      string                  `json:"service_user"`
+	PanelKeys        []credentials.PinnedKey `json:"panel_keys"`
+	ReleaseKeys      []credentials.PinnedKey `json:"release_keys"`
+	AccessConfigFile string                  `json:"access_config_file,omitempty"`
+}
+
+// Access credentials are local transport settings, never signing authority.
+// Keep secrets in a separate root-owned file rather than the readable trust pin.
+type AccessConfig struct {
+	ClientID     string `json:"cf_access_client_id"`
+	ClientSecret string `json:"cf_access_client_secret"`
+}
+
+func ReadAccess(t *Trust) (AccessConfig, error) {
+	var a AccessConfig
+	if t.AccessConfigFile == "" {
+		return a, nil
+	}
+	if !filepath.IsAbs(t.AccessConfigFile) {
+		return a, errors.New("host access config must use an absolute path")
+	}
+	if err := ReadJSON(t.AccessConfigFile, &a, true); err != nil {
+		return a, err
+	}
+	if a.ClientID == "" || a.ClientSecret == "" {
+		return a, errors.New("host access config requires both Cloudflare Access credentials")
+	}
+	return a, nil
 }
 
 func TrustPath(m *Manifest) string {

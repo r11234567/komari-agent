@@ -131,6 +131,16 @@ func ValidService(name string) bool {
 }
 
 func AtomicWrite(path string, data []byte, mode os.FileMode) error {
+	return atomicWrite(path, data, mode, -1, -1)
+}
+
+// AtomicWriteOwned publishes contents, mode and ownership together. Restoring a
+// readable service bootstrap must not briefly publish it with the wrong group.
+func AtomicWriteOwned(path string, data []byte, mode os.FileMode, uid, gid int) error {
+	return atomicWrite(path, data, mode, uid, gid)
+}
+
+func atomicWrite(path string, data []byte, mode os.FileMode, uid, gid int) error {
 	if fi, err := os.Lstat(path); err == nil && !fi.Mode().IsRegular() {
 		return fmt.Errorf("refusing non-regular destination %s", path)
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -141,7 +151,13 @@ func AtomicWrite(path string, data []byte, mode os.FileMode) error {
 		return err
 	}
 	defer os.Remove(f.Name())
-	if err = f.Chmod(mode); err == nil {
+	if uid >= 0 || gid >= 0 {
+		err = f.Chown(uid, gid)
+	}
+	if err == nil {
+		err = f.Chmod(mode)
+	}
+	if err == nil {
 		_, err = f.Write(data)
 	}
 	if err == nil {

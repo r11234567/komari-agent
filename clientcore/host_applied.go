@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"connectrpc.com/connect"
+	"github.com/komari-monitor/komari-agent/core/capability"
 	"github.com/komari-monitor/komari-agent/core/hostops"
 	"github.com/komari-monitor/komari-agent/core/privileged"
 	"github.com/komari-monitor/komari-agent/core/signing"
@@ -14,6 +15,48 @@ import (
 	hostv1 "github.com/r11234567/komari-proto/gen/go/komari/host/v1"
 	"google.golang.org/protobuf/proto"
 )
+
+// A durable observation describes a particular local host result. An explicit
+// OS restoration invalidates it, even if its original network ACK was lost.
+// Keep the payload for diagnosis rather than reporting an identity we no
+// longer run under. Ordinary same-identity receipts retain their old behavior.
+var errSavedHostObservationInvalid = errors.New("saved host observation no longer describes the local host")
+
+func (c *Client) validateSavedHostObservation(r *configv1.ReportPrivilegedDeliveryRequest) error {
+	o := r.GetObservation()
+	if o.GetOperationId() == "" {
+		return nil
+	}
+	if c.hostManifest == nil || c.hostTrust == nil {
+		return errSavedHostObservationInvalid
+	}
+	p, err := hostops.ReadPolicy(c.hostManifest)
+	if err != nil {
+		return err
+	}
+	if capability.Detect(false).PrivilegeMode != o.PrivilegeMode || p.PrivilegeMode != int32(o.PrivilegeMode) || p.HelperInstalled != o.HelperInstalled || p.HelperAuthorized != o.HelperAuthorized {
+		return errSavedHostObservationInvalid
+	}
+	var record hostops.AppliedRecord
+	if err = hostops.ReadJSON(hostops.AppliedPath(c.hostManifest), &record, true); err != nil {
+		if os.IsNotExist(err) {
+			return errSavedHostObservationInvalid
+		}
+		return err
+	}
+	var revision configv1.PrivilegedRevision
+	var operation hostv1.HostOperation
+	if err = proto.Unmarshal(record.Revision, &revision); err != nil {
+		return err
+	}
+	if err = proto.Unmarshal(record.Operation, &operation); err != nil {
+		return err
+	}
+	if record.Version != 2 || revision.Revision != o.Revision || revision.ConfigHash != o.ConfigHash || revision.ApprovalGeneration != o.ApprovalGeneration || operation.OperationId != o.OperationId {
+		return errSavedHostObservationInvalid
+	}
+	return nil
+}
 
 func (c *Client) validatePersistedPrivileged() error {
 	if c.privilegedStore == nil {

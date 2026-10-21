@@ -19,7 +19,7 @@ import glob,json,sys
 rows=[]
 for path in glob.glob('/var/lib/komari-host/'+sys.argv[1]+'*/transaction.json'):
  try:
-  j=json.load(open(path)); rows.append({k:j.get(k) for k in ['version','operation_id','phase','operator','error','previous_mode','previous_helper','ownership']})
+  j=json.load(open(path)); row={k:j.get(k) for k in ['version','operation_id','phase','operator','error','previous_mode','previous_uid','previous_helper','ownership','recovery_ownership']}; row['pending_receipt']=bool(j.get('receipt')); row['superseded_receipt_count']=len(j.get('superseded_receipts',[])); rows.append(row)
  except Exception as e: rows.append({'path':path,'error':str(e)})
 print(json.dumps(rows,indent=2))
 PY

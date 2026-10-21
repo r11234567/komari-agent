@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/google/uuid"
 	flags "github.com/komari-monitor/komari-agent/cmd/flags"
 	"github.com/komari-monitor/komari-agent/core/hostops"
@@ -42,20 +43,41 @@ type ownership struct {
 	Mode uint32 `json:"mode"`
 }
 type hostJournal struct {
-	Version        int          `json:"version"`
-	Manifest       string       `json:"manifest"`
-	ID             string       `json:"operation_id"`
-	Phase          string       `json:"phase"`
-	Operator       string       `json:"operator"`
-	Revision       []byte       `json:"revision"`
-	Operation      []byte       `json:"operation"`
-	Receipt        []byte       `json:"receipt,omitempty"`
-	Backups        []fileBackup `json:"backups"`
-	Ownership      []ownership  `json:"ownership"`
-	Error          string       `json:"error,omitempty"`
-	PreviousMode   int32        `json:"previous_mode"`
-	PreviousHelper bool         `json:"previous_helper"`
-	dir            string
+	Version            int          `json:"version"`
+	Manifest           string       `json:"manifest"`
+	ID                 string       `json:"operation_id"`
+	Phase              string       `json:"phase"`
+	Operator           string       `json:"operator"`
+	Revision           []byte       `json:"revision"`
+	Operation          []byte       `json:"operation"`
+	Receipt            []byte       `json:"receipt,omitempty"`
+	SupersededReceipts [][]byte     `json:"superseded_receipts,omitempty"`
+	Backups            []fileBackup `json:"backups"`
+	Ownership          []ownership  `json:"ownership"`
+	RecoveryOwnership  []ownership  `json:"recovery_ownership,omitempty"`
+	Error              string       `json:"error,omitempty"`
+	PreviousMode       int32        `json:"previous_mode"`
+	PreviousUID        int          `json:"previous_uid"`
+	PreviousHelper     bool         `json:"previous_helper"`
+	dir                string
+}
+
+// This journal schema is independent from the wire/installation protocol. Older
+// development journals lack ownership metadata and must never be guessed at.
+const hostJournalVersion = 3
+
+func (j *hostJournal) prepareRestorationReceipt() error {
+	if len(j.Receipt) != 0 {
+		var r hostv1.ReportHostOperationRequest
+		if err := proto.Unmarshal(j.Receipt, &r); err != nil {
+			return err
+		}
+		if r.Phase != hostv1.HostOperationPhase_HOST_OPERATION_PHASE_RESTORED {
+			j.SupersededReceipts = append(j.SupersededReceipts, j.Receipt)
+			j.Receipt = nil
+		}
+	}
+	return j.save()
 }
 
 func (j *hostJournal) save() error {
@@ -136,8 +158,8 @@ func (j *hostJournal) backup(path string) error {
 // A stopped daemon's files are copied to fresh root inodes before a root
 // daemon uses them. Merely chowning leaves pre-existing writable FDs usable.
 // Directory traversal is bounded and never follows a link or crosses a mount.
-func (j *hostJournal) seal(path string, owner int, device uint64, depth int) error {
-	if len(j.Ownership) >= 512 || depth > 8 {
+func (j *hostJournal) seal(path string, owner int, device uint64, depth int, recovery bool) error {
+	if depth > 8 {
 		return errors.New("state tree exceeds reviewed migration limit")
 	}
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
@@ -154,7 +176,20 @@ func (j *hostJournal) seal(path string, owner int, device uint64, depth int) err
 	if uint64(sys.Dev) != device || (int(sys.Uid) != owner && sys.Uid != 0) || (!st.IsDir() && (!st.Mode().IsRegular() || sys.Nlink != 1)) {
 		return errors.New("state tree contains an unexpected owner, mount, link or special file")
 	}
-	j.Ownership = append(j.Ownership, ownership{Path: path, UID: int(sys.Uid), GID: int(sys.Gid), Mode: uint32(st.Mode().Perm())})
+	entries := &j.Ownership
+	if recovery {
+		entries = &j.RecoveryOwnership
+	}
+	known := false
+	for _, e := range *entries {
+		known = known || e.Path == path
+	}
+	if !known {
+		if len(*entries) >= 512 {
+			return errors.New("state tree exceeds reviewed migration limit")
+		}
+		*entries = append(*entries, ownership{Path: path, UID: int(sys.Uid), GID: int(sys.Gid), Mode: uint32(st.Mode().Perm())})
+	}
 	if err = j.save(); err != nil {
 		return err
 	}
@@ -177,7 +212,7 @@ func (j *hostJournal) seal(path string, owner int, device uint64, depth int) err
 			return errors.New("state directory has too many entries")
 		}
 		for _, entry := range entries {
-			if err = j.seal(filepath.Join(path, entry.Name()), owner, device, depth+1); err != nil {
+			if err = j.seal(filepath.Join(path, entry.Name()), owner, device, depth+1, recovery); err != nil {
 				return err
 			}
 		}
@@ -326,9 +361,36 @@ func apply(args []string, out io.Writer) error {
 	if err = validateActions(m, p, t, r, o); err != nil {
 		return err
 	}
+	previousUID := 0
+	if p.PrivilegeMode == 2 {
+		account, e := user.Lookup(o.User)
+		if e != nil {
+			return fmt.Errorf("resolve original systemd identity: %w", e)
+		}
+		previousUID, err = strconv.Atoi(account.Uid)
+		if err != nil {
+			return err
+		}
+	}
 	dirs, err := stateDirectories(m)
 	if err != nil {
 		return err
+	}
+	workingDir := o.WorkingDirectory
+	if workingDir == "" {
+		workingDir = "/"
+	}
+	if !filepath.IsAbs(workingDir) || filepath.Clean(workingDir) != workingDir || strings.ContainsAny(workingDir, "\n\r%") {
+		return errors.New("service WorkingDirectory must be a literal absolute path")
+	}
+	sealedWorkingDir := false
+	for _, stateDir := range dirs {
+		sealedWorkingDir = sealedWorkingDir || stateDir == workingDir
+	}
+	if !sealedWorkingDir {
+		if err = hostops.TrustedPath(workingDir); err != nil {
+			return fmt.Errorf("WorkingDirectory must be a sealed state root or administrator-owned directory: %w", err)
+		}
 	}
 	bootstrap, err := captureBootstrap(m, o, t)
 	if err != nil {
@@ -391,7 +453,7 @@ func apply(args []string, out io.Writer) error {
 		return errors.New("approval changed during local authentication")
 	}
 	r = current
-	j := &hostJournal{Version: 2, Manifest: m.ManifestPath, ID: uuid.NewString(), Phase: "claiming", Operator: operator, PreviousMode: p.PrivilegeMode, PreviousHelper: p.HelperInstalled, dir: dir}
+	j := &hostJournal{Version: hostJournalVersion, Manifest: m.ManifestPath, ID: uuid.NewString(), Phase: "claiming", Operator: operator, PreviousMode: p.PrivilegeMode, PreviousUID: previousUID, PreviousHelper: p.HelperInstalled, dir: dir}
 	j.Revision, err = proto.Marshal(r)
 	if err != nil {
 		return err
@@ -430,7 +492,7 @@ func apply(args []string, out io.Writer) error {
 	if err = j.save(); err != nil {
 		return err
 	}
-	if err = executeTransaction(ctx, m, p, t, r, j, dirs, bootstrap, helper, helperVersion); err != nil {
+	if err = executeTransaction(ctx, m, p, t, r, j, dirs, bootstrap, helper, helperVersion, workingDir); err != nil {
 		j.Error = err.Error()
 		_ = j.save()
 		if restoreErr := restoreTransaction(m, j); restoreErr != nil {
@@ -450,7 +512,7 @@ func apply(args []string, out io.Writer) error {
 	return finishHost(ctx, m, panel, j, out)
 }
 
-func executeTransaction(ctx context.Context, m *hostops.Manifest, p *hostops.Policy, t *hostops.Trust, r *configv1.PrivilegedRevision, j *hostJournal, dirs []string, bootstrap *flags.Config, helper []byte, helperVersion string) error {
+func executeTransaction(ctx context.Context, m *hostops.Manifest, p *hostops.Policy, t *hostops.Trust, r *configv1.PrivilegedRevision, j *hostJournal, dirs []string, bootstrap *flags.Config, helper []byte, helperVersion, workingDir string) error {
 	if _, err := systemctl("stop", m.ServiceName); err != nil {
 		return err
 	}
@@ -474,7 +536,7 @@ func executeTransaction(ctx context.Context, m *hostops.Manifest, p *hostops.Pol
 		if !st.IsDir() {
 			return errors.New("state root is not a directory")
 		}
-		if err = j.seal(dir, uid, uint64(st.Sys().(*syscall.Stat_t).Dev), 0); err != nil {
+		if err = j.seal(dir, uid, uint64(st.Sys().(*syscall.Stat_t).Dev), 0, false); err != nil {
 			return err
 		}
 	}
@@ -521,6 +583,7 @@ func executeTransaction(ctx context.Context, m *hostops.Manifest, p *hostops.Pol
 	bootstrap.ReplayStateFile = m.ReplayStateFile
 	bootstrap.ConfigFile = ""
 	bootstrap.HostProc = ""
+	bootstrap.IgnoreUnsafeCert = false
 	bootstrap.DisableAutoUpdate = true
 	bootstrap.Token = ""
 	bootstrap.AutoDiscoveryKey = ""
@@ -530,9 +593,9 @@ func executeTransaction(ctx context.Context, m *hostops.Manifest, p *hostops.Pol
 	if err = ensureTrustedDir(filepath.Dir(profilePath(m))); err != nil {
 		return err
 	}
-	unit := "[Service]\nUser=" + t.ServiceUser + "\nGroup=" + u.Gid + "\nSupplementaryGroups=\nExecStart=\nExecStart=" + unitQuote(m.Executable) + " --service-manifest " + unitQuote(m.ManifestPath) + " --config " + unitQuote(bootstrapPath(m)) + "\nEnvironment=\nEnvironmentFile=\nPassEnvironment=\nWorkingDirectory=/\nNoNewPrivileges=true\nCapabilityBoundingSet=\nCapabilityBoundingSet=CAP_NET_RAW\nAmbientCapabilities=\nAmbientCapabilities=CAP_NET_RAW\n"
+	unit := "[Service]\nUser=" + t.ServiceUser + "\nGroup=" + u.Gid + "\nSupplementaryGroups=\nExecStart=\nExecStart=" + unitQuote(m.Executable) + " --service-manifest " + unitQuote(m.ManifestPath) + " --config " + unitQuote(bootstrapPath(m)) + "\nEnvironment=\nEnvironmentFile=\nPassEnvironment=\nWorkingDirectory=" + workingDir + "\nNoNewPrivileges=true\nCapabilityBoundingSet=\nCapabilityBoundingSet=CAP_NET_RAW\nAmbientCapabilities=\nAmbientCapabilities=CAP_NET_RAW\n"
 	if p.PrivilegeMode == 1 {
-		unit = "[Service]\nUser=root\nGroup=root\nSupplementaryGroups=\nExecStart=\nExecStart=" + unitQuote(m.Executable) + " --service-manifest " + unitQuote(m.ManifestPath) + " --config " + unitQuote(bootstrapPath(m)) + "\nEnvironment=\nEnvironmentFile=\nPassEnvironment=\nWorkingDirectory=/\nNoNewPrivileges=false\nCapabilityBoundingSet=~\nAmbientCapabilities=\n"
+		unit = "[Service]\nUser=root\nGroup=root\nSupplementaryGroups=\nExecStart=\nExecStart=" + unitQuote(m.Executable) + " --service-manifest " + unitQuote(m.ManifestPath) + " --config " + unitQuote(bootstrapPath(m)) + "\nEnvironment=\nEnvironmentFile=\nPassEnvironment=\nWorkingDirectory=" + workingDir + "\nNoNewPrivileges=false\nCapabilityBoundingSet=~\nAmbientCapabilities=\n"
 	}
 	if err = hostops.AtomicWrite(profilePath(m), []byte(unit), 0o644); err != nil {
 		return err
@@ -634,6 +697,12 @@ func changeOwnership(entries []ownership, uid, gid int, original bool) error {
 	return nil
 }
 func restoreTransaction(m *hostops.Manifest, j *hostJournal) error {
+	// Persist intent before the first OS mutation. A crash during restoration
+	// must never be resumed as if the target profile were still locally applied.
+	j.Phase = "restoring"
+	if err := j.save(); err != nil {
+		return err
+	}
 	if _, err := systemctl("stop", m.ServiceName); err != nil {
 		return err
 	}
@@ -642,6 +711,37 @@ func restoreTransaction(m *hostops.Manifest, j *hostJournal) error {
 			return err
 		}
 		_, _ = systemctl("disable", helperUnit(m))
+	}
+	// The target daemon may have created/replaced files after the first fence.
+	// Fence again before restoring access; original metadata stays immutable in
+	// Ownership, while recovery captures are kept separately across interruptions.
+	dirs, err := stateDirectories(m)
+	if err != nil {
+		return err
+	}
+	t, err := hostops.ReadTrust(m)
+	if err != nil {
+		return err
+	}
+	u, err := user.Lookup(t.ServiceUser)
+	if err != nil {
+		return err
+	}
+	owner, err := strconv.Atoi(u.Uid)
+	if err != nil {
+		return err
+	}
+	for _, dir := range dirs {
+		st, e := os.Lstat(dir)
+		if e != nil {
+			return e
+		}
+		if !st.IsDir() {
+			return errors.New("state root is not a directory during recovery")
+		}
+		if err = j.seal(dir, owner, uint64(st.Sys().(*syscall.Stat_t).Dev), 0, true); err != nil {
+			return err
+		}
 	}
 	for i := len(j.Backups) - 1; i >= 0; i-- {
 		b := j.Backups[i]
@@ -655,14 +755,11 @@ func restoreTransaction(m *hostops.Manifest, j *hostJournal) error {
 		if err != nil {
 			return err
 		}
-		if err = hostops.AtomicWrite(b.Path, data, os.FileMode(b.Mode)); err != nil {
-			return err
-		}
-		if err = os.Chown(b.Path, b.UID, b.GID); err != nil {
+		if err = hostops.AtomicWriteOwned(b.Path, data, os.FileMode(b.Mode), b.UID, b.GID); err != nil {
 			return err
 		}
 	}
-	if err := changeOwnership(j.Ownership, 0, 0, true); err != nil {
+	if err := restoreStateOwnership(j, dirs); err != nil {
 		return err
 	}
 	if _, err := systemctl("daemon-reload"); err != nil {
@@ -683,22 +780,50 @@ func restoreTransaction(m *hostops.Manifest, j *hostJournal) error {
 	if err != nil {
 		return err
 	}
-	uid := 0
-	if j.PreviousMode == 2 {
-		u, e := user.Lookup(m.ServiceUser)
-		if e != nil {
-			return e
-		}
-		uid, e = strconv.Atoi(u.Uid)
-		if e != nil {
-			return e
-		}
+	if policy.PrivilegeMode != j.PreviousMode {
+		return errors.New("restored policy differs from recorded original identity")
 	}
-	if err = verifyService(m.ServiceName, uid, policy.PrivilegeMode); err != nil {
+	if err = verifyService(m.ServiceName, j.PreviousUID, j.PreviousMode); err != nil {
 		return err
 	}
 	j.Phase = "restored"
 	return j.save()
+}
+
+func restoreStateOwnership(j *hostJournal, dirs []string) error {
+	original := map[string]ownership{}
+	for _, e := range j.Ownership {
+		original[e.Path] = e
+	}
+	entries := append([]ownership(nil), j.Ownership...)
+	for _, e := range j.RecoveryOwnership {
+		if _, exists := original[e.Path]; exists {
+			continue
+		}
+		for _, dir := range dirs {
+			if e.Path != dir && !strings.HasPrefix(e.Path, dir+"/") {
+				continue
+			}
+			if root, sealedOriginally := original[dir]; sealedOriginally {
+				// A file created by the target daemon has no earlier metadata.
+				// Give it the original state root's account and restrictive modes.
+				e.UID, e.GID, e.Mode = root.UID, root.GID, 0o600
+				st, err := os.Lstat(e.Path)
+				if os.IsNotExist(err) {
+					break
+				}
+				if err != nil {
+					return err
+				}
+				if st.IsDir() {
+					e.Mode = 0o700
+				}
+			}
+			break
+		}
+		entries = append(entries, e)
+	}
+	return changeOwnership(entries, 0, 0, true)
 }
 func (j *hostJournal) report(ctx context.Context, p *panel, phase hostv1.HostOperationPhase, detail string) error {
 	if len(j.Receipt) == 0 {
@@ -774,7 +899,15 @@ func finishHost(ctx context.Context, m *hostops.Manifest, p *panel, j *hostJourn
 func archiveJournal(j *hostJournal) error {
 	// Archive the whole transaction directory, including backups, then leave a
 	// fresh per-service directory for the next operation. Never discard history.
-	return os.Rename(j.dir, j.dir+"-"+j.ID)
+	if err := os.Rename(j.dir, j.dir+"-"+j.ID); err != nil {
+		return err
+	}
+	d, err := os.Open(filepath.Dir(j.dir))
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 func resume(args []string, out io.Writer, restore bool) error {
@@ -804,11 +937,16 @@ func resume(args []string, out io.Writer, restore bool) error {
 	if err = hostops.ReadJSON(filepath.Join(j.dir, "transaction.json"), &j, true); err != nil {
 		return err
 	}
-	if j.Version != 2 || j.Manifest != m.ManifestPath || j.ID == "" {
+	if j.Version != hostJournalVersion || j.Manifest != m.ManifestPath || j.ID == "" {
 		return errors.New("journal identity mismatch")
 	}
-	if j.Phase == "completed" {
+	if j.Phase == "completed" || j.Phase == "unclaimed" {
 		return archiveJournal(&j)
+	}
+	switch j.Phase {
+	case "claiming", "prepared", "mutating", "local_applied", "restoring", "restored":
+	default:
+		return errors.New("unknown journal phase; no service changes made")
 	}
 	_, err = authenticate()
 	if err != nil {
@@ -816,16 +954,45 @@ func resume(args []string, out io.Writer, restore bool) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	if restore || (j.Phase != "local_applied" && j.Phase != "restored") {
-		if j.Phase != "restored" {
-			if err = restoreTransaction(m, &j); err != nil {
+	if j.Phase == "claiming" && len(j.Operation) == 0 && len(j.Backups) == 0 && len(j.Ownership) == 0 {
+		t, e := hostops.ReadTrust(m)
+		if e != nil {
+			return e
+		}
+		p, e := newPanel(m, t)
+		if e != nil {
+			return e
+		}
+		_, e = p.get(ctx, j.ID)
+		if connect.CodeOf(e) == connect.CodeNotFound {
+			j.Phase = "unclaimed"
+			if err = j.save(); err != nil {
 				return err
+			}
+			fmt.Fprintln(out, "No host operation was claimed and no local files changed; archived the unstarted transaction.")
+			return archiveJournal(&j)
+		}
+		if e != nil {
+			return fmt.Errorf("claim outcome unknown; no local changes made: %w", e)
+		}
+	}
+	if restore || j.Phase != "local_applied" {
+		if j.Phase != "restored" {
+			if j.Phase == "claiming" || j.Phase == "prepared" {
+				// Mutation begins only after the durable mutating marker.
+				j.Phase = "restored"
+				if err = j.save(); err != nil {
+					return err
+				}
+			} else {
+				if err = restoreTransaction(m, &j); err != nil {
+					return err
+				}
 			}
 		}
 		// A failed/superseded/expired grant is never resumed by increasing
 		// authority. Recovery restores locally even if the panel is unavailable.
-		j.Receipt = nil
-		if err = j.save(); err != nil {
+		if err = j.prepareRestorationReceipt(); err != nil {
 			return err
 		}
 		t, e := hostops.ReadTrust(m)
@@ -848,12 +1015,6 @@ func resume(args []string, out io.Writer, restore bool) error {
 	p, err := newPanel(m, t)
 	if err != nil {
 		return err
-	}
-	if j.Phase == "restored" {
-		if err = j.report(ctx, p, hostv1.HostOperationPhase_HOST_OPERATION_PHASE_RESTORED, j.Error); err != nil {
-			return err
-		}
-		return archiveJournal(&j)
 	}
 	var original configv1.PrivilegedRevision
 	if err = proto.Unmarshal(j.Revision, &original); err != nil {

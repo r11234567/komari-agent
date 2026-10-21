@@ -242,6 +242,20 @@ func (c *Client) flushReceipts(parent context.Context) error {
 			var message configv1.ReportPrivilegedDeliveryRequest
 			err = proto.Unmarshal(entry.Payload, &message)
 			if err == nil {
+				if localErr := c.validateSavedHostObservation(&message); localErr != nil {
+					if errors.Is(localErr, errSavedHostObservationInvalid) {
+						if e := c.privilegedStore.FinishReceipt(entry.ID, localErr.Error()); e != nil {
+							cancel()
+							return e
+						}
+						log.Printf("Saved host receipt %s retained as invalid after local restoration: %v", entry.ID, localErr)
+						cancel()
+						continue
+					}
+					err = localErr
+				}
+			}
+			if err == nil {
 				req := connect.NewRequest(&message)
 				c.authorize(req.Header())
 				var response *connect.Response[configv1.ReportPrivilegedDeliveryResponse]

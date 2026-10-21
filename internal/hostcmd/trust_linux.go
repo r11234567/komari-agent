@@ -50,6 +50,7 @@ func trust(args []string, out io.Writer) error {
 	rkid := fs.String("release-key-id", "", "verified release signing key ID")
 	account := fs.String("service-user", "", "original non-root service account for demotion")
 	helper := fs.Bool("allow-rescue-helper", false, "allow separately approved helper installation")
+	access := fs.String("access-config", "", "absolute root-owned JSON file with paired Cloudflare Access credentials")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -79,6 +80,10 @@ func trust(args []string, out io.Writer) error {
 		return errors.New("--service-user must name the original non-root account, including on a root installation")
 	}
 	t := hostops.Trust{Version: 2, AgentID: *agent, Endpoint: strings.TrimRight(*endpoint, "/"), ServiceID: m.ServiceName, ServiceUser: *account, PanelKeys: []credentials.PinnedKey{{Algorithm: 1, KeyID: *kid, Value: *key}}}
+	t.AccessConfigFile = *access
+	if _, err = hostops.ReadAccess(&t); err != nil {
+		return err
+	}
 	if *rkey != "" || *rkid != "" {
 		t.ReleaseKeys = []credentials.PinnedKey{{Algorithm: 1, KeyID: *rkid, Value: *rkey}}
 	}

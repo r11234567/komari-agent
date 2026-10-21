@@ -56,19 +56,20 @@ type hostTestPanel struct {
 	metricsconnect.UnimplementedMetricsServiceHandler
 	reportconnect.UnimplementedAgentReportServiceHandler
 	rescueconnect.UnimplementedRescueServiceHandler
-	mu               sync.Mutex
-	key              ed25519.PrivateKey
-	current          *configv1.PrivilegedRevision
-	op               *hostv1.HostOperation
-	startup          string
-	prior            string
-	mode             reportv1.PrivilegeMode
-	installed        bool
-	observations     []*hostv1.DaemonObservation
-	receipts         map[string][]byte
-	failLocalACK     bool
-	failApply        bool
-	interruptProfile chan struct{}
+	mu                sync.Mutex
+	key               ed25519.PrivateKey
+	current           *configv1.PrivilegedRevision
+	op                *hostv1.HostOperation
+	startup           string
+	prior             string
+	mode              reportv1.PrivilegeMode
+	installed         bool
+	observations      []*hostv1.DaemonObservation
+	receipts          map[string][]byte
+	failLocalACK      bool
+	loseDaemonACK     bool
+	hideCompletedRead bool
+	interruptProfile  chan struct{}
 }
 
 func (s *hostTestPanel) sign(kind, nonce string, message proto.Message) *securityv1.SignedEnvelope {
@@ -116,8 +117,8 @@ func (s *hostTestPanel) GetDesiredConfig(context.Context, *connect.Request[confi
 func (s *hostTestPanel) SubmitReport(context.Context, *connect.Request[reportv1.SubmitReportRequest]) (*connect.Response[reportv1.SubmitReportResponse], error) {
 	return connect.NewResponse(&reportv1.SubmitReportResponse{Accepted: true}), nil
 }
-func (s *hostTestPanel) SubmitMetrics(context.Context, *connect.Request[metricsv1.SubmitMetricsRequest]) (*connect.Response[metricsv1.SubmitMetricsResponse], error) {
-	return connect.NewResponse(&metricsv1.SubmitMetricsResponse{Accepted: true}), nil
+func (s *hostTestPanel) SubmitMetrics(_ context.Context, r *connect.Request[metricsv1.SubmitMetricsRequest]) (*connect.Response[metricsv1.SubmitMetricsResponse], error) {
+	return connect.NewResponse(&metricsv1.SubmitMetricsResponse{AcceptedSequence: r.Msg.Sequence, AcceptedPoints: uint32(len(r.Msg.Points))}), nil
 }
 func (s *hostTestPanel) NegotiateHostProtocol(_ context.Context, r *connect.Request[hostv1.NegotiateHostProtocolRequest]) (*connect.Response[hostv1.NegotiateHostProtocolResponse], error) {
 	s.mu.Lock()
@@ -128,6 +129,9 @@ func (s *hostTestPanel) NegotiateHostProtocol(_ context.Context, r *connect.Requ
 func (s *hostTestPanel) GetPrivilegedDelivery(context.Context, *connect.Request[configv1.GetPrivilegedDeliveryRequest]) (*connect.Response[configv1.GetPrivilegedDeliveryResponse], error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.hideCompletedRead && s.current.State == configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_DELIVERED {
+		return nil, connect.NewError(connect.CodeUnavailable, errors.New("fixture completed-read outage"))
+	}
 	return connect.NewResponse(&configv1.GetPrivilegedDeliveryResponse{Revision: s.revision()}), nil
 }
 func (s *hostTestPanel) WatchPrivilegedDelivery(ctx context.Context, r *connect.Request[configv1.WatchPrivilegedDeliveryRequest], stream *connect.ServerStream[configv1.WatchPrivilegedDeliveryResponse]) error {
@@ -152,6 +156,9 @@ func (s *hostTestPanel) WatchPrivilegedDelivery(ctx context.Context, r *connect.
 	}
 }
 func (s *hostTestPanel) PrepareHostOperation(_ context.Context, r *connect.Request[hostv1.PrepareHostOperationRequest]) (*connect.Response[hostv1.PrepareHostOperationResponse], error) {
+	if r.Header().Get("CF-Access-Client-Id") != "ci-access-id" || r.Header().Get("CF-Access-Client-Secret") != "ci-access-value" {
+		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("host transport lost Access configuration"))
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	a := s.current.Authorization
@@ -219,6 +226,19 @@ func (s *hostTestPanel) ReportPrivilegedDelivery(_ context.Context, r *connect.R
 	if r.Msg.Observation == nil {
 		return connect.NewResponse(&configv1.ReportPrivilegedDeliveryResponse{Accepted: true}), nil
 	}
+	encoded, err := proto.Marshal(r.Msg)
+	if err != nil {
+		return nil, err
+	}
+	if previous, exists := s.receipts[r.Msg.ReceiptId]; exists {
+		if string(previous) != string(encoded) {
+			return nil, errors.New("daemon receipt changed")
+		}
+		if s.loseDaemonACK {
+			return nil, connect.NewError(connect.CodeUnavailable, errors.New("fixture lost daemon ACK response"))
+		}
+		return connect.NewResponse(&configv1.ReportPrivilegedDeliveryResponse{Accepted: true}), nil
+	}
 	o := r.Msg.Observation
 	if s.op == nil || s.op.Phase != 3 || o.OperationId != s.op.OperationId || o.ConfigHash != s.current.ConfigHash || o.PrivilegeMode != s.current.Privileged.RequiredPrivilegeMode || o.StartupId == s.prior {
 		return nil, errors.New("daemon did not independently confirm restarted operation")
@@ -228,6 +248,10 @@ func (s *hostTestPanel) ReportPrivilegedDelivery(_ context.Context, r *connect.R
 	s.installed = o.HelperInstalled
 	s.current.State = configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_DELIVERED
 	s.current.UpdateSequence++
+	s.receipts[r.Msg.ReceiptId] = encoded
+	if s.loseDaemonACK {
+		return nil, connect.NewError(connect.CodeUnavailable, errors.New("fixture lost daemon ACK response"))
+	}
 	return connect.NewResponse(&configv1.ReportPrivilegedDeliveryResponse{Accepted: true}), nil
 }
 func (s *hostTestPanel) ReportRescueStatus(context.Context, *connect.Request[rescuev1.ReportRescueStatusRequest]) (*connect.Response[rescuev1.ReportRescueStatusResponse], error) {
@@ -273,7 +297,7 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	mux.Handle(p, h)
 	server := httptest.NewServer(h2c.NewHandler(mux, &http2.Server{}))
 	t.Cleanup(server.Close)
-	if err = Run([]string{"install", "--service", service, "--user", "komari-stage6-agent", "--binary-dir", dir, "--", "--disable-auto-update"}, io.Discard); err != nil {
+	if err = Run([]string{"install", "--service", service, "--user", "komari-stage6-agent", "--binary-dir", dir, "--", "--disable-auto-update", "--cf-access-client-id", "ci-access-id", "--cf-access-client-secret", "ci-access-value"}, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	m, err := resolveManifest(filepath.Join(hostops.Registry, service+".json"))
@@ -281,7 +305,11 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _, _ = systemctl("stop", service); _, _ = systemctl("stop", helperUnit(m)) })
-	if err = Run([]string{"trust", "--manifest", m.ManifestPath, "--endpoint", server.URL, "--agent-id", "stage6-node", "--panel-key-id", "stage6", "--panel-public-key", base64.StdEncoding.EncodeToString(pub), "--release-key-id", "stage6", "--release-public-key", base64.StdEncoding.EncodeToString(pub), "--allow-rescue-helper"}, io.Discard); err != nil {
+	accessPath := filepath.Join(dir, "host-access.json")
+	if err = hostops.WriteJSON(accessPath, hostops.AccessConfig{ClientID: "ci-access-id", ClientSecret: "ci-access-value"}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err = Run([]string{"trust", "--manifest", m.ManifestPath, "--endpoint", server.URL, "--agent-id", "stage6-node", "--panel-key-id", "stage6", "--panel-public-key", base64.StdEncoding.EncodeToString(pub), "--release-key-id", "stage6", "--release-public-key", base64.StdEncoding.EncodeToString(pub), "--allow-rescue-helper", "--access-config", accessPath}, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	creds, err := credentials.Open(m.CredentialsFile)
@@ -380,15 +408,20 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 		t.Fatal("root/sudo identity bypassed fresh PAM password")
 	}
 	panel.mu.Lock()
-	if panel.op != nil {
+	claimed := panel.op != nil
+	panel.mu.Unlock()
+	if claimed {
 		t.Fatal("failed local authentication claimed operation")
 	}
-	panel.mu.Unlock()
 	if err = run(password, "apply", "--manifest", m.ManifestPath, "--revision", "2"); err != nil {
 		t.Fatal(err)
 	}
 	if err = verifyService(service, 0, 1); err != nil {
 		t.Fatal(err)
+	}
+	observed, err := observe(service)
+	if err != nil || observed.WorkingDirectory != filepath.Dir(m.CredentialsFile) {
+		t.Fatalf("host conversion lost the service working directory: %v %s", err, observed.WorkingDirectory)
 	}
 	store, err := privileged.Open(m.PrivilegedStateFile)
 	if err != nil || store.State().AppliedRevision != 2 {
@@ -478,6 +511,12 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	if err = run(password, "apply", "--manifest", m.ManifestPath, "--revision", "6"); err == nil {
 		t.Fatal("failing restart claimed success")
 	}
+	// A partially started root daemon can leave new state files that were not
+	// present in the original ownership log. Recovery must return access too.
+	createdState := filepath.Join(filepath.Dir(m.CredentialsFile), "created-after-transition.json")
+	if err = hostops.AtomicWrite(createdState, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err = os.Remove(failing); err != nil {
 		t.Fatal(err)
 	}
@@ -494,6 +533,14 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	before, after := bootstrapBefore.Sys().(*syscall.Stat_t), bootstrapAfter.Sys().(*syscall.Stat_t)
 	if before.Uid != after.Uid || before.Gid != after.Gid || bootstrapBefore.Mode() != bootstrapAfter.Mode() {
 		t.Fatal("restoration changed bootstrap ownership or permissions")
+	}
+	createdInfo, err := os.Stat(createdState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createdOwner := createdInfo.Sys().(*syscall.Stat_t)
+	if int(createdOwner.Uid) != uid || int(createdOwner.Gid) != gid || createdInfo.Mode().Perm() != 0o600 {
+		t.Fatal("new files created during transition were left inaccessible after recovery")
 	}
 	if err = verifyService(service, uid, 2); err != nil {
 		t.Fatal(err)
@@ -562,5 +609,59 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	if err = verifyService(service, 0, 1); err != nil {
 		t.Fatal("interrupted demotion did not restore original root profile:", err)
 	}
-	t.Log("Verified real PAM, identity promotion/demotion, daemon ACK, UUID/r4 preservation, replay/expiry rejection, helper lifecycle/revocation, startup failure, lost host receipt, and process-kill recovery")
+	// The panel accepts a daemon ACK but both that response and the host's final
+	// read are lost. Explicit local restoration must invalidate the old ACK.
+	panel.set(service, 2, false)
+	panel.mu.Lock()
+	panel.loseDaemonACK, panel.hideCompletedRead = true, true
+	panel.mu.Unlock()
+	if err = run(password, "apply", "--manifest", m.ManifestPath, "--revision", "10"); err != nil {
+		t.Fatal(err)
+	}
+	if err = hostops.ReadJSON(filepath.Join(journalDir(m), "transaction.json"), &pending, true); err != nil {
+		t.Fatal(err)
+	}
+	if pending.Phase != "local_applied" {
+		t.Fatal("lost final ACK did not retain the host journal")
+	}
+	panel.mu.Lock()
+	acceptedBeforeOutage := panel.current.State == configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_DELIVERED
+	panel.hideCompletedRead = false
+	panel.mu.Unlock()
+	if !acceptedBeforeOutage {
+		t.Fatal("fault was not injected after panel acceptance")
+	}
+	if err = run(password, "restore", "--manifest", m.ManifestPath); err != nil {
+		t.Fatal(err)
+	}
+	if err = verifyService(service, 0, 1); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(15 * time.Second)
+	invalidated := false
+	for time.Now().Before(deadline) {
+		store, err = privileged.Open(m.PrivilegedStateFile)
+		if err == nil {
+			for _, entry := range store.State().RejectedReceipts {
+				var report configv1.ReportPrivilegedDeliveryRequest
+				if proto.Unmarshal(entry.Payload, &report) == nil && report.Revision == 10 && report.GetObservation().GetOperationId() == pending.ID {
+					invalidated = true
+				}
+			}
+		}
+		if invalidated {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if !invalidated {
+		t.Fatal("restored daemon retained or retransmitted its invalid old success")
+	}
+	panel.mu.Lock()
+	restoredAfterOutage := panel.op.Phase == hostv1.HostOperationPhase_HOST_OPERATION_PHASE_RESTORED && panel.current.State == configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_FAILED
+	panel.mu.Unlock()
+	if !restoredAfterOutage {
+		t.Fatal("restoration after lost final ACK did not close the operation")
+	}
+	t.Log("Verified real PAM, identity promotion/demotion, daemon ACK, UUID/r4 preservation, replay/expiry rejection, helper lifecycle/revocation, startup failure, lost host receipt, process-kill recovery, and restoration after a lost final daemon ACK")
 }

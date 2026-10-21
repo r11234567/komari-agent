@@ -124,6 +124,13 @@ func New(config Config) (*Helper, error) {
 		config.Endpoint = trust.Endpoint
 		config.AgentID = trust.AgentID
 		config.IgnoreUnsafeCert = false
+		if trust.AccessConfigFile != "" {
+			access, err := hostops.ReadAccess(trust)
+			if err != nil {
+				return nil, err
+			}
+			config.CFAccessClientID, config.CFAccessClientSecret = access.ClientID, access.ClientSecret
+		}
 	}
 
 	baseURL, err := normalizeEndpoint(config.Endpoint)
