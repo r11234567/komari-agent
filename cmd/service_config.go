@@ -1,8 +1,6 @@
 package cmd
 
 import (
-	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,21 +8,17 @@ import (
 	"strings"
 
 	flags_pkg "github.com/komari-monitor/komari-agent/cmd/flags"
+	"github.com/komari-monitor/komari-agent/core/hostops"
 )
 
 // The installers put this non-secret manifest beside the real executable.
 // Resolving symlinks lets the CLI and service share state regardless of HOME,
 // current directory, or the account launching the executable. Standalone
 // binaries without a manifest retain the per-user defaults.
-type serviceConfig struct {
-	ServiceName         string `json:"service_name"`
-	ServiceUser         string `json:"service_user"`
-	InitSystem          string `json:"init_system"`
-	CredentialsFile     string `json:"credentials_file"`
-	RuntimeStateFile    string `json:"runtime_state_file"`
-	PrivilegedStateFile string `json:"privileged_state_file"`
-	ReplayStateFile     string `json:"replay_state_file"`
-}
+type serviceConfig hostops.Manifest
+
+var serviceManifestPath string
+var standaloneMode bool
 
 var installedService *serviceConfig
 
@@ -34,23 +28,24 @@ func readServiceConfig(executable string) (*serviceConfig, error) {
 		return nil, err
 	}
 	directory := filepath.Dir(realPath)
-	path := filepath.Join(directory, "service-config.json")
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
+	path := serviceManifestPath
+	if path == "" {
+		path = filepath.Join(directory, "service-config.json")
+	}
+	manifest, err := hostops.ReadManifest(path)
+	if os.IsNotExist(err) && serviceManifestPath == "" {
+		if !standaloneMode {
+			if err := diagnoseMissingManifest(realPath); err != nil {
+				return nil, err
+			}
+		}
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read installed service configuration %s: %w", path, err)
+		return nil, fmt.Errorf("read installed service manifest %s: %w", path, err)
 	}
-	var config serviceConfig
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("decode installed service configuration %s: %w", path, err)
-	}
-	for _, value := range []*string{&config.CredentialsFile, &config.RuntimeStateFile, &config.PrivilegedStateFile, &config.ReplayStateFile} {
-		if *value != "" && !filepath.IsAbs(*value) {
-			*value = filepath.Join(directory, *value)
-		}
-	}
+	config := serviceConfig(*manifest)
+
 	return &config, nil
 }
 
@@ -60,7 +55,7 @@ func (s *serviceConfig) apply(config *flags_pkg.Config) {
 	}
 	for target, value := range map[*string]string{
 		&config.CredentialsFile: s.CredentialsFile, &config.RuntimeStateFile: s.RuntimeStateFile,
-		&config.PrivilegedStateFile: s.PrivilegedStateFile, &config.ReplayStateFile: s.ReplayStateFile,
+		&config.PrivilegedStateFile: s.PrivilegedStateFile, &config.ReplayStateFile: s.ReplayStateFile, &config.ConfigFile: s.ConfigFile,
 	} {
 		if *target == "" {
 			*target = value

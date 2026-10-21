@@ -318,7 +318,13 @@ func checkAndUpdateSnapshot(updater *selfupdate.Updater) error {
 
 // 检查更新并执行自动更新
 func CheckAndUpdate() error {
-	log.Println("Checking update...")
+	// Service binaries are administrator-owned. Neither a root daemon nor a
+    // copied legacy daemon may bypass the host-tool update boundary.
+    return fmt.Errorf("daemon self-update is disabled; stage an administrator-verified release and run komari-host update --manifest <path> --artifact <binary> --sha256 <trusted-digest>")
+}
+
+func checkAndUpdateStandaloneLegacy() error {
+ log.Println("Checking update...")
 
 	http.DefaultClient = dnsresolver.GetHTTPClient(60 * time.Second)
 	updater, err := selfupdate.NewUpdater(selfupdate.Config{})

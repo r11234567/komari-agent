@@ -1,123 +1,56 @@
 package cmd
 
 import (
-	"context"
-	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/base64"
-	"net/http"
-	"net/http/httptest"
+	"bytes"
+	"github.com/komari-monitor/komari-agent/core/privileged"
+	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/komari-monitor/komari-agent/core/credentials"
-	"github.com/komari-monitor/komari-agent/core/localauth"
-	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
-	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
-	"google.golang.org/protobuf/proto"
 )
 
-func TestReportPrivilegedOutcome_SuccessAndDPoP(t *testing.T) {
-	tempDir := t.TempDir()
-	credPath := filepath.Join(tempDir, "credentials.json")
-
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
+func TestLegacyUpgradeNeverWritesStateOrRunsDaemonWritableScript(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "privileged.json")
+	oldFlags := *flags
+	oldService := installedService
+	t.Cleanup(func() { *flags = oldFlags; installedService = oldService })
+	flags.PrivilegedStateFile = path
+	installedService = &serviceConfig{ServiceName: "custom-agent", ServiceUser: "komari"}
+	s, err := privileged.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	reportDeliveredCalled := false
-	completeManualUpgradeCalled := false
-	var capturedNonce string
-	var dpopReportSig, dpopCompleteSig string
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/komari.config.v1.PrivilegedDeliveryService/ReportPrivilegedDelivery":
-			reportDeliveredCalled = true
-			dpopReportSig = r.Header.Get("X-Komari-Signature")
-			resp := &configv1.ReportPrivilegedDeliveryResponse{}
-			out, _ := proto.Marshal(resp)
-			w.Header().Set("Content-Type", "application/proto")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(out)
-		case "/komari.config.v1.PrivilegedDeliveryService/CompleteManualUpgrade":
-			completeManualUpgradeCalled = true
-			dpopCompleteSig = r.Header.Get("X-Komari-Signature")
-			resp := &configv1.CompleteManualUpgradeResponse{}
-			out, _ := proto.Marshal(resp)
-			w.Header().Set("Content-Type", "application/proto")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(out)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer srv.Close()
-
-	store, err := credentials.Open(credPath)
+	if err = s.RecordPending(&configv1.PrivilegedRevision{Revision: 1, Privileged: &configv1.PrivilegedConfig{}}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity := credentials.Identity{
-		Endpoint:    srv.URL,
-		AgentID:     "agent-upgrade-test",
-		AccessToken: "upgrade-token-abc",
-		PrivateKey:  base64.StdEncoding.EncodeToString(priv),
-	}
-	if err := store.Save(identity); err != nil {
+	marker := filepath.Join(dir, "executed")
+	if err = os.WriteFile(filepath.Join(dir, "elevate.sh"), []byte("#!/bin/sh\ntouch '"+marker+"'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-
-	// Set flags credentials path
-	flags.CredentialsFile = credPath
-	capturedNonce = "expected-pending-nonce-456"
-
-	authResult := localauth.Result{
-		Method:   localauth.MethodSudoPassword,
-		Operator: "testoperator",
+	if err = upgradeCmd.RunE(upgradeCmd, nil); err == nil {
+		t.Fatal("legacy upgrade must require migration, even if CLI is root")
 	}
-
-	err = reportPrivilegedOutcome(
-		context.Background(),
-		5, // revision
-		capturedNonce,
-		configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_DELIVERED,
-		reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT,
-		authResult,
-	)
-	if err != nil {
-		t.Fatalf("expected reportPrivilegedOutcome to succeed, got %v", err)
+	after, _ := os.ReadFile(path)
+	if !bytes.Equal(before, after) {
+		t.Fatal("CLI overwrote daemon state")
 	}
-
-	if !reportDeliveredCalled {
-		t.Fatal("expected ReportPrivilegedDelivery to be called")
-	}
-	if !completeManualUpgradeCalled {
-		t.Fatal("expected CompleteManualUpgrade to be called")
-	}
-	if dpopReportSig == "" {
-		t.Fatal("expected DPoP signature on ReportPrivilegedDelivery request")
-	}
-	if dpopCompleteSig == "" {
-		t.Fatal("expected DPoP signature on CompleteManualUpgrade request")
+	if _, err = os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("candidate elevation script was executed")
 	}
 }
-
-func TestFindElevationScript(t *testing.T) {
-	tempDir := t.TempDir()
-	privFile := filepath.Join(tempDir, "privileged.json")
-	origFile := flags.PrivilegedStateFile
-	flags.PrivilegedStateFile = privFile
-	defer func() { flags.PrivilegedStateFile = origFile }()
-
-	// Create elevate.sh next to privileged.json
-	localScript := filepath.Join(tempDir, "elevate.sh")
-	if err := os.WriteFile(localScript, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
-		t.Fatal(err)
+func TestCompatibilityAliasUsesSameCommand(t *testing.T) {
+	c, _, err := RootCmd.Find([]string{"update-conf"})
+	if err != nil || c != upgradeCmd {
+		t.Fatalf("alias duplicated command: %v", err)
 	}
-	if script := findElevationScript(); script != localScript {
-		t.Fatalf("expected %s, got %s", localScript, script)
+}
+func TestPrivilegedRollbackCannotReenableWithoutNewApproval(t *testing.T) {
+	if err := rollbackCmd.RunE(rollbackCmd, nil); err == nil {
+		t.Fatal("CLI cannot write privileged rollback snapshots")
 	}
 }

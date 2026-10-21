@@ -55,6 +55,10 @@ for ($i = 0; $i -lt $args.Count; $i++) {
     }
 }
 
+if (-not $UninstallOnly) {
+    throw 'Trusted v2 Windows installation is not yet supported: SCM/ACL migration must pass platform acceptance first. No privileged host actions are available.'
+}
+
 $IsAdministrator = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltinRole]::Administrator
 )

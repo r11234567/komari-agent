@@ -16,7 +16,14 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Existing behavior regression tests
-        run: scripts/ci/run-go-tests.sh ./cmd ./core/runtimeconfig ./core/privileged ./core/capability ./core/localauth ./clientcore ./server ./terminal ./rescue
+        run: scripts/ci/run-go-tests.sh ./cmd ./core/hostops ./internal/hostcmd ./core/runtimeconfig ./core/privileged ./core/capability ./core/localauth ./clientcore ./server ./terminal ./rescue ./update ./monitoring/unit
+      - name: Trusted installation and migration on disposable systemd runner
+        run: scripts/ci/test-trusted-install.sh
+      - name: Cross-platform host tool compilation
+        run: |
+          for target in windows darwin freebsd; do
+            GOOS=$target GOARCH=amd64 go build -p=2 -o ci-artifacts/komari-host-$target ./cmd/komari-host
+          done
       - name: Reproduce and track known defects with temporary fixtures
         if: success() || failure()
         run: python3 scripts/ci/run-privileged-audit.py

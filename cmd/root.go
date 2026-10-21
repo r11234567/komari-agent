@@ -10,7 +10,6 @@ import (
 	"os/signal"
 	"reflect"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -44,20 +43,19 @@ var RootCmd = &cobra.Command{
 		}
 		installedService.apply(flags)
 		loadFromEnv()
+		// Subcommands use the same bootstrap configuration as the daemon.
+		if flags.ConfigFile != "" {
+			data, err := os.ReadFile(flags.ConfigFile)
+			if err != nil {
+				return fmt.Errorf("read config file: %w", err)
+			}
+			if err := json.Unmarshal(data, flags); err != nil {
+				return fmt.Errorf("parse config file: %w", err)
+			}
+		}
 		return nil
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		loadFromEnv() // 从环境变量加载配置，覆盖解析
-		if flags.ConfigFile != "" {
-			bytes, err := os.ReadFile(flags.ConfigFile)
-			if err != nil {
-				return fmt.Errorf("failed to read config file: %w", err)
-			}
-			err = json.Unmarshal(bytes, flags)
-			if err != nil {
-				return fmt.Errorf("failed to parse config file: %w", err)
-			}
-		}
 		if flags.PreferIPVersion != "" && flags.PreferIPVersion != "4" && flags.PreferIPVersion != "6" {
 			return fmt.Errorf("invalid --prefer-ip-version value %q: expected 4 or 6", flags.PreferIPVersion)
 		}
@@ -214,7 +212,9 @@ func init() {
 	RootCmd.PersistentFlags().StringVar(&flags.PrivilegedStateFile, "privileged-state-file", "", "Path for persisted privileged configuration state")
 	RootCmd.PersistentFlags().StringVar(&flags.CredentialsFile, "credentials-file", "", "Path for persisted enrollment credentials")
 	RootCmd.PersistentFlags().StringVar(&flags.ReplayStateFile, "replay-state-file", "", "Path for the record of executed signed instructions, which prevents replays")
-	RootCmd.PersistentFlags().ParseErrorsWhitelist.UnknownFlags = true
+	RootCmd.PersistentFlags().StringVar(&serviceManifestPath, "service-manifest", "", "Explicit installed service manifest (shared by all commands)")
+	RootCmd.PersistentFlags().BoolVar(&standaloneMode, "standalone", false, "Use standalone bootstrap paths when no installed service manifest exists")
+	RootCmd.PersistentFlags().ParseErrorsWhitelist.UnknownFlags = false
 }
 
 func loadFromEnv() {
@@ -242,8 +242,8 @@ func loadFromEnv() {
 		case reflect.String:
 			field.SetString(envValue)
 		case reflect.Bool:
-			if strings.ToLower(envValue) == "true" || envValue == "1" {
-				field.SetBool(true)
+			if value, err := strconv.ParseBool(envValue); err == nil {
+				field.SetBool(value)
 			}
 		case reflect.Int:
 			if intVal, err := strconv.Atoi(envValue); err == nil {
