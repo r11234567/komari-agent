@@ -40,7 +40,7 @@ func (c *Client) initializeHost(parent context.Context) error {
 		return errors.New("daemon OS identity differs from protected installation policy")
 	}
 	var actions []hostv1.HostAction
-	if hostops.HostActionsReady(c.hostManifest) {
+	if c.hostTrust != nil && hostops.HostActionsReady(c.hostManifest) {
 		actions = []hostv1.HostAction{hostv1.HostAction_HOST_ACTION_SET_SERVICE_IDENTITY}
 		if c.hostPolicy.AllowRescueHelper && len(c.hostTrust.ReleaseKeys) > 0 {
 			actions = append(actions, hostv1.HostAction_HOST_ACTION_INSTALL_RESCUE_HELPER)

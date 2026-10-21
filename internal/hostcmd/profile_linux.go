@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/user"
 	"reflect"
 	"strconv"
 	"strings"
@@ -173,12 +172,4 @@ func waitHelper(m *hostops.Manifest) error {
 		time.Sleep(250 * time.Millisecond)
 	}
 	return errors.New("helper is installed but not authorized/connected; startup has not reached lease-ready")
-}
-
-func serviceUID(t *hostops.Trust) (int, error) {
-	u, err := user.Lookup(t.ServiceUser)
-	if err != nil {
-		return 0, err
-	}
-	return strconv.Atoi(u.Uid)
 }
