@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/komari-monitor/komari-agent/core/privileged"
+	"github.com/komari-monitor/komari-agent/core/statelock"
 	"io"
 	"os"
 	"path/filepath"
@@ -173,12 +174,7 @@ func atomicWrite(path string, data []byte, mode os.FileMode, uid, gid int) error
 	if err = os.Rename(f.Name(), path); err != nil {
 		return err
 	}
-	d, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
+	return statelock.SyncDirectory(filepath.Dir(path))
 }
 
 func WriteJSON(path string, value any, mode os.FileMode) error {

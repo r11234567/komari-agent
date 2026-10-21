@@ -6,6 +6,31 @@ import (
 	"testing"
 )
 
+func TestAtomicMetadataCreateAndReplace(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "policy.json")
+	for _, revision := range []uint64{1, 2} {
+		want := Policy{Version: ManifestVersion, ServiceID: "metadata-test", HostRevision: revision}
+		if err := WriteJSON(path, &want, 0o600); err != nil {
+			t.Fatalf("publish revision %d: %v", revision, err)
+		}
+		var got Policy
+		if err := ReadJSON(path, &got, false); err != nil {
+			t.Fatal(err)
+		}
+		if got.Version != want.Version || got.ServiceID != want.ServiceID || got.HostRevision != revision {
+			t.Fatalf("read after replacement: got %+v, want %+v", got, want)
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "policy.json" {
+		t.Fatalf("temporary files remain after successful replacement: %v", entries)
+	}
+}
+
 func TestAtomicMetadataRejectsSymlinkAndTrailingJSON(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "manifest.json")
