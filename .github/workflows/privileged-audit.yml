@@ -1,0 +1,68 @@
+name: Privileged delivery audit
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Compile host and daemon contracts before executing tests
+        run: bash scripts/ci/check-stage6-compile.sh
+      - name: Existing behavior regression tests
+        run: scripts/ci/run-go-tests.sh ./cmd ./cmd/flags ./core/hostops ./core/statelock ./internal/hostcmd ./core/runtimeconfig ./core/privileged ./core/capability ./core/localauth ./clientcore ./server ./terminal ./rescue ./update ./monitoring/unit
+      - name: Public CLI surface, redaction and read-only inspection
+        run: bash scripts/ci/test-cli-surface.sh
+      - name: Signed approval, protected policy, final gates and lost ACK recovery
+        run: scripts/ci/test-approved-delivery.sh
+      - name: Trusted installation and migration on disposable systemd runner
+        run: scripts/ci/test-trusted-install.sh
+      - name: Real PAM, systemd identities, helper lifecycle and transaction recovery
+        run: bash scripts/ci/test-host-transactions.sh
+      - name: Cross-platform host tool compilation
+        run: |
+          for target in windows darwin freebsd; do
+            GOOS=$target GOARCH=amd64 go build -p=2 -o ci-artifacts/komari-host-$target ./cmd/komari-host
+            GOOS=$target GOARCH=amd64 go build -p=2 -o ci-artifacts/komari-agent-$target .
+          done
+      - name: Mandatory formerly failing audit regressions
+        if: success() || failure()
+        run: python3 scripts/ci/run-privileged-audit.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: privileged-agent-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+
+  windows-state-regressions:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Windows state persistence and process locks
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force ci-artifacts | Out-Null
+          $env:GOMAXPROCS = '2'
+          go test -p=2 -json -count=1 -timeout=5m ./core/statelock ./core/privileged ./core/runtimeconfig 2> ci-artifacts/windows-build.log | Tee-Object -FilePath ci-artifacts/windows-tests.jsonl
+          $testExit = $LASTEXITCODE
+          $testExit | Out-File ci-artifacts/windows-exit.txt
+          exit $testExit
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: privileged-windows-state-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30

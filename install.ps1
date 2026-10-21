@@ -21,6 +21,9 @@ $IgnoreUnsafeCert = $false
 $RemoteControlDisabled = $false
 
 for ($i = 0; $i -lt $args.Count; $i++) {
+    if ($args[$i] -match '^(--(interval|memory-include-cache|include-nics|exclude-nics|include-mountpoint|month-rotate|get-ip-addr-from-nic|enable-gpu|gpu|detailed-gpu|max-retries|disable-compression)(=|$)|-[ir]([0-9]|$))') {
+        throw "Removed agent option: $($args[$i]); use panel configuration or administrator migration"
+    }
     switch ($args[$i]) {
         "--install-dir" { $InstallDir = $args[++$i]; continue }
         "--install-service-name" { $ServiceName = $args[++$i]; continue }
@@ -53,6 +56,10 @@ for ($i = 0; $i -lt $args.Count; $i++) {
         }
         Default { $KomariArgs += $args[$i] }
     }
+}
+
+if (-not $UninstallOnly) {
+    throw 'Trusted v2 Windows installation is not yet supported: SCM/ACL migration must pass platform acceptance first. No privileged host actions are available.'
 }
 
 $IsAdministrator = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(

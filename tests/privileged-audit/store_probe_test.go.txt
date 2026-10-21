@@ -1,0 +1,49 @@
+package privileged
+
+import (
+	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
+	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
+	"path/filepath"
+	"testing"
+)
+
+
+func TestAuditSecondRollbackCanWidenWithoutAuthentication(t *testing.T) {
+	s, _ := Open(filepath.Join(t.TempDir(), "privileged.json"))
+	yes := true
+	if err := s.RecordPending(&configv1.PrivilegedRevision{Revision: 1, Privileged: &configv1.PrivilegedConfig{RemoteControlEnabled: &yes}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Promote(reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	restored, _, err := s.Rollback()
+	if err == nil && restored.RemoteControlEnabled {
+		t.Fatal("second Rollback re-enables remote control; CLI rollback and rescue rollback do not authenticate promotion")
+	}
+}
+
+func TestAuditDaemonStoreOverwritesCLIChange(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "privileged.json")
+	daemon, _ := Open(path)
+	yes := true
+	revision := &configv1.PrivilegedRevision{Revision: 1, Privileged: &configv1.PrivilegedConfig{RemoteControlEnabled: &yes}}
+	if err := daemon.RecordPending(revision); err != nil {
+		t.Fatal(err)
+	}
+	cli, _ := Open(path)
+	if _, err := cli.Promote(reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT); err != nil {
+		t.Fatal(err)
+	}
+	// Daemon still has revision 0 in memory. A reconnect redelivers r1.
+	if err := daemon.RecordPending(revision); err != nil {
+		t.Fatal(err)
+	}
+	disk, _ := Open(path)
+	if disk.State().AppliedRevision != 1 {
+		t.Fatal("daemon's stale in-memory store overwrote the CLI's applied r1 with applied r0")
+	}
+}

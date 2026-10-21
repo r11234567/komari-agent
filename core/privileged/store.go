@@ -14,9 +14,11 @@
 package privileged
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/komari-monitor/komari-agent/core/statelock"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,15 +41,21 @@ const (
 // state file leaves the Agent with the narrowest capabilities rather than
 // silently restoring something wider.
 type Settings struct {
-	RemoteControlEnabled bool `json:"remote_control_enabled"`
-	WebSSHEnabled        bool `json:"webssh_enabled"`
-	ExecutionEnabled     bool `json:"execution_enabled"`
-	EnableGPU            bool `json:"enable_gpu"`
-	RescueHelperEnabled  bool `json:"rescue_helper_enabled"`
+	RequiredPrivilegeMode reportv1.PrivilegeMode `json:"required_privilege_mode"`
+	RemoteControlEnabled  bool                   `json:"remote_control_enabled"`
+	WebSSHEnabled         bool                   `json:"webssh_enabled"`
+	ExecutionEnabled      bool                   `json:"execution_enabled"`
+	EnableGPU             bool                   `json:"enable_gpu"`
+	RescueHelperEnabled   bool                   `json:"rescue_helper_enabled"`
 }
 
 // State is what this host persists about the privileged track.
 type State struct {
+	LastSequence         uint64    `json:"last_sequence,omitempty"`
+	ActiveSignedRevision []byte    `json:"active_signed_revision,omitempty"`
+	Outbox               []Receipt `json:"outbox,omitempty"`
+	RejectedReceipts     []Receipt `json:"rejected_receipts,omitempty"`
+
 	// AppliedRevision is the revision whose settings are active.
 	AppliedRevision uint64 `json:"applied_revision"`
 	// Active is what the Agent is running with now.
@@ -81,9 +89,10 @@ type State struct {
 
 // Store serializes access to the privileged state file.
 type Store struct {
-	mu    sync.RWMutex
-	path  string
-	state State
+	mu       sync.RWMutex
+	path     string
+	state    State
+	diskHash [32]byte
 }
 
 var active atomic.Pointer[Store]
@@ -120,6 +129,7 @@ func Open(path string) (*Store, error) {
 	if err := json.Unmarshal(data, &store.state); err != nil {
 		return nil, fmt.Errorf("decode privileged state: %w", err)
 	}
+	store.diskHash = sha256.Sum256(data)
 	return store, nil
 }
 
@@ -155,9 +165,13 @@ func (s *Store) RecordPending(revision *configv1.PrivilegedRevision) error {
 		return fmt.Errorf("privileged revision %d is not newer than the applied revision %d",
 			revision.GetRevision(), s.state.AppliedRevision)
 	}
+	if revision.Revision < s.state.PendingRevision || revision.UpdateSequence < s.state.LastSequence {
+		return errors.New("stale pending revision or sequence")
+	}
 	next := s.state.clone()
 	pending := settingsFromProto(revision.GetPrivileged())
 	next.PendingRevision = revision.GetRevision()
+	next.LastSequence = revision.UpdateSequence
 	next.Pending = &pending
 	next.PendingReasons = nil
 	next.PendingTaskID = ""
@@ -178,34 +192,9 @@ func (s *Store) RecordPending(revision *configv1.PrivilegedRevision) error {
 	return s.commit(next)
 }
 
-// Promote makes the pending revision active.
-//
-// It refuses when the resulting settings would exceed the privilege the Agent
-// actually holds. That check is not redundant with the panel's classification:
-// the panel decides what an upgrade requires, but only the host knows what it
-// ended up with, and trusting the panel's expectation over the observed state
-// is how a failed upgrade would silently look like a successful one.
+// Promote is a retired compatibility API; unsigned local promotion is forbidden.
 func (s *Store) Promote(actual reportv1.PrivilegeMode) (Settings, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.state.Pending == nil {
-		return s.state.Active, errors.New("no privileged revision is pending")
-	}
-	pending := *s.state.Pending
-	if err := checkSupported(pending, actual); err != nil {
-		return s.state.Active, err
-	}
-	next := s.state.clone()
-	previous := next.Active
-	next.Previous = &previous
-	next.PreviousRevision = next.AppliedRevision
-	next.Active = pending
-	next.AppliedRevision = next.PendingRevision
-	next.clearPending()
-	if err := s.commit(next); err != nil {
-		return s.state.Active, err
-	}
-	return next.Active, nil
+	return s.Active(), errors.New("unsigned promotion retired; daemon requires a current signed v2 approval")
 }
 
 // Rollback restores the previous settings locally.
@@ -218,14 +207,14 @@ func (s *Store) Rollback() (Settings, uint64, error) {
 	next := s.state.clone()
 	restored := *next.Previous
 	restoredRevision := next.PreviousRevision
-	// The settings being withdrawn become the rollback target, so a mistaken
-	// rollback can itself be undone without the panel.
-	current := next.Active
-	currentRevision := next.AppliedRevision
+	if !Subset(restored, next.Active) {
+		return s.state.Active, 0, errors.New("rollback would widen capabilities; a fresh signed approval is required")
+	}
 	next.Active = restored
 	next.AppliedRevision = restoredRevision
-	next.Previous = &current
-	next.PreviousRevision = currentRevision
+	next.ActiveSignedRevision = nil
+	next.Previous = nil
+	next.PreviousRevision = 0
 	if err := s.commit(next); err != nil {
 		return s.state.Active, 0, err
 	}
@@ -244,35 +233,16 @@ func (s *Store) DiscardPending() error {
 	return s.commit(next)
 }
 
-// checkSupported refuses settings the host cannot honour.
-//
-// Remote control, WebSSH and execution all run commands with the Agent's own
-// process identity, so enabling them on a non-privileged Agent would announce
-// a capability that does not exist.
+// checkSupported validates actual identity and rejects unavailable host actions.
 func checkSupported(settings Settings, actual reportv1.PrivilegeMode) error {
-	privileged := actual == reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT ||
-		actual == reportv1.PrivilegeMode_PRIVILEGE_MODE_WINDOWS_ADMINISTRATOR
-	if privileged {
-		return nil
+	if settings.RequiredPrivilegeMode != reportv1.PrivilegeMode_PRIVILEGE_MODE_UNSPECIFIED && settings.RequiredPrivilegeMode != actual {
+		return errors.New("actual daemon identity does not match required privilege mode")
 	}
-	var blocked []string
-	if settings.RemoteControlEnabled {
-		blocked = append(blocked, "remote control")
-	}
-	if settings.WebSSHEnabled {
-		blocked = append(blocked, "WebSSH")
-	}
-	if settings.ExecutionEnabled {
-		blocked = append(blocked, "remote execution")
-	}
+
 	if settings.RescueHelperEnabled {
-		blocked = append(blocked, "the rescue helper")
+		return errors.New("rescue helper requires the separately installed host service")
 	}
-	if len(blocked) == 0 {
-		return nil
-	}
-	return fmt.Errorf("%s require a privileged Agent, but this Agent is running as %s",
-		strings.Join(blocked, ", "), describePrivilege(actual))
+	return nil
 }
 
 func describePrivilege(mode reportv1.PrivilegeMode) string {
@@ -292,17 +262,35 @@ func describePrivilege(mode reportv1.PrivilegeMode) string {
 
 func settingsFromProto(value *configv1.PrivilegedConfig) Settings {
 	return Settings{
-		RemoteControlEnabled: value.GetRemoteControlEnabled(),
-		WebSSHEnabled:        value.GetWebsshEnabled(),
-		ExecutionEnabled:     value.GetExecutionEnabled(),
-		EnableGPU:            value.GetEnableGpu(),
-		RescueHelperEnabled:  value.GetRescueHelperEnabled(),
+		RequiredPrivilegeMode: value.GetRequiredPrivilegeMode(),
+		RemoteControlEnabled:  value.GetRemoteControlEnabled(),
+		WebSSHEnabled:         value.GetWebsshEnabled(),
+		ExecutionEnabled:      value.GetExecutionEnabled(),
+		EnableGPU:             value.GetEnableGpu(),
+		RescueHelperEnabled:   value.GetRescueHelperEnabled(),
 	}
 }
 
 // commit persists and then updates memory, so a failed write never leaves the
 // process believing it adopted something that is not on disk.
 func (s *Store) commit(next State) error {
+	release, err := statelock.Acquire(s.path + ".write.lock")
+	if err != nil {
+		return err
+	}
+	defer release()
+	disk, err := os.ReadFile(s.path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	var hash [32]byte
+	if err == nil {
+		hash = sha256.Sum256(disk)
+	}
+	if hash != s.diskHash {
+		return errors.New("stale privileged store: another writer changed the snapshot; reopen required")
+	}
+
 	next.UpdatedAt = time.Now().UTC()
 	data, err := json.MarshalIndent(next, "", "  ")
 	if err != nil {
@@ -336,12 +324,19 @@ func (s *Store) commit(next State) error {
 	if err := os.Rename(name, s.path); err != nil {
 		return fmt.Errorf("replace privileged state: %w", err)
 	}
+	if err := statelock.SyncDirectory(directory); err != nil {
+		return err
+	}
 	s.state = next
+	s.diskHash = sha256.Sum256(data)
 	return nil
 }
 
 func (state State) clone() State {
 	copied := state
+	copied.ActiveSignedRevision = append([]byte(nil), state.ActiveSignedRevision...)
+	copied.Outbox = cloneReceipts(state.Outbox)
+	copied.RejectedReceipts = cloneReceipts(state.RejectedReceipts)
 	if state.Previous != nil {
 		previous := *state.Previous
 		copied.Previous = &previous

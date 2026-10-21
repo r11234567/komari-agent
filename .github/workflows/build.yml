@@ -45,7 +45,7 @@ jobs:
       # version silently: a generated-client change alters wire compatibility
       # with the panel, so it has to be a deliberate edit here as well.
       - name: Verify pinned protocol dependency
-        run: go list -m github.com/r11234567/komari-proto | grep -Fx 'github.com/r11234567/komari-proto v0.1.37'
+        run: go list -m github.com/r11234567/komari-proto | grep -Fx 'github.com/r11234567/komari-proto v0.1.38-0.20261021140444-e575defe1942'
 
       - name: Run transport and runtime contract tests
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
@@ -70,6 +70,13 @@ jobs:
           fi
           go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}" -o $RESCUE_BINARY_NAME ./cmd/komari-agent-rescue
 
+          HOST_BINARY_NAME=komari-host-${{ matrix.goos }}-${{ matrix.goarch }}
+          if [ "${{ matrix.goos }}" = "windows" ]; then HOST_BINARY_NAME=${HOST_BINARY_NAME}.exe; fi
+          go build -trimpath -o "$HOST_BINARY_NAME" ./cmd/komari-host
+          sha256sum "$BINARY_NAME" > "$BINARY_NAME.sha256"
+          sha256sum "$HOST_BINARY_NAME" > "$HOST_BINARY_NAME.sha256"
+
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
@@ -77,6 +84,7 @@ jobs:
           path: |
             komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}*
             komari-agent-rescue-${{ matrix.goos }}-${{ matrix.goarch }}*
+            komari-host-${{ matrix.goos }}-${{ matrix.goarch }}*
 
   capability-fixtures:
     strategy:

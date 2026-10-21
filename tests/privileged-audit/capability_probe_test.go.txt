@@ -1,0 +1,27 @@
+package capability
+
+import (
+	"github.com/komari-monitor/komari-agent/core/privileged"
+	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
+	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
+	"path/filepath"
+	"testing"
+)
+
+func TestAuditSeparateExecutionAndWebSSHFlagsIgnored(t *testing.T) {
+	s, _ := privileged.Open(filepath.Join(t.TempDir(), "privileged.json"))
+	yes, no := true, false
+	if err := s.RecordPending(&configv1.PrivilegedRevision{Revision: 1, Privileged: &configv1.PrivilegedConfig{RemoteControlEnabled: &yes, ExecutionEnabled: &no, WebsshEnabled: &no}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Promote(reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT); err != nil {
+		t.Fatal(err)
+	}
+	old := privileged.ActiveStore()
+	privileged.SetActive(s)
+	t.Cleanup(func() { privileged.SetActive(old) })
+	caps := detect(s.Active().RemoteControlEnabled, reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT, true, "")
+	if caps.Execution.Available || caps.Webssh.Available {
+		t.Fatalf("execution=false/webssh=false, but capabilities execution=%t webssh=%t", caps.Execution.Available, caps.Webssh.Available)
+	}
+}

@@ -1,14 +1,15 @@
 package terminal
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 
 	"github.com/komari-monitor/komari-agent/core/capability"
-	"github.com/komari-monitor/komari-agent/core/runtimeconfig"
 )
 
 // Terminal 接口定义平台特定的终端操作
@@ -29,11 +30,13 @@ type terminalImpl struct {
 
 // Session exposes the platform PTY to transport-neutral clients.
 type Session struct {
-	term Terminal
+	term      Terminal
+	cancel    context.CancelFunc
+	closeOnce sync.Once
 }
 
 func OpenSession(cols, rows int) (*Session, error) {
-	if allowed, reason := capability.RemoteControlAllowed(runtimeconfig.RemoteControlEnabled()); !allowed {
+	if allowed, reason := capability.WebSSHAllowed(); !allowed {
 		return nil, fmt.Errorf("remote control is unavailable: %s", reason)
 	}
 	impl, err := newTerminalImpl()
@@ -46,21 +49,45 @@ func OpenSession(cols, rows int) (*Session, error) {
 			return nil, err
 		}
 	}
-	return &Session{term: impl.term}, nil
+	ctx, cancel := context.WithCancel(context.Background())
+	session := &Session{term: impl.term, cancel: cancel}
+	go func() {
+		capability.CancelOnRevocation(ctx, cancel, capability.WebSSHAllowed)
+		if ctx.Err() != nil {
+			session.Close()
+		}
+	}()
+	return session, nil
 }
 
 func (s *Session) Read(buffer []byte) (int, error) { return s.term.Read(buffer) }
-func (s *Session) Write(data []byte) (int, error)  { return s.term.Write(data) }
-func (s *Session) Resize(cols, rows int) error     { return s.term.Resize(cols, rows) }
-func (s *Session) Wait() error                     { return s.term.Wait() }
+func (s *Session) Write(data []byte) (int, error) {
+	if ok, reason := capability.WebSSHAllowed(); !ok {
+		return 0, fmt.Errorf("WebSSH revoked: %s", reason)
+	}
+	return s.term.Write(data)
+}
+func (s *Session) Resize(cols, rows int) error {
+	if ok, reason := capability.WebSSHAllowed(); !ok {
+		return fmt.Errorf("WebSSH revoked: %s", reason)
+	}
+	return s.term.Resize(cols, rows)
+}
+func (s *Session) Wait() error { return s.term.Wait() }
 func (s *Session) Close() error {
-	gracefulShutdown(s.term)
-	return s.term.Close()
+	var err error
+	s.closeOnce.Do(func() {
+		if s.cancel != nil {
+			s.cancel()
+		}
+		err = s.term.Close()
+	})
+	return err
 }
 
 // StartTerminal 启动终端并处理 WebSocket 通信
 func StartTerminal(conn *websocket.Conn) {
-	if allowed, reason := capability.RemoteControlAllowed(runtimeconfig.RemoteControlEnabled()); !allowed {
+	if allowed, reason := capability.WebSSHAllowed(); !allowed {
 		conn.WriteMessage(websocket.TextMessage, []byte("\n\nRemote control is unavailable: "+reason))
 		conn.Close()
 		return
@@ -81,10 +108,10 @@ func StartTerminal(conn *websocket.Conn) {
 	}()
 
 	// 从 WebSocket 读取消息并写入终端
-	go handleWebSocketInput(conn, session.term, errChan, done)
+	go handleWebSocketInput(conn, session, errChan, done)
 
 	// 从终端读取输出并写入 WebSocket
-	go handleTerminalOutput(conn, session.term, errChan, done)
+	go handleTerminalOutput(conn, session, errChan, done)
 
 	// 等待终端进程结束或出现错误
 	select {

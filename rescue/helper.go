@@ -3,6 +3,7 @@ package rescue
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,16 +13,19 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
 	"github.com/komari-monitor/komari-agent/core/credentials"
+	"github.com/komari-monitor/komari-agent/core/hostops"
 	"github.com/komari-monitor/komari-agent/core/signing"
 	"github.com/komari-monitor/komari-agent/requestheaders"
 	commonv1 "github.com/r11234567/komari-proto/gen/go/komari/common/v1"
 	rescuev1 "github.com/r11234567/komari-proto/gen/go/komari/rescue/v1"
 	rescuev1connect "github.com/r11234567/komari-proto/gen/go/komari/rescue/v1/rescuev1connect"
+	securityv1 "github.com/r11234567/komari-proto/gen/go/komari/security/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -36,6 +40,7 @@ const (
 )
 
 type Config struct {
+	HostManifest         string
 	Endpoint             string
 	Token                string
 	AgentID              string
@@ -50,6 +55,11 @@ type Config struct {
 }
 
 type Helper struct {
+	manifest             *hostops.Manifest
+	hostTrust            *hostops.Trust
+	credentialsPath      string
+	authorized           atomic.Bool
+	leaseReady           atomic.Bool
 	client               rescuev1connect.RescueServiceClient
 	token                string
 	agentID              string
@@ -64,8 +74,20 @@ type Helper struct {
 }
 
 func New(config Config) (*Helper, error) {
-	credStore, _ := credentials.Open(config.CredentialsFile)
+	var credStore *credentials.Store
 	var identity credentials.Identity
+	if config.HostManifest != "" {
+		data, err := hostops.ReadCandidate(config.CredentialsFile)
+		if err != nil {
+			return nil, err
+		}
+		if err = json.Unmarshal(data, &identity); err != nil {
+			return nil, err
+		}
+		config.Token = identity.AccessToken
+	} else {
+		credStore, _ = credentials.Open(config.CredentialsFile)
+	}
 	if credStore != nil {
 		if id, ok := credStore.Identity(); ok && id.AccessToken != "" {
 			identity = id
@@ -78,6 +100,36 @@ func New(config Config) (*Helper, error) {
 			if id.AgentID != "" {
 				config.AgentID = id.AgentID
 			}
+		}
+	}
+	var manifest *hostops.Manifest
+	var trust *hostops.Trust
+	if config.HostManifest != "" {
+		var err error
+		manifest, err = hostops.ReadManifest(config.HostManifest)
+		if err != nil {
+			return nil, err
+		}
+		trust, err = hostops.ReadTrust(manifest)
+		if err != nil {
+			return nil, err
+		}
+		if identity.AgentID != trust.AgentID || identity.Endpoint != trust.Endpoint || config.CredentialsFile != manifest.CredentialsFile {
+			return nil, errors.New("helper enrollment does not match root-pinned host identity")
+		}
+		identity.ControlPlaneKeys = trust.PanelKeys
+		identity.PolicyAlgorithms = []int32{1}
+		identity.PolicyMinimumSignatures = 1
+		identity.PolicyRequireAll = false
+		config.Endpoint = trust.Endpoint
+		config.AgentID = trust.AgentID
+		config.IgnoreUnsafeCert = false
+		if trust.AccessConfigFile != "" {
+			access, err := hostops.ReadAccess(trust)
+			if err != nil {
+				return nil, err
+			}
+			config.CFAccessClientID, config.CFAccessClientSecret = access.ClientID, access.ClientSecret
 		}
 	}
 
@@ -113,8 +165,20 @@ func New(config Config) (*Helper, error) {
 	} else {
 		httpClient = baseClient
 	}
+	if trust != nil {
+		provider := func() (credentials.Identity, bool) { return readHostIdentity(manifest, trust) }
+		httpClient = requestheaders.WrapWithDPoP(baseClient, provider, func() string {
+			id, ok := provider()
+			if !ok {
+				return ""
+			}
+			return id.AccessToken
+		}, nil)
+		httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return errors.New("helper RPC redirects are forbidden") }
+	}
 
 	return &Helper{
+		manifest: manifest, hostTrust: trust, credentialsPath: config.CredentialsFile,
 		client:               rescuev1connect.NewRescueServiceClient(httpClient, baseURL),
 		token:                strings.TrimSpace(config.Token),
 		agentID:              strings.TrimSpace(config.AgentID),
@@ -138,6 +202,12 @@ func DefaultInstanceIDPath() string {
 }
 
 func (h *Helper) Run(ctx context.Context) error {
+	if h.hostTrust != nil {
+		if err := h.checkAuthorization(ctx); err != nil {
+			return err
+		}
+		go h.watchAuthorization(ctx)
+	}
 	// A previous helper generation may have left a temporary SSH window open
 	// whose kernel timeout or revocation timer did not survive. Reconciling at
 	// startup is what makes the deadline hold across a restart rather than
@@ -148,6 +218,7 @@ func (h *Helper) Run(ctx context.Context) error {
 	if err := h.reportStatus(ctx, nil); err != nil {
 		return fmt.Errorf("report rescue helper status: %w", err)
 	}
+	h.leaseReady.Store(true)
 	afterAssignmentID := ""
 	for {
 		// Reconciling once per lease bounds how long a lost timer can leave a
@@ -260,6 +331,9 @@ func (h *Helper) verifyRescueAssignment(assignment *rescuev1.RescueAssignment) (
 }
 
 func (h *Helper) execute(parent context.Context, assignment *rescuev1.RescueAssignment) error {
+	if h.hostTrust != nil && !h.authorized.Load() {
+		return errors.New("rescue authorization is withdrawn or unverifiable")
+	}
 	session, err := h.verifyRescueAssignment(assignment)
 	if err != nil {
 		return err
@@ -271,10 +345,21 @@ func (h *Helper) execute(parent context.Context, assignment *rescuev1.RescueAssi
 	if session.DeadlineAt != nil && session.DeadlineAt.IsValid() && session.DeadlineAt.AsTime().Before(deadline) {
 		deadline = session.DeadlineAt.AsTime()
 	}
+	// Outer lease metadata can shorten a signed deadline, never extend it.
+	var instruction securityv1.SignedInstruction
+	if err := proto.Unmarshal(assignment.GetEnvelope().GetPayload(), &instruction); err != nil {
+		return err
+	}
+	if instruction.ExpiresAt != nil && instruction.ExpiresAt.AsTime().Before(deadline) {
+		deadline = instruction.ExpiresAt.AsTime()
+	}
 	operationContext, cancel := context.WithDeadline(parent, deadline)
 	defer cancel()
 	cancelledByServer := make(chan struct{}, 1)
 	go h.watchCancellation(operationContext, assignment.AssignmentId, cancel, cancelledByServer)
+	if h.hostTrust != nil {
+		go h.cancelOnRevocation(operationContext, cancel)
+	}
 
 	result, actionErr := ExecuteAction(operationContext, h.action, session.Action, session.Arguments, session.GetSshPort())
 	state := commonv1.OperationState_OPERATION_STATE_SUCCEEDED
@@ -308,7 +393,10 @@ func (h *Helper) execute(parent context.Context, assignment *rescuev1.RescueAssi
 		return err
 	}
 	if state == commonv1.OperationState_OPERATION_STATE_SUCCEEDED && result.AfterReport != nil {
-		return result.AfterReport(parent)
+		if h.hostTrust != nil && !h.authorized.Load() {
+			return errors.New("rescue authorization withdrawn before committing action")
+		}
+		return result.AfterReport(operationContext)
 	}
 	return nil
 }
@@ -384,7 +472,15 @@ func (h *Helper) reportStatus(parent context.Context, statusErr error) error {
 }
 
 func (h *Helper) authorize(header http.Header) {
-	requestheaders.ApplyAgentAuthentication(header, h.token, h.cfAccessClientID, h.cfAccessClientSecret)
+	token := h.token
+	if h.hostTrust != nil {
+		if id, ok := readHostIdentity(h.manifest, h.hostTrust); ok {
+			token = id.AccessToken
+		} else {
+			token = ""
+		}
+	}
+	requestheaders.ApplyAgentAuthentication(header, token, h.cfAccessClientID, h.cfAccessClientSecret)
 }
 
 func normalizeEndpoint(endpoint string) (string, error) {

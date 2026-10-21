@@ -1,0 +1,62 @@
+# Linux host transactions (stage 6)
+
+This development implementation supports Linux with systemd only. The host tool and daemon are separate processes; a root CLI never establishes that the daemon runs as root. Windows, macOS and FreeBSD do not advertise host actions. Cross compilation is not host-operation acceptance.
+
+## Local preparation
+
+Stage 3 installation/migration installs root-owned binaries and service metadata. It does not install the full rescue helper. Before enabling host actions, install the distribution `pamtester` package. The host tool uses the fixed `/etc/pam.d/komari-host` profile requiring `pam_unix` authentication and account checks, including when invoked as root. The password goes directly between the controlling terminal and PAM; the daemon, panel, RPC messages, argv, environment and logs never carry it.
+
+A local administrator must independently verify and pin panel signing keys and the node UUID. Daemon enrollment TOFU keys are not automatically root authority. For an existing non-root service:
+
+```sh
+sudo komari-host trust --manifest /etc/komari/services/SERVICE.json \
+  --endpoint https://PANEL --agent-id UUID \
+  --panel-key-id VERIFIED_ID --panel-public-key VERIFIED_BASE64_KEY \
+  --release-key-id PUBLISHER_ID --release-public-key PUBLISHER_BASE64_KEY \
+  --allow-rescue-helper
+```
+
+A service initially installed as root must also specify `--service-user ORIGINAL_NON_ROOT_ACCOUNT`; this account is the demotion target. Pinning trust never changes service identity. Restart the daemon explicitly after preparation so it negotiates the installed host actions; this development work does not restart production services automatically.
+
+For Cloudflare Access, create a root-owned mode 0600 JSON file in a protected directory, containing `cf_access_client_id` and `cf_access_client_secret`. Pass its absolute path as `trust --access-config PATH`. The public trust file contains the path, not the secret. Configure the daemon's own local connection settings as well. Host redirects and insecure TLS are not allowed. This is local transport configuration, not authority to grant privileges.
+
+## Apply and recover
+
+The panel first saves a new revision and obtains fresh 2FA approval. The host tool then requires fresh local PAM authentication and rechecks the current signed approval before claiming and executing its lease:
+
+```sh
+sudo komari-host apply --manifest /etc/komari/services/SERVICE.json --revision N
+sudo komari-host resume --manifest /etc/komari/services/SERVICE.json
+sudo komari-host restore --manifest /etc/komari/services/SERVICE.json
+```
+
+The host tool validates full signatures, agent/service binding, approval generation, hash, action set, nonce, expiry and signed operation lease. It stops the actual service, fences reviewed state roots onto fresh root-owned inodes, writes a canonical service profile, restarts it, and checks real PID/UID, capability bounding/effective sets and NoNewPrivileges. It preserves credentials, UUID, runtime revisions and the safe original working directory. Arbitrary environment overrides, unsafe state parents, nested state roots, links, mounts and special files require an explicit local migration rather than automatic conversion.
+
+The root profile clears the non-root NoNewPrivileges/capability ceiling. The non-root profile uses the original service account, NoNewPrivileges and CAP_NET_RAW. The root-owned policy constrains daemon snapshots during the restart window. A host LOCAL_APPLIED receipt is not final completion: the daemon must load the revision, independently observe its identity/helper and send its own immutable acknowledgement.
+
+`/var/lib/komari-host/SERVICE/transaction.json` (journal schema 3) records state before mutation. It includes backed-up contents and UID/GID/mode; copies and ownership restoration account for newly created state files. Starting restoration first records `restoring`, so interruption cannot re-enter a success path. Restore works locally without needing network connectivity; its recovery receipt is retried later with the same ID and bytes. Superseded success receipts remain in the protected journal for diagnosis. Successful/recovered journals and backups are archived as whole directories; they are not deleted.
+
+An unclaimed operation can only be archived automatically when there were no mutations and the panel explicitly reports it does not exist. Transport/database errors never prove absence. Expired or superseded grants cannot continue increasing privileges; use local recovery. A completed phase-3 operation may be read after expiry solely to reconcile acknowledgements; its original execution lease is never extended.
+
+If an administrator restores after the panel already received the daemon ACK but its response was lost, the panel records RESTORED/failed while retaining its historical applied pointer. The old success cannot be replayed to re-enable the task. Use a new approved revision to reconcile future changes; recovery does not manufacture an applied old revision.
+
+## On-demand rescue helper
+
+The helper is a separate root service, never a setuid daemon or a local arbitrary-command socket. Installing it does not elevate the ordinary daemon. Before applying an approved installation action:
+
+```sh
+sudo komari-host fetch-helper --manifest /etc/komari/services/SERVICE.json --version EXACT_RELEASE_TAG
+sudo komari-host apply --manifest /etc/komari/services/SERVICE.json --revision N
+```
+
+Fetch uses a fixed repository/platform asset, verifies a separately pinned publisher Ed25519 signature and exact version/SHA256, then caches the artifact under `/var/cache/komari/SERVICE/`. Apply verifies it again. Offline artifacts can be used with `--helper-artifact` and `--release-manifest`; starting a grant still requires an online currentness/lease check. No fetched shell script is executed.
+
+The helper independently checks current signed authorization and signed rescue tasks. It withdraws authorization and cancels managed actions when the signed target revokes it or validation/connectivity fails. Root-owned fresh heartbeat, PID start ticks, kernel UID and systemd cgroup are checked separately for installed/running/authorized/lease-ready status. A non-root daemon is not required to readlink a root process's `/proc/PID/exe`. Uninstallation is a separately approved host action.
+
+Actual signed helper release publishing requires repository secret `KOMARI_RELEASE_SIGNING_KEY` (base64 Ed25519 private key, 64 bytes) and repository variable `KOMARI_RELEASE_SIGNING_KEY_ID`. They have not been configured by this development task. The independently verified corresponding public key must be pinned locally. CI test keys cannot authorize production releases.
+
+## Acceptance
+
+`scripts/ci/test-host-transactions.sh` runs only on disposable GitHub runners. It uses actual PAM, real daemon/host/helper binaries, actual systemd services, `/proc` observations and explicit network/process/startup faults. Only the panel is a fixture; its metrics and host-operation contracts must agree with the production API. Backend recovery and error-mapping tests separately exercise the real service/database implementation.
+
+Failure artifacts include build errors, test output, journald/kernel logs and sanitized journal metadata, retained for 30 days. Raw credentials, state backups, signed authorization bundles and passwords are not exported. See the backend's `docs/privileged-stage6-failure-review.md` for the failure analysis. Stage 6 at source `9fe5463` passed complete acceptance in [run 39625269490](https://github.com/r11234567/komari-agent/actions/runs/39625269490), including actual PAM/systemd, promotion/demotion, helper lifecycle, lost receipts, process kills and restoration after a lost final daemon ACK. Subsequent CLI changes have their own regression checks; see [CLI migration](privileged-cli-migration-inventory.md).

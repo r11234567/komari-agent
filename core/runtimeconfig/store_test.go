@@ -8,8 +8,6 @@ import (
 	flags_pkg "github.com/komari-monitor/komari-agent/cmd/flags"
 	"github.com/komari-monitor/komari-agent/core/privileged"
 	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
-	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 
@@ -84,28 +82,19 @@ func TestRemoteControlDefaultsToDeniedForZeroTrustAndRespectsPrivilegedStore(t *
 		t.Fatal("expected RemoteControlEnabled to be false when privileged store has default active settings")
 	}
 
-	// Deliver and promote a privileged revision enabling remote control
-	rev := &configv1.PrivilegedRevision{
-		Revision: 1,
-		Privileged: &configv1.PrivilegedConfig{
-			RemoteControlEnabled: proto.Bool(true),
-		},
-	}
-	if err := privStore.RecordPending(rev); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := privStore.Promote(reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT); err != nil {
-		t.Fatal(err)
-	}
+	// Fixture uses the locally authorized initial baseline; production transport
+	// additionally verifies its signature and protected installation policy.
+	privStore = auditAppliedStore(t)
+	privileged.SetActive(privStore)
 
 	if !RemoteControlEnabled() {
 		t.Fatal("expected RemoteControlEnabled to be true after promoting privileged revision")
 	}
 
-	// Flag override should disable it regardless
+	// An explicit local deny remains authoritative after online approval.
 	flags_pkg.GlobalConfig.DisableRemoteControl = true
 	defer func() { flags_pkg.GlobalConfig.DisableRemoteControl = false }()
 	if RemoteControlEnabled() {
-		t.Fatal("expected RemoteControlEnabled to be false when DisableRemoteControl flag is set")
+		t.Fatal("approved privileged snapshot bypassed local force-deny")
 	}
 }

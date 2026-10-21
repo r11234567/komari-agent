@@ -28,8 +28,7 @@ import (
 const enrollmentTimeout = 15 * time.Minute
 
 var (
-	loginEndpoint string
-	loginNoPin    bool
+	loginNoPin bool
 )
 
 // credentialsPath resolves where credentials live.
@@ -57,9 +56,9 @@ The approval link requires a panel login every time. That is deliberate — it
 is the step where a human decides this machine may join.`,
 	Example: `  komari-agent login --endpoint panel.example.com
   komari-agent login --endpoint https://panel.example.com:8443`,
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		loadFromEnv()
-		endpoint := firstNonEmpty(loginEndpoint, flags.Endpoint)
+		endpoint := flags.Endpoint
 		if strings.TrimSpace(endpoint) == "" {
 			return errors.New("a panel address is required: pass --endpoint panel.example.com")
 		}
@@ -132,8 +131,8 @@ revocation, to check whether this machine can still authenticate.
 
 If the sign-in has fully expired, this cannot recover it: re-enrolling needs
 a human to approve in the panel again. That is the point of an expiry.`,
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		loadFromEnv()
 		store, err := credentials.Open(credentialsPath())
 		if err != nil {
 			return err
@@ -172,14 +171,14 @@ a human to approve in the panel again. That is the point of an expiry.`,
 
 var statusCmd = &cobra.Command{
 	Use:   "status",
-	Short: "Show this machine's enrollment and configuration state",
-	Long: `Show this machine's enrollment and configuration state.
+	Short: "Show this machine's enrollment state",
+	Long: `Show this machine's enrollment state.
 
 Reports which panel this machine belongs to, whether its credentials are
-current, what privileges the Agent holds, and which configuration revision is
-running.`,
+current, and which panel signing keys are pinned. Use config show to inspect
+persisted configuration.`,
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		loadFromEnv()
 		store, err := credentials.Open(credentialsPath())
 		if err != nil {
 			return err
@@ -199,7 +198,7 @@ running.`,
 		now := time.Now()
 		switch {
 		case identity.RefreshExpired(now):
-			fmt.Println("Sign-in:         EXPIRED - run 'komari-agent login' to enroll again")
+			fmt.Println("Sign-in:         EXPIRED - run 'komari-agent reauth' to renew this identity")
 		case identity.NeedsRefresh(now):
 			fmt.Println("Sign-in:         valid, access token renewing")
 		default:
@@ -220,6 +219,7 @@ var logoutCmd = &cobra.Command{
 
 This only affects this host. The machine stays registered in the panel, so
 remove it there as well if you are decommissioning it.`,
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		store, err := credentials.Open(credentialsPath())
 		if err != nil {
@@ -241,6 +241,8 @@ remove it there as well if you are decommissioning it.`,
 
 var trustCmd = &cobra.Command{
 	Use:   "trust",
+	Args:  cobra.NoArgs,
+	RunE:  func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
 	Short: "Inspect and update the panel signing keys this machine accepts",
 	Long: `Inspect and update the panel signing keys this machine accepts.
 
@@ -252,6 +254,7 @@ checks against.`,
 var trustShowCmd = &cobra.Command{
 	Use:   "show",
 	Short: "Show the pinned panel signing keys",
+	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		store, err := credentials.Open(credentialsPath())
 		if err != nil {
@@ -286,8 +289,8 @@ var trustRefreshCmd = &cobra.Command{
 
 Run this after the panel rotates its keys. Compare the printed fingerprints
 against the panel before relying on them: this replaces what the Agent trusts.`,
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		loadFromEnv()
 		store, err := credentials.Open(credentialsPath())
 		if err != nil {
 			return err
@@ -323,8 +326,8 @@ preserves the machine's identity, keypair, and pinned trust bundle.
 Use this instead of 'logout + login' to avoid losing the machine's history
 and configuration in the panel.`,
 	Example: `  komari-agent reauth`,
+	Args:    cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		loadFromEnv()
 		store, err := credentials.Open(credentialsPath())
 		if err != nil {
 			return err
@@ -412,7 +415,6 @@ func firstNonEmpty(values ...string) string {
 }
 
 func init() {
-	loginCmd.Flags().StringVarP(&loginEndpoint, "endpoint", "e", "", "Panel address, for example panel.example.com")
 	loginCmd.Flags().BoolVar(&loginNoPin, "no-pin", false, "Skip pinning the panel signing keys during enrollment")
 	trustCmd.AddCommand(trustShowCmd, trustRefreshCmd)
 	RootCmd.AddCommand(loginCmd, refreshCmd, reauthCmd, statusCmd, logoutCmd, trustCmd)

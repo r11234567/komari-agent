@@ -37,7 +37,7 @@ log_config() {
 
 # Default values
 service_name="komari-agent"
-target_dir="/opt/komari"
+target_dir="/usr/lib/komari/komari-agent"
 github_proxy=""
 release_repository="r11234567/komari-agent"
 install_version="" # New parameter for specifying version
@@ -85,6 +85,10 @@ komari_args=""
 komari_argv=()
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --interval|--interval=*|-i|-i[0-9]*|--memory-include-cache|--memory-include-cache=*|--include-nics|--include-nics=*|--exclude-nics|--exclude-nics=*|--include-mountpoint|--include-mountpoint=*|--month-rotate|--month-rotate=*|--get-ip-addr-from-nic|--get-ip-addr-from-nic=*|--enable-gpu|--enable-gpu=*|--gpu|--gpu=*|--detailed-gpu|--detailed-gpu=*|--max-retries|--max-retries=*|-r|-r[0-9]*|--disable-compression|--disable-compression=*)
+            log_error "Removed agent option: $1; use panel configuration or administrator migration"
+            exit 64
+            ;;
         --install-dir)
             target_dir="$2"
             shift 2
@@ -274,6 +278,79 @@ elif [ "$uninstall_only" != true ] && [ "$runtime_identity" = "service-account" 
         log_error "The existing ${service_user} account has a login shell; refusing installation"
         exit 1
     fi
+fi
+
+# Trusted v2 fresh installs. Existing services must use the explicit migration
+# preview; this path never re-enrolls or replaces their identity/state.
+if [ "$uninstall_only" != true ]; then
+    if [ "$os_name" != linux ] || [ ! -d /run/systemd/system ]; then
+        log_error "Trusted v2 installation currently supports Linux systemd only"
+        exit 1
+    fi
+    if [ "$rescue_enabled" = true ]; then
+        log_error "First install includes komari-host, not the rescue helper; helper installation is not available in this version"
+        exit 1
+    fi
+    if [ -n "$runtime_state_override$credentials_override$privileged_state_override$replay_state_override" ]; then
+        log_error "Custom state paths require an explicit reviewed host migration"
+        exit 1
+    fi
+    if [[ ! "$service_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then exit 1; fi
+    if [ -e "/etc/komari/services/${service_name}.json" ] || systemctl cat "${service_name}.service" >/dev/null 2>&1; then
+        log_error "Service already exists. Preview komari-host migrate --service ${service_name} --legacy-disable preserve instead"
+        exit 1
+    fi
+    [[ "$target_dir" = /* ]] || target_dir="$PWD/$target_dir"
+    ensure_root_dir() {
+        local path="$1" owner mode
+        if [ -L "$path" ]; then log_error "Symlink in trusted path: $path"; exit 1; fi
+        if [ ! -d "$path" ]; then
+            ensure_root_dir "$(dirname "$path")"
+            mkdir -m 755 "$path" || exit 1
+        fi
+        owner=$(stat -c '%u' "$path") || exit 1
+        mode=$(stat -c '%a' "$path") || exit 1
+        if [ "$owner" != 0 ] || (( (8#$mode & 0022) != 0 )); then
+            log_error "Untrusted owner or permissions at $path"; exit 1
+        fi
+        [ "$path" = / ] || ensure_root_dir "$(dirname "$path")"
+    }
+    ensure_root_dir "$target_dir"
+    case "$(uname -m)" in
+        x86_64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; i?86) arch=386 ;;
+        armv7*|armv6*) arch=arm ;; loongarch64) arch=loong64 ;;
+        *) log_error "Unsupported architecture"; exit 1 ;;
+    esac
+    release_base="https://github.com/${release_repository}/releases"
+    if [ -n "$install_version" ]; then
+        release_path="download/${install_version}"
+    else
+        # Resolve latest exactly once so agent and host cannot come from two
+        # releases if a publication happens between downloads.
+        latest_url=$(curl -fsSL -o /dev/null -w '%{url_effective}' "${release_base}/latest") || exit 1
+        install_version="${latest_url##*/}"
+        release_path="download/${install_version}"
+    fi
+    [ -z "$github_proxy" ] || release_base="${github_proxy%/}/${release_base}"
+    for component in komari-agent komari-host; do
+        asset="${component}-linux-${arch}"
+        binary_path="${target_dir}/${component}"
+        if [ -e "$binary_path" ] || [ -L "$binary_path" ]; then
+            log_error "Refusing to overwrite existing binary: $binary_path"; exit 1
+        fi
+        checksum=$(curl -fsSL "${release_base}/${release_path}/${asset}.sha256") || exit 1
+        expected="${checksum%% *}"
+        [[ "$expected" =~ ^[a-fA-F0-9]{64}$ ]] || { log_error "Invalid release checksum"; exit 1; }
+        (umask 077; curl -fsSL -o "$binary_path" "${release_base}/${release_path}/${asset}") || exit 1
+        actual=$(sha256sum "$binary_path") || exit 1
+        [ "${actual%% *}" = "$expected" ] || { log_error "Checksum mismatch for $asset"; exit 1; }
+        chmod 755 "$binary_path" || exit 1
+    done
+    "${target_dir}/komari-host" install --service "$service_name" --user "$service_user" --binary-dir "$target_dir" -- "${komari_argv[@]}" || exit 1
+    ensure_root_dir /usr/local/bin
+    ln -s "${target_dir}/komari-agent" /usr/local/bin/komari-agent 2>/dev/null || true
+    ln -s "${target_dir}/komari-host" /usr/local/bin/komari-host 2>/dev/null || true
+    exit 0
 fi
 
 # Remote command execution and terminal access run with the Agent process

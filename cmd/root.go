@@ -8,9 +8,9 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"reflect"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -23,8 +23,10 @@ import (
 	"github.com/komari-monitor/komari-agent/clientcore"
 	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
 	"github.com/komari-monitor/komari-agent/core/capability"
+	"github.com/komari-monitor/komari-agent/core/hostops"
 	"github.com/komari-monitor/komari-agent/core/privileged"
 	"github.com/komari-monitor/komari-agent/core/runtimeconfig"
+	"github.com/komari-monitor/komari-agent/core/statelock"
 )
 
 var flags = pkg_flags.GlobalConfig
@@ -43,35 +45,70 @@ var RootCmd = &cobra.Command{
 			return err
 		}
 		installedService.apply(flags)
+		if installedService != nil {
+			flags.ServiceManifestFile = installedService.ManifestPath
+		}
+		forceDeny := flags.DisableRemoteControl
 		loadFromEnv()
-		return nil
-	},
-	RunE: func(cmd *cobra.Command, args []string) error {
-		loadFromEnv() // 从环境变量加载配置，覆盖解析
+		forceDeny = forceDeny || flags.DisableRemoteControl
+		// Subcommands use the same bootstrap configuration as the daemon.
 		if flags.ConfigFile != "" {
-			bytes, err := os.ReadFile(flags.ConfigFile)
+			data, err := os.ReadFile(flags.ConfigFile)
 			if err != nil {
-				return fmt.Errorf("failed to read config file: %w", err)
+				return fmt.Errorf("read config file: %w", err)
 			}
-			err = json.Unmarshal(bytes, flags)
-			if err != nil {
-				return fmt.Errorf("failed to parse config file: %w", err)
+			var decodeErr error
+			if installedService != nil && installedService.Version == hostops.ManifestVersion && (flags.ConfigFile == installedService.ConfigFile || flags.ConfigFile == filepath.Join(filepath.Dir(installedService.Executable), "host-bootstrap.json")) {
+				if err := hostops.TrustedPath(flags.ConfigFile); err != nil {
+					return err
+				}
+				decodeErr = json.Unmarshal(data, flags)
+			} else {
+				decodeErr = pkg_flags.DecodeLocalConfig(data, flags)
+			}
+			if decodeErr != nil {
+				return fmt.Errorf("parse config file: %w", decodeErr)
 			}
 		}
+		flags.DisableRemoteControl = flags.DisableRemoteControl || forceDeny
+		return nil
+	},
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		if flags.PreferIPVersion != "" && flags.PreferIPVersion != "4" && flags.PreferIPVersion != "6" {
 			return fmt.Errorf("invalid --prefer-ip-version value %q: expected 4 or 6", flags.PreferIPVersion)
 		}
 		if (flags.CFAccessClientID == "") != (flags.CFAccessClientSecret == "") {
 			return errors.New("Cloudflare Access client ID and client secret must be configured together")
 		}
+		privPath := flags.PrivilegedStateFile
+		if privPath == "" {
+			privPath = privileged.DefaultPath()
+		}
+		release, err := statelock.Acquire(privPath + ".daemon.lock")
+		if err != nil {
+			return err
+		}
+		defer release()
+		runtimePath := flags.RuntimeStateFile
+		if runtimePath == "" {
+			runtimePath = runtimeconfig.DefaultStatePath()
+		}
+		releaseRuntime, err := statelock.Acquire(runtimePath + ".daemon.lock")
+		if err != nil {
+			return err
+		}
+		defer releaseRuntime()
 		runtimeStore, err := runtimeconfig.New(runtimeconfig.FromFlags(flags), flags.RuntimeStateFile)
 		if err != nil {
 			return fmt.Errorf("failed to initialize runtime config: %w", err)
 		}
 		runtimeconfig.SetActive(runtimeStore)
-		if privStore, err := privileged.Open(flags.PrivilegedStateFile); err == nil && privStore != nil {
-			privileged.SetActive(privStore)
+		privStore, err := privileged.Open(flags.PrivilegedStateFile)
+		if err != nil {
+			return fmt.Errorf("load privileged state: %w", err)
 		}
+		privileged.SetActive(privStore)
 		// 捕获中止信号，优雅退出
 		stopCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
@@ -182,39 +219,9 @@ func Execute() {
 }
 
 func init() {
-	RootCmd.PersistentFlags().StringVarP(&flags.Token, "token", "t", "", "API token")
-	RootCmd.PersistentFlags().StringVarP(&flags.Endpoint, "endpoint", "e", "", "API endpoint")
-	RootCmd.PersistentFlags().StringVar(&flags.AutoDiscoveryKey, "auto-discovery", "", "Auto discovery key for the agent")
-	RootCmd.PersistentFlags().StringVar(&flags.ServerName, "server-name", "", "Server display name used for the first auto-discovery registration")
-	RootCmd.PersistentFlags().BoolVar(&flags.DisableAutoUpdate, "disable-auto-update", false, "Disable automatic updates")
-	RootCmd.PersistentFlags().BoolVar(&flags.DisableRemoteControl, "disable-remote-control", false, "Disable remote control (WebSSH and remote execution)")
-	RootCmd.PersistentFlags().Float64VarP(&flags.Interval, "interval", "i", 3.0, "Interval in seconds")
-	RootCmd.PersistentFlags().BoolVarP(&flags.IgnoreUnsafeCert, "ignore-unsafe-cert", "u", false, "Ignore unsafe certificate errors")
-	RootCmd.PersistentFlags().IntVarP(&flags.MaxRetries, "max-retries", "r", 3, "Maximum number of retries")
-	RootCmd.PersistentFlags().IntVarP(&flags.ReconnectInterval, "reconnect-interval", "c", 5, "Reconnect interval in seconds")
-	RootCmd.PersistentFlags().IntVar(&flags.InfoReportInterval, "info-report-interval", 5, "Interval in minutes for reporting basic info")
-	RootCmd.PersistentFlags().StringVar(&flags.IncludeNics, "include-nics", "", "Comma-separated list of network interfaces to include")
-	RootCmd.PersistentFlags().StringVar(&flags.ExcludeNics, "exclude-nics", "", "Comma-separated list of network interfaces to exclude")
-	RootCmd.PersistentFlags().StringVar(&flags.IncludeMountpoints, "include-mountpoint", "", "Semicolon-separated list of mount points to include for disk statistics")
-	RootCmd.PersistentFlags().IntVar(&flags.MonthRotate, "month-rotate", 0, "Month reset for network statistics (0 to disable)")
-	RootCmd.PersistentFlags().BoolVar(&flags.MemoryIncludeCache, "memory-include-cache", false, "Include cache/buffer in memory usage")
-	RootCmd.PersistentFlags().StringVar(&flags.CustomDNS, "custom-dns", "", "Custom DNS server to use (e.g. 8.8.8.8, 114.114.114.114). By default, the program uses the system DNS resolver.")
-	RootCmd.PersistentFlags().StringVar(&flags.CFAccessClientID, "cf-access-client-id", "", "Cloudflare Access service-token Client ID")
-	RootCmd.PersistentFlags().StringVar(&flags.CFAccessClientSecret, "cf-access-client-secret", "", "Cloudflare Access service-token Client Secret")
-	RootCmd.PersistentFlags().BoolVar(&flags.EnableGPU, "enable-gpu", false, "Enable basic GPU monitoring")
-	RootCmd.PersistentFlags().BoolVar(&flags.DetailedGPU, "detailed-gpu", false, "Enable detailed GPU monitoring (requires --enable-gpu)")
-	RootCmd.PersistentFlags().BoolVar(&flags.ShowWarning, "show-warning", false, "Show security warning on Windows, run once as a subprocess")
-	RootCmd.PersistentFlags().StringVar(&flags.CustomIpv4, "custom-ipv4", "", "Custom IPv4 address to use")
-	RootCmd.PersistentFlags().StringVar(&flags.CustomIpv6, "custom-ipv6", "", "Custom IPv6 address to use")
-	RootCmd.PersistentFlags().BoolVar(&flags.GetIpAddrFromNic, "get-ip-addr-from-nic", false, "Get IP address from network interface")
-	RootCmd.PersistentFlags().StringVar(&flags.ConfigFile, "config", "", "Path to the configuration file")
-	RootCmd.PersistentFlags().BoolVar(&flags.DisableCompression, "disable-compression", false, "Disable gzip/permessage-deflate compression")
-	RootCmd.PersistentFlags().StringVar(&flags.PreferIPVersion, "prefer-ip-version", "", "Prefer IP version for dashboard connections: 4 or 6")
-	RootCmd.PersistentFlags().StringVar(&flags.RuntimeStateFile, "runtime-state-file", "", "Path for persisted online runtime configuration snapshots")
-	RootCmd.PersistentFlags().StringVar(&flags.PrivilegedStateFile, "privileged-state-file", "", "Path for persisted privileged configuration state")
-	RootCmd.PersistentFlags().StringVar(&flags.CredentialsFile, "credentials-file", "", "Path for persisted enrollment credentials")
-	RootCmd.PersistentFlags().StringVar(&flags.ReplayStateFile, "replay-state-file", "", "Path for the record of executed signed instructions, which prevents replays")
-	RootCmd.PersistentFlags().ParseErrorsWhitelist.UnknownFlags = true
+	pkg_flags.RegisterLocalFlags(RootCmd.PersistentFlags(), flags)
+	RootCmd.PersistentFlags().StringVar(&serviceManifestPath, "service-manifest", "", "Explicit installed service manifest (shared by all commands)")
+	RootCmd.PersistentFlags().BoolVar(&standaloneMode, "standalone", false, "Use standalone bootstrap paths when no installed service manifest exists")
 }
 
 func loadFromEnv() {
@@ -242,8 +249,8 @@ func loadFromEnv() {
 		case reflect.String:
 			field.SetString(envValue)
 		case reflect.Bool:
-			if strings.ToLower(envValue) == "true" || envValue == "1" {
-				field.SetBool(true)
+			if value, err := strconv.ParseBool(envValue); err == nil {
+				field.SetBool(value)
 			}
 		case reflect.Int:
 			if intVal, err := strconv.Atoi(envValue); err == nil {

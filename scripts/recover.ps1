@@ -1,5 +1,5 @@
 param(
-  [ValidateSet("version", "verify", "diagnostics", "show-config", "rollback-config")]
+  [ValidateSet("version", "verify", "diagnostics")]
   [string]$Action = "diagnostics",
   [string]$AgentBin = $env:KOMARI_AGENT_BIN,
   [Parameter(ValueFromRemainingArguments = $true)]

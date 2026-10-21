@@ -122,7 +122,7 @@ func GetIPv6Address() (string, error) {
 }
 
 func GetIPAddress() (ipv4, ipv6 string, err error) {
-	getIPFromNic := flags.GetIpAddrFromNic || runtimeconfig.Current().GetIPAddrFromNIC
+	getIPFromNic := runtimeconfig.Current().GetIPAddrFromNIC
 	if getIPFromNic {
 		allowNics, err := InterfaceList()
 		if err != nil {

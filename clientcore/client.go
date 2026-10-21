@@ -4,7 +4,6 @@
 package clientcore
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -12,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,6 +23,7 @@ import (
 	"github.com/komari-monitor/komari-agent/core/capability"
 	"github.com/komari-monitor/komari-agent/core/credentials"
 	"github.com/komari-monitor/komari-agent/core/enrollment"
+	"github.com/komari-monitor/komari-agent/core/hostops"
 	"github.com/komari-monitor/komari-agent/core/privileged"
 	"github.com/komari-monitor/komari-agent/core/runtimeconfig"
 	"github.com/komari-monitor/komari-agent/core/signing"
@@ -38,6 +39,7 @@ import (
 	configv1connect "github.com/r11234567/komari-proto/gen/go/komari/config/v1/configv1connect"
 	execv1 "github.com/r11234567/komari-proto/gen/go/komari/exec/v1"
 	execv1connect "github.com/r11234567/komari-proto/gen/go/komari/exec/v1/execv1connect"
+	hostv1connect "github.com/r11234567/komari-proto/gen/go/komari/host/v1/hostv1connect"
 	metricsv1 "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1"
 	metricsv1connect "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1/metricsv1connect"
 	networkv1 "github.com/r11234567/komari-proto/gen/go/komari/network/v1"
@@ -63,6 +65,14 @@ var (
 )
 
 type Client struct {
+	host         hostv1connect.HostServiceClient
+	hostManifest *hostops.Manifest
+	hostPolicy   *hostops.Policy
+	hostTrust    *hostops.Trust
+	startupID    string
+	receiptMu    sync.Mutex
+	privilegedMu sync.Mutex
+
 	config     configv1connect.ConfigServiceClient
 	privileged configv1connect.PrivilegedDeliveryServiceClient
 	events     agentv1connect.AgentEventServiceClient
@@ -79,9 +89,8 @@ type Client struct {
 	agentID    string
 	sequence   atomic.Uint64
 	store      *runtimeconfig.Store
-	// privilegedStore records privileged revisions without applying them. The
-	// Agent only ever writes a pending revision here; promoting it is an
-	// explicit local decision made through the CLI.
+	// privilegedStore is daemon-owned. Only a verified current v2 approval can
+	// activate a same-identity candidate; host actions remain unavailable.
 	privilegedStore *privileged.Store
 	// credentialStore holds the enrolled identity, including the panel signing
 	// keys this Agent pinned. It is what makes a delivered instruction
@@ -115,7 +124,17 @@ func (c *Client) identity() (credentials.Identity, bool) {
 	if c.credentialStore == nil {
 		return credentials.Identity{}, false
 	}
-	return c.credentialStore.Identity()
+	id, ok := c.credentialStore.Identity()
+	if ok && c.hostTrust != nil {
+		if id.AgentID != c.hostTrust.AgentID || id.Endpoint != c.hostTrust.Endpoint {
+			return credentials.Identity{}, false
+		}
+		id.ControlPlaneKeys = c.hostTrust.PanelKeys
+		id.PolicyAlgorithms = []int32{1}
+		id.PolicyRequireAll = false
+		id.PolicyMinimumSignatures = 1
+	}
+	return id, ok
 }
 
 func (c *Client) tokenValue() string {
@@ -194,6 +213,8 @@ func (c *Client) rememberAgentID(agentID string) {
 	c.agentMu.Unlock()
 }
 
+var processStartupID = uuid.NewString()
+
 func New(config *flags_pkg.Config, store *runtimeconfig.Store) (*Client, error) {
 	// A credential store holds the enrolled identity (from device-code login).
 	// Open it first so an Agent started without CLI flags can load its persisted
@@ -254,6 +275,7 @@ func New(config *flags_pkg.Config, store *runtimeconfig.Store) (*Client, error) 
 		privileged.SetActive(privilegedStore)
 	}
 	c := &Client{
+		startupID:       processStartupID,
 		endpoint:        endpoint,
 		token:           token,
 		agentID:         agentID,
@@ -267,6 +289,33 @@ func New(config *flags_pkg.Config, store *runtimeconfig.Store) (*Client, error) 
 	networkHTTPClient := dnsresolver.GetHTTPClientWithPreference(35*time.Second, config.PreferIPVersion)
 	streamHTTPClient := dnsresolver.GetStreamingHTTPClientWithPreference(config.PreferIPVersion)
 
+	c.host = hostv1connect.NewHostServiceClient(wrapWithDPoP(httpClient, c), baseURL)
+	if config.ServiceManifestFile != "" {
+		m, e := hostops.ReadManifest(config.ServiceManifestFile)
+		if e == nil {
+			c.hostPolicy, e = hostops.ReadPolicy(m)
+			if e == nil {
+				c.hostManifest = m
+			}
+		}
+		if e != nil {
+			log.Printf("Privileged v2 installation policy unavailable: %v", e)
+		}
+		if c.hostManifest != nil {
+			trust, trustErr := hostops.ReadTrust(c.hostManifest)
+			if trustErr == nil {
+				if trust.AgentID != agentID || trust.Endpoint != endpoint {
+					return nil, errors.New("enrollment identity differs from protected host trust")
+				}
+				c.hostTrust = trust
+				if err := c.validatePersistedPrivileged(); err != nil {
+					return nil, err
+				}
+			} else if !os.IsNotExist(trustErr) {
+				return nil, fmt.Errorf("protected host trust invalid: %w", trustErr)
+			}
+		}
+	}
 	c.config = configv1connect.NewConfigServiceClient(wrapWithDPoP(streamHTTPClient, c), baseURL)
 	c.privileged = configv1connect.NewPrivilegedDeliveryServiceClient(wrapWithDPoP(streamHTTPClient, c), baseURL)
 	c.events = agentv1connect.NewAgentEventServiceClient(wrapWithDPoP(streamHTTPClient, c), baseURL)
@@ -283,6 +332,11 @@ func (c *Client) Run(ctx context.Context) error {
 	// Startup trust bundle self-healing: ensure control plane keys are pinned
 	_ = c.ensureTrustBundle(ctx)
 
+	initPending := false
+	if err := c.initializeHost(ctx); err != nil {
+		initPending = true
+		log.Printf("Host protocol/baseline initialization pending: %v", err)
+	}
 	// Startup is where a rejection is most expensive: returning an error here
 	// sends the caller back through New + the whole handshake, so a panel that
 	// is rate limiting or briefly refusing the token would be re-handshaked at
@@ -338,18 +392,18 @@ func (c *Client) Run(ctx context.Context) error {
 		}()
 	}
 	capabilities := capability.Detect(runtimeconfig.RemoteControlEnabled())
+	if initPending {
+		start(c.runHostInitialization)
+	}
 	start(c.runAgentEvents)
 	start(c.runConfigUpdates)
+	start(c.runReceiptOutbox)
 	if c.privilegedStore != nil {
 		start(c.runPrivilegedUpdates)
 	}
 	start(c.runPingProbes)
-	if capabilities.Execution != nil && capabilities.Execution.Available {
-		start(c.runExecutions)
-	}
-	if capabilities.Webssh != nil && capabilities.Webssh.Available {
-		start(c.runRemoteSessions)
-	}
+	start(c.runExecutions)
+	start(c.runRemoteSessions)
 	if capabilities.ReturnRouteProbe != nil && capabilities.ReturnRouteProbe.Available {
 		start(c.runReturnRouteProbes)
 	}
@@ -510,18 +564,13 @@ func (c *Client) runConfigUpdates(ctx context.Context) {
 	}
 }
 
-// runPrivilegedUpdates records privileged revisions delivered by the panel.
-//
-// This loop deliberately never applies anything. Its whole job is to persist
-// what was delivered so an operator on the host can see a pending change and
-// decide about it through the CLI. An Agent that applied these on receipt
-// would let whoever controls the panel widen privileges on every machine at
-// once, which is the failure this separation exists to prevent.
+// runPrivilegedUpdates follows approval changes, including changes to the same revision.
 func (c *Client) runPrivilegedUpdates(ctx context.Context) {
 	var retry retryPolicy
+	var sequence uint64
 	for ctx.Err() == nil {
 		req := connect.NewRequest(&configv1.WatchPrivilegedDeliveryRequest{
-			AgentId: c.agentIDValue(), AfterRevision: c.privilegedStore.State().AppliedRevision,
+			AgentId: c.agentIDValue(), ProtocolVersion: 2, AfterSequence: sequence,
 		})
 		c.authorize(req.Header())
 		stream, err := c.privileged.WatchPrivilegedDelivery(ctx, req)
@@ -543,8 +592,12 @@ func (c *Client) runPrivilegedUpdates(ctx context.Context) {
 			}
 			c.rememberAgentID(revision.GetAgentId())
 			if err := c.recordPrivilegedRevision(ctx, revision); err != nil {
-				log.Printf("Failed to record privileged revision %d: %v", revision.GetRevision(), err)
+				log.Printf("Failed to apply privileged revision %d: %v", revision.GetRevision(), err)
+				sequence = 0
+				stream.Close()
+				break
 			}
+			sequence = stream.Msg().UpdateSequence
 		}
 		if received {
 			retry.Reset()
@@ -556,135 +609,6 @@ func (c *Client) runPrivilegedUpdates(ctx context.Context) {
 			return
 		}
 	}
-}
-
-// recordPrivilegedRevision stores a delivered revision and reports the state
-// it is waiting in.
-//
-// An automatic class is reported as failed rather than applied. The panel
-// classifies, but these settings are privileged by construction, so a
-// revision claiming it needs no human is a classification the Agent must not
-// honour: doing so would turn the panel's mistake into a silent privilege
-// grant.
-func (c *Client) recordPrivilegedRevision(parent context.Context, revision *configv1.PrivilegedRevision) error {
-	state := configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_NEEDS_CONFIRMATION
-	var detail *commonv1.ErrorDetail
-
-	// Verification happens before the revision is stored. A revision that
-	// cannot be attributed to the panel this Agent enrolled with is refused
-	// outright rather than recorded as pending: leaving it visible to the
-	// operator would invite them to approve something nobody vouched for.
-	if err := c.verifyPrivilegedRevision(revision); err != nil {
-		return c.reportPrivilegedState(parent, revision.GetRevision(),
-			configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_FAILED,
-			&commonv1.ErrorDetail{Code: "PRIVILEGED_SIGNATURE_REJECTED", Message: err.Error()})
-	}
-
-	recordErr := c.privilegedStore.RecordPending(revision)
-	switch {
-	case recordErr != nil:
-		state = configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_FAILED
-		detail = &commonv1.ErrorDetail{Code: "PRIVILEGED_REJECTED", Message: recordErr.Error()}
-	case revision.GetPlan().GetUpgradeClass() == configv1.UpgradeClass_UPGRADE_CLASS_AUTOMATIC:
-		state = configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_FAILED
-		detail = &commonv1.ErrorDetail{
-			Code:    "PRIVILEGED_REQUIRES_LOCAL_APPROVAL",
-			Message: "privileged settings are never applied automatically; run komari-agent upgrade on the host",
-		}
-	case revision.GetPlan().GetUpgradeClass() == configv1.UpgradeClass_UPGRADE_CLASS_MANUAL_PRIVILEGED:
-		state = configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_NEEDS_MANUAL_AUTHORIZATION
-	}
-
-	if err := c.reportPrivilegedState(parent, revision.GetRevision(), state, detail); err != nil {
-		return err
-	}
-	if recordErr != nil {
-		return recordErr
-	}
-	return nil
-}
-
-// reportPrivilegedState tells the panel which state a revision is waiting in.
-func (c *Client) reportPrivilegedState(parent context.Context, revision uint64, state configv1.PrivilegedDeliveryState, detail *commonv1.ErrorDetail) error {
-	ctx, cancel := context.WithTimeout(parent, requestDeadline)
-	defer cancel()
-	report := connect.NewRequest(&configv1.ReportPrivilegedDeliveryRequest{
-		AgentId:             c.agentIDValue(),
-		Revision:            revision,
-		State:               state,
-		FinishedAt:          timestamppb.Now(),
-		ActivePrivilegeMode: capability.Detect(runtimeconfig.RemoteControlEnabled()).GetPrivilegeMode(),
-	})
-	if detail != nil {
-		report.Msg.Errors = []*commonv1.ErrorDetail{detail}
-	}
-	c.authorize(report.Header())
-	if _, err := c.privileged.ReportPrivilegedDelivery(ctx, report); err != nil && !isUnsupported(err) {
-		return err
-	}
-	return nil
-}
-
-// verifyPrivilegedRevision establishes that the panel composed this revision.
-//
-// The check is skipped only when no keys are pinned, which is the state of an
-// Agent enrolled against a panel that does not sign yet. That is a deliberate
-// migration allowance, not a fallback: once an Agent has pinned a key it will
-// never again act on an unsigned revision, so a stripped signature cannot
-// downgrade a configured Agent.
-func (c *Client) verifyPrivilegedRevision(revision *configv1.PrivilegedRevision) error {
-	identity, ok := c.identity()
-	if !ok || len(identity.ControlPlaneKeys) == 0 {
-		if err := c.ensureTrustBundle(context.Background()); err == nil {
-			identity, ok = c.identity()
-		}
-	}
-	if !ok || len(identity.ControlPlaneKeys) == 0 {
-		return errors.New("no control plane signing keys are pinned; cannot verify privileged revision")
-	}
-	envelope := revision.GetSignature()
-	if envelope == nil {
-		return errors.New("the panel sent a privileged revision without a signature, but this Agent has pinned signing keys")
-	}
-	verifier := signing.New(identity, c.replayGuard)
-	instruction, err := verifier.Verify(envelope)
-	if err != nil {
-		return err
-	}
-	// The signature covers an instruction, and that instruction has to be
-	// about this revision. Without this a valid signature over revision 3
-	// would authorize revision 4.
-	if instruction.InstructionType != privilegedInstructionType {
-		return fmt.Errorf("the signature authorizes %q, not a privileged configuration change", instruction.InstructionType)
-	}
-	if !bytes.Equal(instruction.Body, privilegedRevisionBody(revision)) {
-		return errors.New("the signature does not match the delivered privileged configuration")
-	}
-	return nil
-}
-
-// privilegedInstructionType names what a privileged revision signature covers.
-const privilegedInstructionType = "komari.config.v1.PrivilegedRevision"
-
-// privilegedRevisionBody is the canonical bytes a signature commits to.
-//
-// The settings and the revision number are covered, so neither the contents
-// nor the ordering can be altered under a valid signature. Deterministic
-// marshalling matters here: protobuf field ordering is not guaranteed
-// otherwise, and a re-serialization that differed would reject a legitimate
-// revision.
-func privilegedRevisionBody(revision *configv1.PrivilegedRevision) []byte {
-	body := &configv1.PrivilegedRevision{
-		AgentId:    revision.GetAgentId(),
-		Revision:   revision.GetRevision(),
-		Privileged: revision.GetPrivileged(),
-		Plan:       revision.GetPlan(),
-	}
-	encoded, err := proto.MarshalOptions{Deterministic: true}.Marshal(body)
-	if err != nil {
-		return nil
-	}
-	return encoded
 }
 
 func (c *Client) runConfigPolling(ctx context.Context) {
@@ -718,6 +642,9 @@ func (c *Client) runExecutions(ctx context.Context) {
 	var jobs sync.Map
 	var retry retryPolicy
 	for ctx.Err() == nil {
+		if !waitForCapability(ctx, capability.ExecutionAllowed) {
+			continue
+		}
 		req := connect.NewRequest(&execv1.LeaseExecutionRequest{AgentId: c.agentIDValue()})
 		c.authorize(req.Header())
 		stream, err := c.execution.LeaseExecution(ctx, req)
@@ -739,6 +666,9 @@ func (c *Client) runExecutions(ctx context.Context) {
 			}
 			assignment := message.Assignment
 			if assignment == nil || assignment.Execution == nil || assignment.Envelope == nil {
+				continue
+			}
+			if ok, _ := capability.ExecutionAllowed(); !ok {
 				continue
 			}
 			spec, err := c.verifyExecutionAssignment(assignment)
@@ -926,6 +856,9 @@ func (c *Client) runRemoteSessions(ctx context.Context) {
 	semaphore := make(chan struct{}, 4)
 	var retry retryPolicy
 	for ctx.Err() == nil {
+		if !waitForCapability(ctx, capability.WebSSHAllowed) {
+			continue
+		}
 		req := connect.NewRequest(&websshv1.LeaseSessionsRequest{AgentId: c.agentIDValue()})
 		c.authorize(req.Header())
 		stream, err := c.webssh.LeaseSessions(ctx, req)
@@ -940,6 +873,9 @@ func (c *Client) runRemoteSessions(ctx context.Context) {
 			received = true
 			assignment := stream.Msg().Assignment
 			if assignment == nil {
+				continue
+			}
+			if ok, _ := capability.WebSSHAllowed(); !ok {
 				continue
 			}
 			select {
@@ -978,6 +914,7 @@ func (c *Client) attachRemoteSession(ctx context.Context, assignment *websshv1.S
 	defer pty.Close()
 	sessionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	go capability.CancelOnRevocation(sessionCtx, cancel, capability.WebSSHAllowed)
 	stream := c.webssh.AttachSession(sessionCtx)
 	c.authorize(stream.RequestHeader())
 	if err := stream.Send(&websshv1.AttachSessionRequest{Message: &websshv1.AttachSessionRequest_Attach{Attach: &websshv1.AgentSessionAttach{
@@ -1059,6 +996,9 @@ func (c *Client) attachRemoteSession(ctx context.Context, assignment *websshv1.S
 		response, err := stream.Receive()
 		if err != nil {
 			return err
+		}
+		if ok, reason := capability.WebSSHAllowed(); !ok {
+			return fmt.Errorf("WebSSH authorization withdrawn: %s", reason)
 		}
 		switch command := response.Command.(type) {
 		case *websshv1.AttachSessionResponse_Input:
@@ -1442,26 +1382,24 @@ func (c *Client) applyDesiredConfig(parent context.Context, desired *configv1.De
 		return nil
 	}
 	c.rememberAgentID(desired.AgentId)
-	_, applyErr := c.store.Apply(desired)
-	status := configv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_APPLIED
-	if applyErr != nil {
-		status = configv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_REJECTED
-	}
-	ackCtx, ackCancel := context.WithTimeout(parent, requestDeadline)
-	defer ackCancel()
-	ack := connect.NewRequest(&configv1.AcknowledgeConfigRequest{
-		AgentId: c.agentIDValue(), Revision: desired.Revision, Status: status, FinishedAt: timestamppb.Now(),
-	})
-	if applyErr != nil {
-		ack.Msg.Errors = []*commonv1.ErrorDetail{{Code: "CONFIG_REJECTED", Message: applyErr.Error()}}
-	}
-	c.authorize(ack.Header())
-	if _, err := c.config.AcknowledgeConfig(ackCtx, ack); err != nil {
+	ack := &configv1.AcknowledgeConfigRequest{AgentId: c.agentIDValue(), Revision: desired.Revision, Status: configv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_APPLIED, FinishedAt: timestamppb.Now()}
+	payload, err := proto.Marshal(ack)
+	if err != nil {
 		return err
 	}
-	// A rejected configuration is a successfully acknowledged business terminal
-	// state. Continue reporting with the previous immutable snapshot.
-	return nil
+	_, applyErr := c.store.ApplyWithReceipt(desired, payload)
+	if applyErr != nil {
+		ack.Status = configv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_REJECTED
+		ack.Errors = []*commonv1.ErrorDetail{{Code: "CONFIG_REJECTED", Message: applyErr.Error()}}
+		payload, err = proto.Marshal(ack)
+		if err != nil {
+			return err
+		}
+		if err = c.store.QueueReceipt(payload); err != nil {
+			return err
+		}
+	}
+	return c.flushReceipts(parent)
 }
 
 func (c *Client) authorize(headers http.Header) {
