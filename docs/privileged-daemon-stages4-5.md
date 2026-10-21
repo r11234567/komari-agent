@@ -20,6 +20,8 @@ CI 不在本机运行重测试：
 - scripts/ci/run-privileged-audit.py：原 6 项缺陷全部提升为强制成功的正式测试，不再期望失败。
 - scripts/ci/test-approved-delivery.sh：一次性 GitHub runner 中真实 root-owned policy + 签名 Connect；覆盖接收不批准、篡改、过期当前性、同身份分项入口、force-deny、丢 ACK 和重启原样重试。它验证本机策略文件和传输/daemon 逻辑，不冒充 PAM/真实服务提权验收。
 - scripts/ci/test-trusted-install.sh：真实 systemd 元数据的新安装/旧安装迁移；程序/策略不可由 daemon 修改，旧状态文件 hash 不变。
-- Windows/macOS/FreeBSD 的 daemon/host 跨编译；新安装及 host 动作只开放 Linux systemd。
+- Windows/macOS/FreeBSD 的 daemon/host 跨编译；Windows runner 另外实际运行 state persistence/process-lock 回归（修复目录 File.Sync 的兼容性）；新安装及 host 动作只开放 Linux systemd。
 
 每次运行都上传日志 artifact，保留 30 天。生产 FRA、历史任务和运行服务未修改。后续阶段 6 才实现 PAM/系统认证、root 档案转换、helper 安装、完整 host transaction 与故障恢复；当前 komari-host apply 明确报未实现。
+
+最终源码与 Windows 实际测试均通过：https://github.com/r11234567/komari-agent/actions/runs/39604002086；CodeQL：https://github.com/r11234567/komari-agent/actions/runs/39604002039。
