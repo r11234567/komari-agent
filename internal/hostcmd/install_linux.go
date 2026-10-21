@@ -33,7 +33,7 @@ func install(args []string, out io.Writer) error {
 	}
 	defer unlock()
 
-	if !hostops.ValidService(*service) || !hostops.ValidService(*account) {
+	if !hostops.ValidService(*service) || strings.HasSuffix(*service, ".service") || !hostops.ValidService(*account) {
 		return errors.New("invalid service or account name")
 	}
 	manifestPath := filepath.Join(hostops.Registry, *service+".json")
@@ -61,16 +61,6 @@ func install(args []string, out io.Writer) error {
 		return errors.New("service account must not be UID 0")
 	}
 	stateDir := filepath.Join("/var/lib/komari", *service)
-	if err = ensureTrustedDir(filepath.Dir(stateDir)); err != nil {
-		return err
-	}
-	// Fresh installs must not reuse or chown an existing directory or symlink.
-	if err = os.Mkdir(stateDir, 0o700); err != nil {
-		return fmt.Errorf("create fresh state directory: %w", err)
-	}
-	if err = os.Chown(stateDir, uid, gid); err != nil {
-		return err
-	}
 	m := hostops.Manifest{Version: 2, ServiceName: *service, ServiceUser: *account, InitSystem: "systemd", Executable: filepath.Join(*bindir, "komari-agent"), HostTool: filepath.Join(*bindir, "komari-host"), HostPolicyFile: filepath.Join(hostops.Registry, *service+".policy.json"), CredentialsFile: filepath.Join(stateDir, "credentials.json"), RuntimeStateFile: filepath.Join(stateDir, "runtime-config.json"), PrivilegedStateFile: filepath.Join(stateDir, "privileged.json"), ReplayStateFile: filepath.Join(stateDir, "nonces.json")}
 	argv := fs.Args()
 	mode := int32(2)
@@ -79,6 +69,9 @@ func install(args []string, out io.Writer) error {
 	}
 	p := hostops.Policy{Version: 2, ServiceID: *service, PrivilegeMode: mode, AllowRemoteControl: true, AllowWebSSH: true, AllowExecution: true, AllowGPU: true, DisableSource: "explicit-local-install"}
 	for i := 0; i < len(argv); i++ {
+		if strings.ContainsAny(argv[i], "\r\n\x00") {
+			return errors.New("control characters in installer arguments")
+		}
 		key, val, has := strings.Cut(argv[i], "=")
 		switch key {
 		case "--privileged-state-file", "--runtime-state-file", "--credentials-file", "--replay-state-file":
@@ -91,7 +84,13 @@ func install(args []string, out io.Writer) error {
 					return err
 				}
 			}
-		case "--gpu":
+		case "--enable-gpu", "--gpu":
+			if key == "--gpu" {
+				argv[i] = "--enable-gpu"
+				if has {
+					argv[i] += "=" + val
+				}
+			}
 			p.BaselineGPU = true
 			if has {
 				p.BaselineGPU, err = strconv.ParseBool(val)
@@ -102,6 +101,24 @@ func install(args []string, out io.Writer) error {
 		}
 	}
 	argv = append(argv, "--runtime-state-file", m.RuntimeStateFile, "--credentials-file", m.CredentialsFile, "--privileged-state-file", m.PrivilegedStateFile, "--replay-state-file", m.ReplayStateFile)
+	// All argument/unit collisions are checked before writing metadata or
+	// changing ownership, so a rejected install does not leave a registered node.
+	unitPath := filepath.Join("/etc/systemd/system", *service+".service")
+	for _, path := range []string{unitPath, m.HostPolicyFile, filepath.Join(*bindir, "service-config.json")} {
+		if _, e := os.Lstat(path); !os.IsNotExist(e) {
+			return fmt.Errorf("installation destination already exists or is inaccessible: %s", path)
+		}
+	}
+	if err = ensureTrustedDir(filepath.Dir(stateDir)); err != nil {
+		return err
+	}
+	// Fresh installs must not reuse or chown an existing directory or symlink.
+	if err = os.Mkdir(stateDir, 0o700); err != nil {
+		return fmt.Errorf("create fresh state directory: %w", err)
+	}
+	if err = os.Chown(stateDir, uid, gid); err != nil {
+		return err
+	}
 	for _, dir := range []string{hostops.Registry, "/var/lib/komari-host", "/run/komari"} {
 		if err = ensureTrustedDir(dir); err != nil {
 			return err
@@ -129,7 +146,7 @@ func install(args []string, out io.Writer) error {
 	if err = ensureTrustedDir("/etc/systemd/system"); err != nil {
 		return err
 	}
-	unitPath := filepath.Join("/etc/systemd/system", *service+".service")
+
 	if _, err = os.Lstat(unitPath); !os.IsNotExist(err) {
 		return errors.New("systemd service already exists; use migrate")
 	}

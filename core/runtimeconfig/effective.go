@@ -1,6 +1,7 @@
 package runtimeconfig
 
 import (
+	"fmt"
 	flags_pkg "github.com/komari-monitor/komari-agent/cmd/flags"
 	"github.com/komari-monitor/komari-agent/core/hostops"
 	"github.com/komari-monitor/komari-agent/core/privileged"
@@ -14,6 +15,8 @@ type EffectiveConfig struct {
 	Runtime       Snapshot            `json:"runtime"`
 	Privileged    privileged.Settings `json:"privileged"`
 	Source        string              `json:"privileged_source"`
+	Sources       map[string]string   `json:"sources"`
+	Blocked       map[string]string   `json:"blocked,omitempty"`
 	BlockedReason string              `json:"blocked_reason,omitempty"`
 }
 
@@ -35,11 +38,21 @@ func Effective() EffectiveConfig {
 	if store := active.Load(); store != nil {
 		raw = store.Current()
 	}
-	result := EffectiveConfig{Runtime: raw, Source: "bootstrap flags"}
+	result := EffectiveConfig{Runtime: raw, Source: "bootstrap flags", Sources: map[string]string{}, Blocked: map[string]string{}}
+	runtimeSource := "bootstrap flags"
+	if raw.Revision > 0 {
+		runtimeSource = fmt.Sprintf("applied runtime r%d", raw.Revision)
+	}
+	for _, field := range []string{"memory_include_cache", "detailed_gpu", "include_nics", "exclude_nics", "include_mountpoints", "report_interval", "traffic_reset_day", "get_ip_addr_from_nic"} {
+		result.Sources[field] = runtimeSource
+	}
 	result.Privileged = privileged.Settings{RemoteControlEnabled: raw.RemoteControlEnabled, WebSSHEnabled: raw.RemoteControlEnabled, ExecutionEnabled: raw.RemoteControlEnabled, EnableGPU: raw.EnableGPU}
 	if store := privileged.ActiveStore(); store != nil {
 		result.Privileged = store.Effective()
 		result.Source = "applied privileged snapshot intersected with signed pending restrictions"
+	}
+	for _, field := range []string{"remote_control_enabled", "webssh_enabled", "execution_enabled", "enable_gpu", "rescue_helper_enabled", "required_privilege_mode"} {
+		result.Sources[field] = result.Source
 	}
 	if flags_pkg.GlobalConfig.ServiceManifestFile != "" {
 		p, err := CurrentPolicy()
@@ -48,6 +61,12 @@ func Effective() EffectiveConfig {
 			result.BlockedReason = "protected installation policy unavailable: " + err.Error()
 		} else {
 			s := &result.Privileged
+			for field, denied := range map[string]bool{"remote_control_enabled": !p.AllowRemoteControl || p.ForceDenyRemoteControl, "webssh_enabled": !p.AllowWebSSH, "execution_enabled": !p.AllowExecution, "enable_gpu": !p.AllowGPU, "rescue_helper_enabled": true} {
+				if denied {
+					result.Blocked[field] = "protected local policy"
+				}
+			}
+
 			if s.RequiredPrivilegeMode != 0 && int32(s.RequiredPrivilegeMode) != p.PrivilegeMode {
 				result.Privileged = privileged.Settings{}
 				result.BlockedReason = "applied identity differs from protected installation policy"
@@ -62,6 +81,11 @@ func Effective() EffectiveConfig {
 			}
 		}
 	}
+	if result.BlockedReason != "" {
+		result.Blocked["privileged"] = result.BlockedReason
+	}
+	result.Privileged.WebSSHEnabled = result.Privileged.RemoteControlEnabled && result.Privileged.WebSSHEnabled
+	result.Privileged.ExecutionEnabled = result.Privileged.RemoteControlEnabled && result.Privileged.ExecutionEnabled
 	result.Runtime.EnableGPU = result.Privileged.EnableGPU
 	result.Runtime.RemoteControlEnabled = result.Privileged.RemoteControlEnabled
 	result.Runtime.DetailedGPU = raw.DetailedGPU && result.Runtime.EnableGPU

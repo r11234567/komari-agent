@@ -5,7 +5,6 @@ import (
 	"github.com/komari-monitor/komari-agent/core/privileged"
 	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
 	hostv1 "github.com/r11234567/komari-proto/gen/go/komari/host/v1"
-	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
 	"path/filepath"
 	"testing"
 )
@@ -16,7 +15,7 @@ func auditAppliedStore(t *testing.T) *privileged.Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	local := privileged.Settings{RequiredPrivilegeMode: reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT, RemoteControlEnabled: true, EnableGPU: true}
+	local := privileged.Settings{RequiredPrivilegeMode: processMode(), RemoteControlEnabled: true, EnableGPU: true}
 	r := &configv1.PrivilegedRevision{Revision: 1, ProtocolVersion: 2, InstallationBaseline: true, ApprovalGeneration: 1, ConfigHash: privileged.Hash(local), Privileged: local.Proto(), Authorization: &hostv1.HostAuthorization{ServiceId: "fixture"}}
 	if err := s.AdoptBaseline(r, local, local.RequiredPrivilegeMode, privileged.Receipt{ID: "baseline"}); err != nil {
 		t.Fatal(err)

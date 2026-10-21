@@ -886,6 +886,7 @@ func (c *Client) attachRemoteSession(ctx context.Context, assignment *websshv1.S
 	defer pty.Close()
 	sessionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	go capability.CancelOnRevocation(sessionCtx, cancel, capability.WebSSHAllowed)
 	stream := c.webssh.AttachSession(sessionCtx)
 	c.authorize(stream.RequestHeader())
 	if err := stream.Send(&websshv1.AttachSessionRequest{Message: &websshv1.AttachSessionRequest_Attach{Attach: &websshv1.AgentSessionAttach{
@@ -967,6 +968,9 @@ func (c *Client) attachRemoteSession(ctx context.Context, assignment *websshv1.S
 		response, err := stream.Receive()
 		if err != nil {
 			return err
+		}
+		if ok, reason := capability.WebSSHAllowed(); !ok {
+			return fmt.Errorf("WebSSH authorization withdrawn: %s", reason)
 		}
 		switch command := response.Command.(type) {
 		case *websshv1.AttachSessionResponse_Input:

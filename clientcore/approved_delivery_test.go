@@ -191,6 +191,14 @@ func TestApprovedDeliveryUsesCurrentSignaturePolicyAndRetriesExactReceipt(t *tes
 	if c.privilegedStore.State().AppliedRevision != 0 {
 		t.Fatal("captured approval was revived")
 	}
+	// A separate root-owned force-deny is stronger than the approved snapshot.
+	flags_pkg.GlobalConfig.ServiceManifestFile = os.Getenv("KOMARI_TEST_DENY_MANIFEST")
+	if flags_pkg.GlobalConfig.ServiceManifestFile == "" {
+		t.Fatal("missing force-deny fixture")
+	}
+	if ok, _ := capability.WebSSHAllowed(); ok || runtimeconfig.Effective().BlockedReason == "" {
+		t.Fatal("protected force-deny did not override approved grant")
+	}
 	// Replacing the protected policy with an unreadable location fails closed.
 	flags_pkg.GlobalConfig.ServiceManifestFile = filepath.Join(dir, "missing.json")
 	if ok, _ := capability.WebSSHAllowed(); ok || runtimeconfig.Current().EnableGPU {

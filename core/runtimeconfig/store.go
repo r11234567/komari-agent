@@ -105,8 +105,10 @@ func ActiveStoreForInspection() *Store { return active.Load() }
 
 func SetActive(store *Store) { active.Store(store) }
 
-func Current() Snapshot          { return Effective().Runtime }
-func RemoteControlEnabled() bool { return Effective().Privileged.RemoteControlEnabled }
+func Current() Snapshot { return EffectiveForMode(processMode()).Runtime }
+func RemoteControlEnabled() bool {
+	return EffectiveForMode(processMode()).Privileged.RemoteControlEnabled
+}
 
 func (s *Store) Current() Snapshot { return *clone(s.current.Load()) }
 

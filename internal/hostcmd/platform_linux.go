@@ -206,12 +206,18 @@ func buildMigration(service string, o serviceObservation, deny string) (migratio
 			if deny == "preserve" {
 				cleaned = append(cleaned, a)
 			}
-		case "--gpu":
+		case "--enable-gpu", "--gpu":
 			gpu = true
 			if has {
 				gpu, err = strconv.ParseBool(val)
 				if err != nil {
 					return plan, nil, err
+				}
+			}
+			if key == "--gpu" {
+				a = "--enable-gpu"
+				if has {
+					a += "=" + val
 				}
 			}
 			cleaned = append(cleaned, a)
@@ -251,7 +257,7 @@ func migrate(args []string, out io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if !hostops.ValidService(*service) {
+	if !hostops.ValidService(*service) || strings.HasSuffix(*service, ".service") {
 		return errors.New("--service is required; multiple installations are never guessed")
 	}
 	o, err := observe(*service)
@@ -295,8 +301,10 @@ func migrate(args []string, out io.Writer) error {
 	}
 	m := &plan.Manifest
 	manifestPath := filepath.Join(hostops.Registry, m.ServiceName+".json")
-	if _, err = os.Lstat(manifestPath); err == nil {
-		return errors.New("service already has a manifest; refusing to replace its policy")
+	for _, path := range []string{manifestPath, m.HostPolicyFile, filepath.Join(filepath.Dir(m.Executable), "service-config.json")} {
+		if _, err = os.Lstat(path); !os.IsNotExist(err) {
+			return fmt.Errorf("migration destination exists or is inaccessible; inspect journal before retry: %s", path)
+		}
 	}
 	journal := filepath.Join("/var/lib/komari-host", m.ServiceName)
 	for _, dir := range []string{filepath.Dir(m.Executable), hostops.Registry, journal, filepath.Join("/etc/systemd/system", m.ServiceName+".service.d")} {

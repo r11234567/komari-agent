@@ -209,8 +209,8 @@ func init() {
 	RootCmd.PersistentFlags().StringVar(&flags.AutoDiscoveryKey, "auto-discovery", "", "Auto discovery key for the agent")
 	RootCmd.PersistentFlags().StringVar(&flags.ServerName, "server-name", "", "Server display name used for the first auto-discovery registration")
 	RootCmd.PersistentFlags().BoolVar(&flags.DisableAutoUpdate, "disable-auto-update", false, "Disable automatic updates")
-	RootCmd.PersistentFlags().BoolVar(&flags.DisableRemoteControl, "disable-remote-control", false, "Disable remote control (WebSSH and remote execution)")
-	RootCmd.PersistentFlags().Float64VarP(&flags.Interval, "interval", "i", 3.0, "Interval in seconds")
+	RootCmd.PersistentFlags().BoolVar(&flags.DisableRemoteControl, "disable-remote-control", false, "Bootstrap remote-control disable; installed protected force-deny remains authoritative")
+	RootCmd.PersistentFlags().Float64VarP(&flags.Interval, "interval", "i", 3.0, "Bootstrap interval in seconds; applied runtime configuration takes precedence")
 	RootCmd.PersistentFlags().BoolVarP(&flags.IgnoreUnsafeCert, "ignore-unsafe-cert", "u", false, "Ignore unsafe certificate errors")
 	RootCmd.PersistentFlags().IntVarP(&flags.MaxRetries, "max-retries", "r", 3, "Maximum number of retries")
 	RootCmd.PersistentFlags().IntVarP(&flags.ReconnectInterval, "reconnect-interval", "c", 5, "Reconnect interval in seconds")
@@ -223,7 +223,7 @@ func init() {
 	RootCmd.PersistentFlags().StringVar(&flags.CustomDNS, "custom-dns", "", "Custom DNS server to use (e.g. 8.8.8.8, 114.114.114.114). By default, the program uses the system DNS resolver.")
 	RootCmd.PersistentFlags().StringVar(&flags.CFAccessClientID, "cf-access-client-id", "", "Cloudflare Access service-token Client ID")
 	RootCmd.PersistentFlags().StringVar(&flags.CFAccessClientSecret, "cf-access-client-secret", "", "Cloudflare Access service-token Client Secret")
-	RootCmd.PersistentFlags().BoolVar(&flags.EnableGPU, "enable-gpu", false, "Enable basic GPU monitoring")
+	RootCmd.PersistentFlags().BoolVar(&flags.EnableGPU, "enable-gpu", false, "Bootstrap GPU seed; an applied privileged snapshot controls installed agents")
 	RootCmd.PersistentFlags().BoolVar(&flags.DetailedGPU, "detailed-gpu", false, "Enable detailed GPU monitoring (requires --enable-gpu)")
 	RootCmd.PersistentFlags().BoolVar(&flags.ShowWarning, "show-warning", false, "Show security warning on Windows, run once as a subprocess")
 	RootCmd.PersistentFlags().StringVar(&flags.CustomIpv4, "custom-ipv4", "", "Custom IPv4 address to use")
@@ -239,6 +239,8 @@ func init() {
 	RootCmd.PersistentFlags().StringVar(&serviceManifestPath, "service-manifest", "", "Explicit installed service manifest (shared by all commands)")
 	RootCmd.PersistentFlags().BoolVar(&standaloneMode, "standalone", false, "Use standalone bootstrap paths when no installed service manifest exists")
 	RootCmd.PersistentFlags().ParseErrorsWhitelist.UnknownFlags = false
+	_ = RootCmd.PersistentFlags().MarkDeprecated("max-retries", "unused by the current transport; retry policy is managed internally")
+	_ = RootCmd.PersistentFlags().MarkDeprecated("disable-compression", "unused by the current transport; retained only for old service definitions")
 }
 
 func loadFromEnv() {

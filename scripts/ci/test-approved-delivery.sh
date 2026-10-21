@@ -16,6 +16,16 @@ sudo tee "$manifest" >/dev/null <<MANIFEST
 {"version":2,"service_name":"$service","service_user":"runner","init_system":"systemd","host_policy_file":"$policy","credentials_file":"/unused","runtime_state_file":"/unused","privileged_state_file":"/unused","replay_state_file":"/unused"}
 MANIFEST
 sudo chmod 644 "$policy" "$manifest"
+deny_policy="/etc/komari/services/$service-deny.policy.json"
+deny_manifest="/etc/komari/services/$service-deny.json"
+sudo tee "$deny_policy" >/dev/null <<POLICY
+{"version":2,"service_id":"$service","privilege_mode":2,"allow_remote_control":true,"allow_webssh":true,"allow_execution":true,"allow_gpu":true,"force_deny_remote_control":true}
+POLICY
+sudo tee "$deny_manifest" >/dev/null <<MANIFEST
+{"version":2,"service_name":"$service","service_user":"runner","init_system":"systemd","host_policy_file":"$deny_policy","credentials_file":"/unused","runtime_state_file":"/unused","privileged_state_file":"/unused","replay_state_file":"/unused"}
+MANIFEST
+sudo chmod 644 "$deny_policy" "$deny_manifest"
+export KOMARI_TEST_DENY_MANIFEST="$deny_manifest"
 export KOMARI_TEST_APPROVAL_MANIFEST="$manifest"
 export GOMAXPROCS=2
 go test -p=2 -json -count=1 -timeout=3m -run '^TestApprovedDelivery' ./clientcore 2> >(tee ci-artifacts/approved-delivery-build.log >&2) | tee ci-artifacts/approved-delivery.jsonl
