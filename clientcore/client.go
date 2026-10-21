@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -67,6 +68,7 @@ type Client struct {
 	host         hostv1connect.HostServiceClient
 	hostManifest *hostops.Manifest
 	hostPolicy   *hostops.Policy
+	hostTrust    *hostops.Trust
 	startupID    string
 	receiptMu    sync.Mutex
 	privilegedMu sync.Mutex
@@ -122,7 +124,17 @@ func (c *Client) identity() (credentials.Identity, bool) {
 	if c.credentialStore == nil {
 		return credentials.Identity{}, false
 	}
-	return c.credentialStore.Identity()
+	id, ok := c.credentialStore.Identity()
+	if ok && c.hostTrust != nil {
+		if id.AgentID != c.hostTrust.AgentID || id.Endpoint != c.hostTrust.Endpoint {
+			return credentials.Identity{}, false
+		}
+		id.ControlPlaneKeys = c.hostTrust.PanelKeys
+		id.PolicyAlgorithms = []int32{1}
+		id.PolicyRequireAll = false
+		id.PolicyMinimumSignatures = 1
+	}
+	return id, ok
 }
 
 func (c *Client) tokenValue() string {
@@ -201,6 +213,8 @@ func (c *Client) rememberAgentID(agentID string) {
 	c.agentMu.Unlock()
 }
 
+var processStartupID = uuid.NewString()
+
 func New(config *flags_pkg.Config, store *runtimeconfig.Store) (*Client, error) {
 	// A credential store holds the enrolled identity (from device-code login).
 	// Open it first so an Agent started without CLI flags can load its persisted
@@ -261,7 +275,7 @@ func New(config *flags_pkg.Config, store *runtimeconfig.Store) (*Client, error) 
 		privileged.SetActive(privilegedStore)
 	}
 	c := &Client{
-		startupID:       uuid.NewString(),
+		startupID:       processStartupID,
 		endpoint:        endpoint,
 		token:           token,
 		agentID:         agentID,
@@ -286,6 +300,20 @@ func New(config *flags_pkg.Config, store *runtimeconfig.Store) (*Client, error) 
 		}
 		if e != nil {
 			log.Printf("Privileged v2 installation policy unavailable: %v", e)
+		}
+		if c.hostManifest != nil {
+			trust, trustErr := hostops.ReadTrust(c.hostManifest)
+			if trustErr == nil {
+				if trust.AgentID != agentID || trust.Endpoint != endpoint {
+					return nil, errors.New("enrollment identity differs from protected host trust")
+				}
+				c.hostTrust = trust
+				if err := c.validatePersistedPrivileged(); err != nil {
+					return nil, err
+				}
+			} else if !os.IsNotExist(trustErr) {
+				return nil, fmt.Errorf("protected host trust invalid: %w", trustErr)
+			}
 		}
 	}
 	c.config = configv1connect.NewConfigServiceClient(wrapWithDPoP(streamHTTPClient, c), baseURL)

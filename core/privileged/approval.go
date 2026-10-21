@@ -3,6 +3,7 @@ package privileged
 import (
 	"errors"
 	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
+	hostv1 "github.com/r11234567/komari-proto/gen/go/komari/host/v1"
 	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
 	"google.golang.org/protobuf/proto"
 	"time"
@@ -32,7 +33,10 @@ func ValidateApproval(r *configv1.PrivilegedRevision, agent, service string, act
 	if r.ConfigHash != Hash(settings) {
 		return errors.New("approval settings hash mismatch")
 	}
-	return checkSupported(settings, actual)
+	if settings.RequiredPrivilegeMode != actual {
+		return errors.New("daemon identity differs from approval")
+	}
+	return nil
 }
 
 // ApplyApproved atomically persists the effective snapshot and immutable ACK.
@@ -41,6 +45,19 @@ func (s *Store) ApplyApproved(r *configv1.PrivilegedRevision, actual reportv1.Pr
 	if err := ValidateApproval(r, r.GetAgentId(), r.GetAuthorization().GetServiceId(), actual); err != nil {
 		return err
 	}
+	return s.commitApproved(r, receipt)
+}
+
+// ApplyHostApproved is distinct from same-identity delivery. The transport must
+// first validate protected local evidence, a current signed phase-3 operation,
+// actual daemon identity and helper observations. It cannot execute OS actions.
+func (s *Store) ApplyHostApproved(r *configv1.PrivilegedRevision, op *hostv1.HostOperation, actual reportv1.PrivilegeMode, receipt Receipt) error {
+	if r.GetState() != configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_APPLYING || r.GetProtocolVersion() != 2 || op.GetPhase() != hostv1.HostOperationPhase_HOST_OPERATION_PHASE_LOCAL_APPLIED || op.GetOperationId() == "" || !proto.Equal(r.GetAuthorization(), op.GetAuthorization()) || r.GetPrivileged().GetRequiredPrivilegeMode() != actual || r.GetConfigHash() != Hash(SettingsFromProto(r.GetPrivileged())) {
+		return errors.New("matching completed host operation and actual identity required")
+	}
+	return s.commitApproved(r, receipt)
+}
+func (s *Store) commitApproved(r *configv1.PrivilegedRevision, receipt Receipt) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if r.Revision <= s.state.AppliedRevision || r.Revision < s.state.PendingRevision || r.UpdateSequence < s.state.LastSequence {

@@ -12,14 +12,18 @@ import (
 
 func Run(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: komari-host diagnose|migrate|update; apply is unavailable until host transaction support is installed")
+		return errors.New("usage: komari-host diagnose|migrate|update|trust|apply|resume|restore")
 	}
 	switch args[0] {
 	case "version":
-		_, err := fmt.Fprintln(out, "komari-host protocol=2 host-actions=none")
+		_, err := fmt.Fprintln(out, "komari-host protocol=2; host actions require Linux systemd, protected trust and fresh PAM authentication")
 		return err
 	case "apply":
-		return errors.New("host identity conversion and rescue installation are not implemented in this version; no state was changed")
+		return apply(args[1:], out)
+	case "trust":
+		return trust(args[1:], out)
+	case "resume", "restore":
+		return resume(args[1:], out, args[0] == "restore")
 	case "diagnose":
 		fs := flag.NewFlagSet("diagnose", flag.ContinueOnError)
 		fs.SetOutput(out)

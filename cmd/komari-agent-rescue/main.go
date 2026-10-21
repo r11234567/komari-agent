@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/komari-monitor/komari-agent/core/hostops"
 	"github.com/komari-monitor/komari-agent/rescue"
 	"github.com/komari-monitor/komari-agent/update"
 )
@@ -75,6 +76,11 @@ func configFromFileArgument(arguments []string) (rescue.Config, error) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		return rescue.Config{}, fmt.Errorf("decode helper config: %w", err)
 	}
+	if config.HostManifest != "" {
+		if err := hostops.ReadJSON(path, &config, true); err != nil {
+			return config, err
+		}
+	}
 	return config, nil
 }
 
@@ -102,7 +108,7 @@ func fallback(value, defaultValue string) string {
 }
 
 func run(config rescue.Config) error {
-	if config.Endpoint == "" || config.Token == "" {
+	if config.Endpoint == "" || (config.Token == "" && config.CredentialsFile == "") {
 		return fmt.Errorf("--endpoint and --token are required")
 	}
 	helper, err := rescue.New(config)

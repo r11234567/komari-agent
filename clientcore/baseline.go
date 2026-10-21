@@ -39,7 +39,17 @@ func (c *Client) initializeHost(parent context.Context) error {
 	if int32(actual) != c.hostPolicy.PrivilegeMode {
 		return errors.New("daemon OS identity differs from protected installation policy")
 	}
-	req := connect.NewRequest(&hostv1.NegotiateHostProtocolRequest{AgentId: c.agentIDValue(), ProtocolVersion: 2, ServiceId: c.hostManifest.ServiceName, StartupId: c.startupID, PrivilegeMode: actual, HostToolVersion: "2-no-host-actions", SupportedRuntimeFields: []uint32{1, 3, 4, 5, 6, 7, 8, 19}})
+	var actions []hostv1.HostAction
+	if hostops.HostActionsReady(c.hostManifest) {
+		actions = []hostv1.HostAction{hostv1.HostAction_HOST_ACTION_SET_SERVICE_IDENTITY}
+		if c.hostPolicy.AllowRescueHelper && len(c.hostTrust.ReleaseKeys) > 0 {
+			actions = append(actions, hostv1.HostAction_HOST_ACTION_INSTALL_RESCUE_HELPER)
+		}
+		if c.hostPolicy.HelperInstalled {
+			actions = append(actions, hostv1.HostAction_HOST_ACTION_REMOVE_RESCUE_HELPER)
+		}
+	}
+	req := connect.NewRequest(&hostv1.NegotiateHostProtocolRequest{AgentId: c.agentIDValue(), ProtocolVersion: 2, ServiceId: c.hostManifest.ServiceName, StartupId: c.startupID, PrivilegeMode: actual, SupportedActions: actions, HostToolVersion: "3-linux-systemd-pam", SupportedRuntimeFields: []uint32{1, 3, 4, 5, 6, 7, 8, 19}})
 	c.authorize(req.Header())
 	if _, err := c.host.NegotiateHostProtocol(ctx, req); err != nil {
 		return err
@@ -277,6 +287,11 @@ func (c *Client) runReceiptOutbox(ctx context.Context) {
 	for {
 		if err := c.flushReceipts(ctx); err != nil {
 			log.Printf("Receipt outbox retry pending: %v", err)
+		}
+		if c.hostManifest != nil && c.hostTrust != nil {
+			if err := c.reconcileHostRecord(ctx); err != nil {
+				log.Printf("Host result reconciliation pending: %v", err)
+			}
 		}
 		select {
 		case <-ctx.Done():

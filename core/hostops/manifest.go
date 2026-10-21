@@ -46,9 +46,10 @@ type Policy struct {
 	BaselineWebSSH         bool   `json:"baseline_webssh"`
 	BaselineExecution      bool   `json:"baseline_execution"`
 	BaselineGPU            bool   `json:"baseline_gpu"`
-	// Helper installation is a separate, unavailable host operation in stages 3–5.
-	HelperInstalled bool   `json:"helper_installed"`
-	DisableSource   string `json:"disable_source"`
+	AllowRescueHelper      bool   `json:"allow_rescue_helper"`
+	HelperAuthorized       bool   `json:"helper_authorized"`
+	HelperInstalled        bool   `json:"helper_installed"`
+	DisableSource          string `json:"disable_source"`
 }
 
 func ReadJSON(path string, target any, trusted bool) error {

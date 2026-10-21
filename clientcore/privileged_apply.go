@@ -53,7 +53,8 @@ func (c *Client) recordPrivilegedRevision(ctx context.Context, r *configv1.Privi
 			return err
 		}
 	}
-	if r.State != configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_AWAITING_AGENT {
+	hostApply := r.State == configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_APPLYING
+	if r.State != configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_AWAITING_AGENT && !hostApply {
 		return c.flushReceipts(ctx)
 	}
 	// A captured, still unexpired approval may already be superseded. Require an
@@ -82,7 +83,16 @@ func (c *Client) recordPrivilegedRevision(ctx context.Context, r *configv1.Privi
 		return c.failPrivileged(ctx, r, err)
 	}
 	actual := capability.Detect(false).PrivilegeMode
-	if err = privileged.ValidateApproval(r, c.agentIDValue(), c.hostManifest.ServiceName, actual); err != nil {
+	var operation *hostv1.HostOperation
+	if hostApply {
+		operation, err = c.checkedHostOperation(ctx, r)
+		if err != nil {
+			return err
+		}
+	} else {
+		err = privileged.ValidateApproval(r, c.agentIDValue(), c.hostManifest.ServiceName, actual)
+	}
+	if err != nil {
 		return c.failPrivileged(ctx, r, err)
 	}
 	if !runtimeconfig.PolicyAllows(privileged.SettingsFromProto(r.Privileged), policy) {
@@ -100,14 +110,36 @@ func (c *Client) recordPrivilegedRevision(ctx context.Context, r *configv1.Privi
 	caps.Execution.Limitation = ""
 	caps.Gpu.Available = settings.EnableGPU
 	caps.DetailedGpu.Available = settings.EnableGPU && c.store.Current().DetailedGPU
-	caps.RescueHelper.Available = false
+	helperInstalled, helperRunning, helperAuthorized := false, false, false
+	if settings.RescueHelperEnabled {
+		status, e := hostops.ReadHelperStatus(c.hostManifest)
+		if e != nil || !status.Authorized || !status.LeaseReady {
+			return errors.New("approved helper has not reached verified running/authorized/lease-ready status")
+		}
+		helperInstalled = policy.HelperInstalled
+		helperRunning = true
+		helperAuthorized = policy.HelperAuthorized
+	}
+	caps.RescueHelper.Available = settings.RescueHelperEnabled
 	id := uuid.NewString()
 	message := &configv1.ReportPrivilegedDeliveryRequest{AgentId: c.agentIDValue(), Revision: r.Revision, State: configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_DELIVERED, ProtocolVersion: 2, ReceiptId: id, ConfigHash: r.ConfigHash, ApprovalGeneration: r.ApprovalGeneration, Observation: &hostv1.DaemonObservation{Revision: r.Revision, ConfigHash: r.ConfigHash, ApprovalGeneration: r.ApprovalGeneration, ServiceId: c.hostManifest.ServiceName, StartupId: c.startupID, PrivilegeMode: actual, EffectiveCapabilities: caps, ObservedAt: timestamppb.Now()}}
+	message.Observation.HelperInstalled = helperInstalled
+	message.Observation.HelperRunning = helperRunning
+	message.Observation.HelperAuthorized = helperAuthorized
+	if operation != nil {
+		message.Observation.OperationId = operation.OperationId
+	}
 	payload, err := proto.Marshal(message)
 	if err != nil {
 		return err
 	}
-	if err = c.privilegedStore.ApplyApproved(r, actual, privileged.Receipt{ID: id, Kind: "privileged", Payload: payload}); err != nil {
+	receipt := privileged.Receipt{ID: id, Kind: "privileged", Payload: payload}
+	if operation != nil {
+		err = c.privilegedStore.ApplyHostApproved(r, operation, actual, receipt)
+	} else {
+		err = c.privilegedStore.ApplyApproved(r, actual, receipt)
+	}
+	if err != nil {
 		return err
 	}
 	return c.flushReceipts(ctx)

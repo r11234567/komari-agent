@@ -21,3 +21,10 @@ func update([]string, io.Writer) error {
 func install([]string, io.Writer) error {
 	return errors.New("trusted v2 installation supports Linux systemd only in this version")
 }
+func apply([]string, io.Writer) error {
+	return errors.New("host apply requires Linux systemd; this platform has not passed host-transaction acceptance")
+}
+func trust([]string, io.Writer) error { return errors.New("host trust setup requires Linux systemd") }
+func resume([]string, io.Writer, bool) error {
+	return errors.New("host recovery requires Linux systemd")
+}

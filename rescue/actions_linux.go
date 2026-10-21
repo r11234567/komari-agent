@@ -22,6 +22,17 @@ import (
 
 const linuxIsolationTable = "komari_rescue"
 
+func waitForCommit(ctx context.Context) error {
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return ctx.Err()
+	}
+}
+
 type isolationState struct {
 	Mode       rescuev1.NetworkIsolationMode `json:"mode"`
 	Interfaces []string                      `json:"interfaces,omitempty"`
@@ -69,8 +80,10 @@ func preparePowerAction(_ ActionConfig, reboot bool) (ActionResult, error) {
 	}
 	return ActionResult{
 		Stdout: []byte("machine_" + message + "=scheduled\n"),
-		AfterReport: func(context.Context) error {
-			time.Sleep(2 * time.Second)
+		AfterReport: func(ctx context.Context) error {
+			if err := waitForCommit(ctx); err != nil {
+				return err
+			}
 			return exec.Command("systemctl", verb).Start()
 		},
 	}, nil
@@ -86,8 +99,10 @@ func prepareAgentRestart(config ActionConfig) (ActionResult, error) {
 	}
 	return ActionResult{
 		Stdout: []byte("online_config_rollback=accepted\nagent_restart=scheduled\n"),
-		AfterReport: func(context.Context) error {
-			time.Sleep(2 * time.Second)
+		AfterReport: func(ctx context.Context) error {
+			if err := waitForCommit(ctx); err != nil {
+				return err
+			}
 			return exec.Command("systemctl", "restart", service+".service").Start()
 		},
 	}, nil
@@ -105,7 +120,9 @@ func prepareInterfaceIsolation(config ActionConfig, mode rescuev1.NetworkIsolati
 	return ActionResult{
 		Stdout: []byte(fmt.Sprintf("network_isolation=scheduled\ninterfaces=%s\n", strings.Join(interfaces, ","))),
 		AfterReport: func(ctx context.Context) error {
-			time.Sleep(2 * time.Second)
+			if err := waitForCommit(ctx); err != nil {
+				return err
+			}
 			state := isolationState{Mode: mode, Interfaces: interfaces, AppliedAt: time.Now().UTC()}
 			if err := saveIsolationState(config, state); err != nil {
 				return fmt.Errorf("save network isolation state: %w", err)
@@ -131,7 +148,9 @@ func prepareControlPlaneIsolation(ctx context.Context, config ActionConfig) (Act
 	return ActionResult{
 		Stdout: []byte("network_isolation=control-plane-only-scheduled\n"),
 		AfterReport: func(ctx context.Context) error {
-			time.Sleep(2 * time.Second)
+			if err := waitForCommit(ctx); err != nil {
+				return err
+			}
 			state := isolationState{Mode: rescuev1.NetworkIsolationMode_NETWORK_ISOLATION_MODE_CONTROL_PLANE_ONLY, AppliedAt: time.Now().UTC()}
 			if err := saveIsolationState(config, state); err != nil {
 				return fmt.Errorf("save network isolation state: %w", err)

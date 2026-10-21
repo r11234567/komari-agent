@@ -117,6 +117,9 @@ func detect(remoteControlEnabled bool, privilege reportv1.PrivilegeMode, privile
 		result.DetailedGpu = available()
 	}
 	result.RescueHelper = limited("rescue helper is not installed")
+	if cfg.Privileged.RescueHelperEnabled {
+		result.RescueHelper = available()
+	}
 	if runtime.GOOS != "linux" && runtime.GOOS != "windows" {
 		result.ServiceControl = limited("service control capability is platform-dependent")
 	}
