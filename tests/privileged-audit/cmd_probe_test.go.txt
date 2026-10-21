@@ -1,0 +1,138 @@
+package cmd
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
+	"github.com/komari-monitor/komari-agent/core/credentials"
+	"github.com/komari-monitor/komari-agent/core/localauth"
+	"github.com/komari-monitor/komari-agent/core/privileged"
+	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
+	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
+	"google.golang.org/protobuf/proto"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestAuditManualOutcomeDeliveredBeforeNonceValidation(t *testing.T) {
+	var delivered bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if filepath.Base(r.URL.Path) == "ReportPrivilegedDelivery" {
+			delivered = true
+			w.Header().Set("Content-Type", "application/proto")
+			b, _ := proto.Marshal(&configv1.ReportPrivilegedDeliveryResponse{Accepted: true})
+			w.Write(b)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(400)
+		w.Write([]byte(`{"code":"failed_precondition","message":"nonce expired"}`))
+	}))
+	defer srv.Close()
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "credentials.json")
+	s, _ := credentials.Open(path)
+	if err := s.Save(credentials.Identity{AgentID: "audit-agent", Endpoint: srv.URL, AccessToken: "audit-token", PrivateKey: base64.StdEncoding.EncodeToString(key)}); err != nil {
+		t.Fatal(err)
+	}
+	original := flags.CredentialsFile
+	flags.CredentialsFile = path
+	t.Cleanup(func() { flags.CredentialsFile = original })
+	err = reportPrivilegedOutcome(context.Background(), 1, "expired-nonce", configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_DELIVERED, reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT, localauth.Result{Method: localauth.MethodCallerPassword, Operator: "audit"})
+	if err == nil {
+		t.Fatal("fixture must reject nonce")
+	}
+	if delivered {
+		t.Fatal("server was told DELIVERED before nonce validation rejected the completion")
+	}
+}
+
+func TestAuditCustomServiceNameNotPassedToElevation(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "args")
+	script := filepath.Join(dir, "elevate.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/bash\nprintf '%s\\n' \"$@\" > "+shellQuote(out)+"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	prevPath := flags.PrivilegedStateFile
+	prevService := installedService
+	flags.PrivilegedStateFile = filepath.Join(dir, "privileged.json")
+	installedService = &serviceConfig{ServiceName: "audit-custom", ServiceUser: "komari"}
+	t.Cleanup(func() { flags.PrivilegedStateFile = prevPath; installedService = prevService })
+	if err := runElevationScript(script, 1, "test-nonce"); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := os.ReadFile(out)
+	if !containsAudit(string(args), "audit-custom") {
+		t.Fatalf("custom service name omitted from script arguments: %s", args)
+	}
+}
+
+func containsAudit(a, b string) bool {
+	for i := 0; i+len(b) <= len(a); i++ {
+		if a[i:i+len(b)] == b {
+			return true
+		}
+	}
+	return false
+}
+
+// Run only this probe with sudo and a PTY. Authentication commands are fixtures;
+// the real upgrade RunE operates exclusively on temporary state and scripts.
+func TestAuditSudoCLISkipsDaemonElevation(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires sudo and a PTY; all host authentication commands are mocked")
+	}
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		t.Skip("requires PTY")
+	}
+	tty.Close()
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"sudo", "logger", "systemctl"} {
+		body := "#!/bin/sh\nexit 0\n"
+		if name == "sudo" {
+			body = "#!/bin/sh\nprintf 'fixture password policy (authentication mocked)\\n'\nexit 0\n"
+		}
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SUDO_USER", "fixture-operator")
+	marker := filepath.Join(dir, "script-was-run")
+	if err := os.WriteFile(filepath.Join(dir, "elevate.sh"), []byte("#!/bin/sh\ntouch "+shellQuote(marker)+"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	original := *flags
+	originalService := installedService
+	originalYes := upgradeAssumeYes
+	t.Cleanup(func() { *flags = original; installedService = originalService; upgradeAssumeYes = originalYes })
+	flags.PrivilegedStateFile = filepath.Join(dir, "privileged.json")
+	flags.CredentialsFile = filepath.Join(dir, "credentials.json")
+	installedService = &serviceConfig{ServiceName: "fixture-service", ServiceUser: "komari", InitSystem: "systemd"}
+	upgradeAssumeYes = true
+	store, _ := privileged.Open(flags.PrivilegedStateFile)
+	yes := true
+	if err := store.RecordPending(&configv1.PrivilegedRevision{Revision: 1, Privileged: &configv1.PrivilegedConfig{RemoteControlEnabled: &yes}, Plan: &configv1.UpgradePlan{UpgradeClass: configv1.UpgradeClass_UPGRADE_CLASS_MANUAL_PRIVILEGED, FromPrivilegeMode: reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_NON_ROOT, ToPrivilegeMode: reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := upgradeCmd.RunE(upgradeCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	disk, _ := privileged.Open(flags.PrivilegedStateFile)
+	if _, err := os.Stat(marker); os.IsNotExist(err) && disk.State().AppliedRevision == 1 {
+		t.Fatal("sudo CLI marked r1 applied using its own root identity; elevation script never ran although installed service user is komari")
+	}
+}
