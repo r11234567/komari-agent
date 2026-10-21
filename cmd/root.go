@@ -24,6 +24,7 @@ import (
 	"github.com/komari-monitor/komari-agent/core/capability"
 	"github.com/komari-monitor/komari-agent/core/privileged"
 	"github.com/komari-monitor/komari-agent/core/runtimeconfig"
+	"github.com/komari-monitor/komari-agent/core/statelock"
 )
 
 var flags = pkg_flags.GlobalConfig
@@ -65,14 +66,34 @@ var RootCmd = &cobra.Command{
 		if (flags.CFAccessClientID == "") != (flags.CFAccessClientSecret == "") {
 			return errors.New("Cloudflare Access client ID and client secret must be configured together")
 		}
+		privPath := flags.PrivilegedStateFile
+		if privPath == "" {
+			privPath = privileged.DefaultPath()
+		}
+		release, err := statelock.Acquire(privPath + ".daemon.lock")
+		if err != nil {
+			return err
+		}
+		defer release()
+		runtimePath := flags.RuntimeStateFile
+		if runtimePath == "" {
+			runtimePath = runtimeconfig.DefaultStatePath()
+		}
+		releaseRuntime, err := statelock.Acquire(runtimePath + ".daemon.lock")
+		if err != nil {
+			return err
+		}
+		defer releaseRuntime()
 		runtimeStore, err := runtimeconfig.New(runtimeconfig.FromFlags(flags), flags.RuntimeStateFile)
 		if err != nil {
 			return fmt.Errorf("failed to initialize runtime config: %w", err)
 		}
 		runtimeconfig.SetActive(runtimeStore)
-		if privStore, err := privileged.Open(flags.PrivilegedStateFile); err == nil && privStore != nil {
-			privileged.SetActive(privStore)
+		privStore, err := privileged.Open(flags.PrivilegedStateFile)
+		if err != nil {
+			return fmt.Errorf("load privileged state: %w", err)
 		}
+		privileged.SetActive(privStore)
 		// 捕获中止信号，优雅退出
 		stopCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()

@@ -84,15 +84,7 @@ var recoverRollbackConfigCmd = &cobra.Command{
 	Use:   "rollback-config",
 	Short: "Restore the previous persisted runtime configuration snapshot",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		store, err := runtimeStoreForRecovery()
-		if err != nil {
-			return err
-		}
-		snapshot, err := store.Rollback()
-		if err != nil {
-			return err
-		}
-		return writeRecoverOutput(fmt.Sprintf("rolled_back_revision=%d\n", snapshot.Revision))
+		return fmt.Errorf("runtime state has a single daemon writer; restore settings through a new panel revision")
 	},
 }
 

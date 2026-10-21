@@ -12,7 +12,6 @@ import (
 	"sync"
 
 	"github.com/komari-monitor/komari-agent/core/capability"
-	"github.com/komari-monitor/komari-agent/core/runtimeconfig"
 	execv1 "github.com/r11234567/komari-proto/gen/go/komari/exec/v1"
 )
 
@@ -24,7 +23,7 @@ type ExecutionOutput struct {
 }
 
 func RunTypedExecution(ctx context.Context, spec *execv1.ExecutionSpec, emit func(ExecutionOutput) error) (int, error) {
-	if allowed, reason := capability.RemoteControlAllowed(runtimeconfig.RemoteControlEnabled()); !allowed {
+	if allowed, reason := capability.ExecutionAllowed(); !allowed {
 		return -1, fmt.Errorf("remote control is unavailable: %s", reason)
 	}
 	if spec == nil || strings.TrimSpace(spec.Command) == "" {
@@ -35,6 +34,7 @@ func RunTypedExecution(ctx context.Context, spec *execv1.ExecutionSpec, emit fun
 	}
 	processCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	go capability.CancelOnRevocation(processCtx, cancel, capability.ExecutionAllowed)
 	command, cleanup, err := buildTypedCommand(processCtx, spec)
 	if err != nil {
 		return -1, err

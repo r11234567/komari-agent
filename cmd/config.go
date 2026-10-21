@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/komari-monitor/komari-agent/core/privileged"
+	"github.com/komari-monitor/komari-agent/core/runtimeconfig"
 	"github.com/spf13/cobra"
 )
 
@@ -21,9 +22,16 @@ func showConfig(cmd *cobra.Command) error {
 		return err
 	}
 	state := store.State()
+	oldRuntime := runtimeconfig.ActiveStoreForInspection()
+	oldPriv := privileged.ActiveStore()
+	runtimeconfig.SetActive(runtime)
+	privileged.SetActive(store)
+	effective := runtimeconfig.Effective()
+	runtimeconfig.SetActive(oldRuntime)
+	privileged.SetActive(oldPriv)
 	// Nonces, tokens, endpoints containing credentials and private keys never
 	// appear here. CLI euid is deliberately absent from daemon identity output.
-	output := map[string]any{"source": "persisted disk snapshot; live daemon identity unavailable", "runtime": runtime.Current(), "applied_privileged_revision": state.AppliedRevision, "active": state.Active, "pending_revision": state.PendingRevision, "pending": state.Pending, "service": installedService}
+	output := map[string]any{"source": "persisted disk snapshot; live daemon identity unavailable", "runtime": runtime.Current(), "effective_config_from_disk": effective, "outbox_count": len(state.Outbox), "rejected_receipt_count": len(state.RejectedReceipts), "applied_privileged_revision": state.AppliedRevision, "active": state.Active, "pending_revision": state.PendingRevision, "pending": state.Pending, "service": installedService}
 	if configJSON {
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(output)
 	}

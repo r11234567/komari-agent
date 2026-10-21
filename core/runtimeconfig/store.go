@@ -12,8 +12,8 @@ import (
 	"time"
 
 	flags_pkg "github.com/komari-monitor/komari-agent/cmd/flags"
-	"github.com/komari-monitor/komari-agent/core/privileged"
 	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 const (
@@ -38,6 +38,7 @@ type Snapshot struct {
 }
 
 type persistedState struct {
+	Receipts [][]byte  `json:"receipts,omitempty"`
 	Current  Snapshot  `json:"current"`
 	Previous *Snapshot `json:"previous,omitempty"`
 }
@@ -47,6 +48,7 @@ type Store struct {
 	path     string
 	current  atomic.Pointer[Snapshot]
 	previous *Snapshot
+	receipts [][]byte
 }
 
 var active atomic.Pointer[Store]
@@ -99,26 +101,12 @@ func New(initial Snapshot, path string) (*Store, error) {
 	return s, nil
 }
 
+func ActiveStoreForInspection() *Store { return active.Load() }
+
 func SetActive(store *Store) { active.Store(store) }
 
-func Current() Snapshot {
-	store := active.Load()
-	if store == nil {
-		return FromFlags(flags_pkg.GlobalConfig)
-	}
-	return store.Current()
-}
-
-func RemoteControlEnabled() bool {
-	cfg := flags_pkg.GlobalConfig
-	if cfg != nil && cfg.DisableRemoteControl {
-		return false
-	}
-	if privStore := privileged.ActiveStore(); privStore != nil {
-		return privStore.Active().RemoteControlEnabled
-	}
-	return Current().RemoteControlEnabled
-}
+func Current() Snapshot          { return Effective().Runtime }
+func RemoteControlEnabled() bool { return Effective().Privileged.RemoteControlEnabled }
 
 func (s *Store) Current() Snapshot { return *clone(s.current.Load()) }
 
@@ -132,6 +120,9 @@ func (s *Store) Previous() (Snapshot, bool) {
 }
 
 func (s *Store) Apply(desired *configv1.DesiredConfig) (Snapshot, error) {
+	return s.ApplyWithReceipt(desired, nil)
+}
+func (s *Store) ApplyWithReceipt(desired *configv1.DesiredConfig, receipt []byte) (Snapshot, error) {
 	if desired == nil || desired.Runtime == nil {
 		return s.Current(), errors.New("desired runtime config is required")
 	}
@@ -148,15 +139,24 @@ func (s *Store) Apply(desired *configv1.DesiredConfig) (Snapshot, error) {
 	if desired.Revision == current.Revision {
 		return *clone(current), nil
 	}
+	if len(s.receipts) >= 1024 {
+		return *clone(current), errors.New("runtime receipt outbox is full")
+	}
+
 	next, err := fromProto(*current, desired.Revision, desired.Runtime)
 	if err != nil {
 		return *clone(current), err
 	}
 	previous := clone(current)
-	if err := s.persist(persistedState{Current: next, Previous: previous}); err != nil {
+	receipts := clonePayloads(s.receipts)
+	if len(receipt) > 0 {
+		receipts = append(receipts, append([]byte(nil), receipt...))
+	}
+	if err := s.persist(persistedState{Current: next, Previous: previous, Receipts: receipts}); err != nil {
 		return *clone(current), err
 	}
 	s.previous = previous
+	s.receipts = receipts
 	s.current.Store(clone(&next))
 	return *clone(&next), nil
 }
@@ -169,7 +169,7 @@ func (s *Store) Rollback() (Snapshot, error) {
 	}
 	current := clone(s.current.Load())
 	rolledBack := clone(s.previous)
-	if err := s.persist(persistedState{Current: *rolledBack, Previous: current}); err != nil {
+	if err := s.persist(persistedState{Current: *rolledBack, Previous: current, Receipts: s.receipts}); err != nil {
 		return *current, err
 	}
 	s.previous = current
@@ -191,6 +191,7 @@ func (s *Store) load() error {
 	}
 	s.current.Store(clone(&state.Current))
 	s.previous = clone(state.Previous)
+	s.receipts = clonePayloads(state.Receipts)
 	return nil
 }
 
@@ -233,7 +234,15 @@ func (s *Store) persist(state persistedState) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("read runtime config for backup: %w", err)
 	}
-	return os.Rename(tmpName, s.path)
+	if err := os.Rename(tmpName, s.path); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(s.path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func writeBackup(path string, data []byte) error {
@@ -262,6 +271,21 @@ func writeBackup(path string, data []byte) error {
 }
 
 func fromProto(base Snapshot, revision uint64, value *configv1.RuntimeConfig) (Snapshot, error) {
+	if len(value.ProtoReflect().GetUnknown()) != 0 {
+		return Snapshot{}, errors.New("unknown runtime config fields")
+	}
+	var unsupported bool
+	value.ProtoReflect().Range(func(f protoreflect.FieldDescriptor, _ protoreflect.Value) bool {
+		switch f.Number() {
+		case 1, 3, 4, 5, 6, 7, 8, 19:
+		default:
+			unsupported = true
+		}
+		return true
+	})
+	if unsupported {
+		return Snapshot{}, errors.New("runtime config contains unsupported fields; applied revision unchanged")
+	}
 	result := *clone(&base)
 	result.Revision = revision
 	if value.MemoryIncludeCache != nil {
@@ -305,9 +329,7 @@ func validate(value Snapshot) error {
 	if value.TrafficResetDay > 31 {
 		return errors.New("traffic reset day must be between 0 and 31")
 	}
-	if value.DetailedGPU && !value.EnableGPU {
-		return errors.New("detailed GPU reporting requires GPU reporting")
-	}
+	// Detailed collection is masked by the effective privileged GPU grant.
 	for name, values := range map[string][]string{
 		"include_nics": value.IncludeNics, "exclude_nics": value.ExcludeNics, "include_mountpoints": value.IncludeMountpoints,
 	} {

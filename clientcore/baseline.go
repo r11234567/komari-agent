@@ -100,19 +100,14 @@ func (c *Client) initializeHost(parent context.Context) error {
 	if response.Msg.Runtime.Revision != 1 || !proto.Equal(response.Msg.Runtime.Runtime, proposal.Runtime) {
 		return errors.New("runtime baseline differs from local installation")
 	}
-	if c.store.Current().Revision <= 1 {
-		if _, err = c.store.Apply(response.Msg.Runtime); err != nil {
-			return err
-		}
-	}
-	if c.store.Current().Revision == 1 {
+	if c.store.Current().Revision < 1 {
 		ack := &configv1.AcknowledgeConfigRequest{AgentId: c.agentIDValue(), Revision: 1, Status: configv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_APPLIED, FinishedAt: timestamppb.Now()}
 		payload, e := proto.Marshal(ack)
 		if e != nil {
 			return e
 		}
-		if e = c.privilegedStore.Enqueue(privileged.Receipt{ID: uuid.NewString(), Kind: "runtime", Payload: payload}); e != nil {
-			return e
+		if _, err = c.store.ApplyWithReceipt(response.Msg.Runtime, payload); err != nil {
+			return err
 		}
 	}
 	if c.privilegedStore.State().AppliedRevision <= 1 {
@@ -187,16 +182,52 @@ func (c *Client) acceptBaseline(ctx context.Context, r *configv1.PrivilegedRevis
 	return c.flushReceipts(ctx)
 }
 func (c *Client) flushReceipts(parent context.Context) error {
+	c.receiptMu.Lock()
+	defer c.receiptMu.Unlock()
+	for payload := c.store.Receipt(); len(payload) > 0; payload = c.store.Receipt() {
+		var message configv1.AcknowledgeConfigRequest
+		if err := proto.Unmarshal(payload, &message); err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(parent, requestDeadline)
+		req := connect.NewRequest(&message)
+		c.authorize(req.Header())
+		response, err := c.config.AcknowledgeConfig(ctx, req)
+		cancel()
+		if err == nil && !response.Msg.Accepted {
+			err = connect.NewError(connect.CodeFailedPrecondition, errors.New("runtime ACK rejected"))
+		}
+		if err != nil {
+			code := connect.CodeOf(err)
+			if code != connect.CodeAborted && code != connect.CodeFailedPrecondition && code != connect.CodeInvalidArgument {
+				return err
+			}
+			log.Printf("Runtime receipt rejected: %v", err)
+			if c.privilegedStore != nil {
+				if e := c.privilegedStore.Enqueue(privileged.Receipt{ID: uuid.NewString(), Kind: "runtime-rejected", Payload: payload, Rejected: err.Error()}); e != nil {
+					return e
+				}
+			}
+		}
+		if err := c.store.FinishReceipt(payload); err != nil {
+			return err
+		}
+	}
 	if c.privilegedStore == nil {
 		return nil
 	}
-	c.receiptMu.Lock()
-	defer c.receiptMu.Unlock()
 	var first error
 	for _, entry := range c.privilegedStore.State().Outbox {
 		ctx, cancel := context.WithTimeout(parent, requestDeadline)
 		var err error
 		switch entry.Kind {
+		case "runtime-rejected":
+			if e := c.privilegedStore.FinishReceipt(entry.ID, entry.Rejected); e != nil {
+				cancel()
+				return e
+			}
+			cancel()
+			continue
 		case "privileged":
 			var message configv1.ReportPrivilegedDeliveryRequest
 			err = proto.Unmarshal(entry.Payload, &message)
