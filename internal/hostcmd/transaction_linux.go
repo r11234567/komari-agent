@@ -31,6 +31,8 @@ type fileBackup struct {
 	Path   string `json:"path"`
 	Backup string `json:"backup"`
 	Mode   uint32 `json:"mode"`
+	UID    int    `json:"uid"`
+	GID    int    `json:"gid"`
 	Exists bool   `json:"exists"`
 }
 type ownership struct {
@@ -102,6 +104,11 @@ func (j *hostJournal) backup(path string) error {
 	}
 	b.Exists = true
 	b.Mode = uint32(st.Mode().Perm())
+	stat, ok := st.Sys().(*syscall.Stat_t)
+	if !ok {
+		return errors.New("cannot preserve backup ownership")
+	}
+	b.UID, b.GID = int(stat.Uid), int(stat.Gid)
 	input, err := os.Open(path)
 	if err != nil {
 		return err
@@ -649,6 +656,9 @@ func restoreTransaction(m *hostops.Manifest, j *hostJournal) error {
 			return err
 		}
 		if err = hostops.AtomicWrite(b.Path, data, os.FileMode(b.Mode)); err != nil {
+			return err
+		}
+		if err = os.Chown(b.Path, b.UID, b.GID); err != nil {
 			return err
 		}
 	}

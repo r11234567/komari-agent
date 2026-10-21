@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/user"
+	"path/filepath"
 	"strings"
 
 	"github.com/komari-monitor/komari-agent/core/credentials"
@@ -21,7 +22,7 @@ func resolveManifest(path string) (*hostops.Manifest, error) {
 		if err != nil {
 			return nil, err
 		}
-		path = strings.TrimSuffix(executable, "/komari-host") + "/service-config.json"
+		path = filepath.Join(filepath.Dir(executable), "service-config.json")
 	}
 	m, err := hostops.ReadManifest(path)
 	if err != nil {

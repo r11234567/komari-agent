@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -33,6 +34,8 @@ import (
 	configconnect "github.com/r11234567/komari-proto/gen/go/komari/config/v1/configv1connect"
 	hostv1 "github.com/r11234567/komari-proto/gen/go/komari/host/v1"
 	hostconnect "github.com/r11234567/komari-proto/gen/go/komari/host/v1/hostv1connect"
+	metricsv1 "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1"
+	metricsconnect "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1/metricsv1connect"
 	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
 	reportconnect "github.com/r11234567/komari-proto/gen/go/komari/report/v1/reportv1connect"
 	rescuev1 "github.com/r11234567/komari-proto/gen/go/komari/rescue/v1"
@@ -50,6 +53,7 @@ type hostTestPanel struct {
 	configconnect.UnimplementedConfigServiceHandler
 	configconnect.UnimplementedPrivilegedDeliveryServiceHandler
 	hostconnect.UnimplementedHostServiceHandler
+	metricsconnect.UnimplementedMetricsServiceHandler
 	reportconnect.UnimplementedAgentReportServiceHandler
 	rescueconnect.UnimplementedRescueServiceHandler
 	mu               sync.Mutex
@@ -111,6 +115,9 @@ func (s *hostTestPanel) GetDesiredConfig(context.Context, *connect.Request[confi
 }
 func (s *hostTestPanel) SubmitReport(context.Context, *connect.Request[reportv1.SubmitReportRequest]) (*connect.Response[reportv1.SubmitReportResponse], error) {
 	return connect.NewResponse(&reportv1.SubmitReportResponse{Accepted: true}), nil
+}
+func (s *hostTestPanel) SubmitMetrics(context.Context, *connect.Request[metricsv1.SubmitMetricsRequest]) (*connect.Response[metricsv1.SubmitMetricsResponse], error) {
+	return connect.NewResponse(&metricsv1.SubmitMetricsResponse{Accepted: true}), nil
 }
 func (s *hostTestPanel) NegotiateHostProtocol(_ context.Context, r *connect.Request[hostv1.NegotiateHostProtocolRequest]) (*connect.Response[hostv1.NegotiateHostProtocolResponse], error) {
 	s.mu.Lock()
@@ -259,6 +266,8 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	p, h = hostconnect.NewHostServiceHandler(panel)
 	mux.Handle(p, h)
 	p, h = reportconnect.NewAgentReportServiceHandler(panel)
+	mux.Handle(p, h)
+	p, h = metricsconnect.NewMetricsServiceHandler(panel)
 	mux.Handle(p, h)
 	p, h = rescueconnect.NewRescueServiceHandler(panel)
 	mux.Handle(p, h)
@@ -452,6 +461,10 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 		t.Fatal("helper service was not removed")
 	}
 	// A real systemd startup failure must restore the prior non-root service.
+	bootstrapBefore, err := os.Stat(bootstrapPath(m))
+	if err != nil {
+		t.Fatal(err)
+	}
 	panel.set(service, 1, false)
 	if err = ensureTrustedDir(filepath.Dir(profilePath(m))); err != nil {
 		t.Fatal(err)
@@ -473,6 +486,14 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	}
 	if err = run(password, "restore", "--manifest", m.ManifestPath); err != nil {
 		t.Fatal(err)
+	}
+	bootstrapAfter, err := os.Stat(bootstrapPath(m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, after := bootstrapBefore.Sys().(*syscall.Stat_t), bootstrapAfter.Sys().(*syscall.Stat_t)
+	if before.Uid != after.Uid || before.Gid != after.Gid || bootstrapBefore.Mode() != bootstrapAfter.Mode() {
+		t.Fatal("restoration changed bootstrap ownership or permissions")
 	}
 	if err = verifyService(service, uid, 2); err != nil {
 		t.Fatal(err)
