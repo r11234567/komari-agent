@@ -870,6 +870,29 @@ func resume(args []string, out io.Writer, restore bool) error {
 	if !proto.Equal(current.Authorization, original.Authorization) {
 		return errors.New("approval superseded; restore before another grant")
 	}
+	policy, err := hostops.ReadPolicy(m)
+	if err != nil {
+		return err
+	}
+	uid := 0
+	if policy.PrivilegeMode == 2 {
+		account, e := user.Lookup(t.ServiceUser)
+		if e != nil {
+			return e
+		}
+		uid, e = strconv.Atoi(account.Uid)
+		if e != nil {
+			return e
+		}
+	}
+	if err = verifyService(m.ServiceName, uid, policy.PrivilegeMode); err != nil {
+		return err
+	}
+	if policy.HelperInstalled {
+		if err = waitHelper(m); err != nil {
+			return err
+		}
+	}
 	if op.Phase < 3 {
 		if err = j.report(ctx, p, hostv1.HostOperationPhase_HOST_OPERATION_PHASE_LOCAL_APPLIED, ""); err != nil {
 			return err

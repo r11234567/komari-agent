@@ -52,18 +52,19 @@ type hostTestPanel struct {
 	hostconnect.UnimplementedHostServiceHandler
 	reportconnect.UnimplementedAgentReportServiceHandler
 	rescueconnect.UnimplementedRescueServiceHandler
-	mu           sync.Mutex
-	key          ed25519.PrivateKey
-	current      *configv1.PrivilegedRevision
-	op           *hostv1.HostOperation
-	startup      string
-	prior        string
-	mode         reportv1.PrivilegeMode
-	installed    bool
-	observations []*hostv1.DaemonObservation
-	receipts     map[string][]byte
-	failLocalACK bool
-	failApply    bool
+	mu               sync.Mutex
+	key              ed25519.PrivateKey
+	current          *configv1.PrivilegedRevision
+	op               *hostv1.HostOperation
+	startup          string
+	prior            string
+	mode             reportv1.PrivilegeMode
+	installed        bool
+	observations     []*hostv1.DaemonObservation
+	receipts         map[string][]byte
+	failLocalACK     bool
+	failApply        bool
+	interruptProfile chan struct{}
 }
 
 func (s *hostTestPanel) sign(kind, nonce string, message proto.Message) *securityv1.SignedEnvelope {
@@ -159,7 +160,18 @@ func (s *hostTestPanel) PrepareHostOperation(_ context.Context, r *connect.Reque
 	s.current.UpdateSequence++
 	return connect.NewResponse(&hostv1.PrepareHostOperationResponse{Operation: s.operation()}), nil
 }
-func (s *hostTestPanel) GetHostOperation(_ context.Context, r *connect.Request[hostv1.GetHostOperationRequest]) (*connect.Response[hostv1.GetHostOperationResponse], error) {
+func (s *hostTestPanel) GetHostOperation(ctx context.Context, r *connect.Request[hostv1.GetHostOperationRequest]) (*connect.Response[hostv1.GetHostOperationResponse], error) {
+	s.mu.Lock()
+	gate := s.interruptProfile
+	s.mu.Unlock()
+	if gate != nil {
+		select {
+		case gate <- struct{}{}:
+		default:
+		}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.op == nil || s.op.OperationId != r.Msg.OperationId {
@@ -310,6 +322,7 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	if err = verifyService(service, uid, 2); err != nil {
 		t.Fatal(err)
 	}
+	var interrupt <-chan struct{}
 	run := func(passwordInput string, args ...string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
 		defer cancel()
@@ -320,6 +333,15 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 			return err
 		}
 		defer terminal.Close()
+		if interrupt != nil {
+			go func(gate <-chan struct{}) {
+				select {
+				case <-gate:
+					_ = c.Process.Kill()
+				case <-ctx.Done():
+				}
+			}(interrupt)
+		}
 		done := make(chan struct{})
 		var output strings.Builder
 		go func() {
@@ -455,5 +477,69 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	if err = verifyService(service, uid, 2); err != nil {
 		t.Fatal(err)
 	}
-	t.Log("Verified fresh PAM failure/root bypass rejection, identity promotion/demotion, actual daemon ACK, preserved UUID/r4, nonce replay rejection, signed helper install/readiness/revocation/removal, and real startup failure recovery")
+	// Expired grants cannot claim a lease or change identity.
+	panel.set(service, 1, false)
+	panel.mu.Lock()
+	panel.current.Authorization.ExpiresAt = timestamppb.New(time.Now().Add(-time.Minute))
+	panel.mu.Unlock()
+	if err = run(password, "apply", "--manifest", m.ManifestPath, "--revision", "7"); err == nil {
+		t.Fatal("expired approval executed")
+	}
+	if err = verifyService(service, uid, 2); err != nil {
+		t.Fatal(err)
+	}
+	// A lost phase-3 report stays in the durable host outbox, and the daemon
+	// cannot advance applied until exactly that report is accepted on resume.
+	panel.set(service, 1, false)
+	panel.mu.Lock()
+	panel.failLocalACK = true
+	panel.mu.Unlock()
+	if err = run(password, "apply", "--manifest", m.ManifestPath, "--revision", "8"); err == nil {
+		t.Fatal("lost host ACK was hidden")
+	}
+	var pending hostJournal
+	if err = hostops.ReadJSON(filepath.Join(journalDir(m), "transaction.json"), &pending, true); err != nil {
+		t.Fatal(err)
+	}
+	if pending.Phase != "local_applied" || len(pending.Receipt) == 0 {
+		t.Fatal("lost host receipt was not durable")
+	}
+	store, err = privileged.Open(m.PrivilegedStateFile)
+	if err != nil || store.State().AppliedRevision >= 8 {
+		t.Fatal("daemon advanced before host report")
+	}
+	panel.mu.Lock()
+	panel.failLocalACK = false
+	panel.mu.Unlock()
+	if err = run(password, "resume", "--manifest", m.ManifestPath); err != nil {
+		t.Fatal(err)
+	}
+	// Kill the actual host process after it stopped the daemon and fenced
+	// state inodes, while the online lease recheck is in progress.
+	panel.set(service, 2, false)
+	gate := make(chan struct{}, 1)
+	panel.mu.Lock()
+	panel.interruptProfile = gate
+	panel.mu.Unlock()
+	interrupt = gate
+	if err = run(password, "apply", "--manifest", m.ManifestPath, "--revision", "9"); err == nil {
+		t.Fatal("host process was not interrupted")
+	}
+	interrupt = nil
+	panel.mu.Lock()
+	panel.interruptProfile = nil
+	panel.mu.Unlock()
+	if err = hostops.ReadJSON(filepath.Join(journalDir(m), "transaction.json"), &pending, true); err != nil {
+		t.Fatal(err)
+	}
+	if pending.Phase != "mutating" || len(pending.Ownership) == 0 {
+		t.Fatal("interrupt did not exercise fenced state")
+	}
+	if err = run(password, "resume", "--manifest", m.ManifestPath); err != nil {
+		t.Fatal(err)
+	}
+	if err = verifyService(service, 0, 1); err != nil {
+		t.Fatal("interrupted demotion did not restore original root profile:", err)
+	}
+	t.Log("Verified real PAM, identity promotion/demotion, daemon ACK, UUID/r4 preservation, replay/expiry rejection, helper lifecycle/revocation, startup failure, lost host receipt, and process-kill recovery")
 }
