@@ -42,6 +42,9 @@ var RootCmd = &cobra.Command{
 			return err
 		}
 		installedService.apply(flags)
+		if installedService != nil {
+			flags.ServiceManifestFile = installedService.ManifestPath
+		}
 		loadFromEnv()
 		// Subcommands use the same bootstrap configuration as the daemon.
 		if flags.ConfigFile != "" {

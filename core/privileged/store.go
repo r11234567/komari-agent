@@ -39,15 +39,20 @@ const (
 // state file leaves the Agent with the narrowest capabilities rather than
 // silently restoring something wider.
 type Settings struct {
-	RemoteControlEnabled bool `json:"remote_control_enabled"`
-	WebSSHEnabled        bool `json:"webssh_enabled"`
-	ExecutionEnabled     bool `json:"execution_enabled"`
-	EnableGPU            bool `json:"enable_gpu"`
-	RescueHelperEnabled  bool `json:"rescue_helper_enabled"`
+	RequiredPrivilegeMode reportv1.PrivilegeMode `json:"required_privilege_mode"`
+	RemoteControlEnabled  bool                   `json:"remote_control_enabled"`
+	WebSSHEnabled         bool                   `json:"webssh_enabled"`
+	ExecutionEnabled      bool                   `json:"execution_enabled"`
+	EnableGPU             bool                   `json:"enable_gpu"`
+	RescueHelperEnabled   bool                   `json:"rescue_helper_enabled"`
 }
 
 // State is what this host persists about the privileged track.
 type State struct {
+	ActiveSignedRevision []byte    `json:"active_signed_revision,omitempty"`
+	Outbox               []Receipt `json:"outbox,omitempty"`
+	RejectedReceipts     []Receipt `json:"rejected_receipts,omitempty"`
+
 	// AppliedRevision is the revision whose settings are active.
 	AppliedRevision uint64 `json:"applied_revision"`
 	// Active is what the Agent is running with now.
@@ -250,6 +255,10 @@ func (s *Store) DiscardPending() error {
 // process identity, so enabling them on a non-privileged Agent would announce
 // a capability that does not exist.
 func checkSupported(settings Settings, actual reportv1.PrivilegeMode) error {
+	if settings.RequiredPrivilegeMode != reportv1.PrivilegeMode_PRIVILEGE_MODE_UNSPECIFIED && settings.RequiredPrivilegeMode != actual {
+		return errors.New("actual daemon identity does not match required privilege mode")
+	}
+
 	privileged := actual == reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT ||
 		actual == reportv1.PrivilegeMode_PRIVILEGE_MODE_WINDOWS_ADMINISTRATOR
 	if privileged {
@@ -292,11 +301,12 @@ func describePrivilege(mode reportv1.PrivilegeMode) string {
 
 func settingsFromProto(value *configv1.PrivilegedConfig) Settings {
 	return Settings{
-		RemoteControlEnabled: value.GetRemoteControlEnabled(),
-		WebSSHEnabled:        value.GetWebsshEnabled(),
-		ExecutionEnabled:     value.GetExecutionEnabled(),
-		EnableGPU:            value.GetEnableGpu(),
-		RescueHelperEnabled:  value.GetRescueHelperEnabled(),
+		RequiredPrivilegeMode: value.GetRequiredPrivilegeMode(),
+		RemoteControlEnabled:  value.GetRemoteControlEnabled(),
+		WebSSHEnabled:         value.GetWebsshEnabled(),
+		ExecutionEnabled:      value.GetExecutionEnabled(),
+		EnableGPU:             value.GetEnableGpu(),
+		RescueHelperEnabled:   value.GetRescueHelperEnabled(),
 	}
 }
 
@@ -336,12 +346,24 @@ func (s *Store) commit(next State) error {
 	if err := os.Rename(name, s.path); err != nil {
 		return fmt.Errorf("replace privileged state: %w", err)
 	}
+	dir, err := os.Open(directory)
+	if err != nil {
+		return err
+	}
+	err = dir.Sync()
+	dir.Close()
+	if err != nil {
+		return err
+	}
 	s.state = next
 	return nil
 }
 
 func (state State) clone() State {
 	copied := state
+	copied.ActiveSignedRevision = append([]byte(nil), state.ActiveSignedRevision...)
+	copied.Outbox = cloneReceipts(state.Outbox)
+	copied.RejectedReceipts = cloneReceipts(state.RejectedReceipts)
 	if state.Previous != nil {
 		previous := *state.Previous
 		copied.Previous = &previous

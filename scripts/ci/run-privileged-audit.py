@@ -24,7 +24,7 @@ mapping = {
 }
 expected = {
  'TestAuditAppliedPrivilegeBlockedByInstallFlag', 'TestAuditAppliedGPUNotUsedByCollectors',
- 'TestAuditProtocolSettingsSilentlyIgnored', 'TestAuditRequiredPrivilegeModeIsLost',
+ 'TestAuditProtocolSettingsSilentlyIgnored',
  'TestAuditSecondRollbackCanWidenWithoutAuthentication', 'TestAuditDaemonStoreOverwritesCLIChange',
  'TestAuditSeparateExecutionAndWebSSHFlagsIgnored',
 }

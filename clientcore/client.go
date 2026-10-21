@@ -23,6 +23,7 @@ import (
 	"github.com/komari-monitor/komari-agent/core/capability"
 	"github.com/komari-monitor/komari-agent/core/credentials"
 	"github.com/komari-monitor/komari-agent/core/enrollment"
+	"github.com/komari-monitor/komari-agent/core/hostops"
 	"github.com/komari-monitor/komari-agent/core/privileged"
 	"github.com/komari-monitor/komari-agent/core/runtimeconfig"
 	"github.com/komari-monitor/komari-agent/core/signing"
@@ -38,6 +39,7 @@ import (
 	configv1connect "github.com/r11234567/komari-proto/gen/go/komari/config/v1/configv1connect"
 	execv1 "github.com/r11234567/komari-proto/gen/go/komari/exec/v1"
 	execv1connect "github.com/r11234567/komari-proto/gen/go/komari/exec/v1/execv1connect"
+	hostv1connect "github.com/r11234567/komari-proto/gen/go/komari/host/v1/hostv1connect"
 	metricsv1 "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1"
 	metricsv1connect "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1/metricsv1connect"
 	networkv1 "github.com/r11234567/komari-proto/gen/go/komari/network/v1"
@@ -63,6 +65,12 @@ var (
 )
 
 type Client struct {
+	host         hostv1connect.HostServiceClient
+	hostManifest *hostops.Manifest
+	hostPolicy   *hostops.Policy
+	startupID    string
+	receiptMu    sync.Mutex
+
 	config     configv1connect.ConfigServiceClient
 	privileged configv1connect.PrivilegedDeliveryServiceClient
 	events     agentv1connect.AgentEventServiceClient
@@ -254,6 +262,7 @@ func New(config *flags_pkg.Config, store *runtimeconfig.Store) (*Client, error) 
 		privileged.SetActive(privilegedStore)
 	}
 	c := &Client{
+		startupID:       uuid.NewString(),
 		endpoint:        endpoint,
 		token:           token,
 		agentID:         agentID,
@@ -267,6 +276,19 @@ func New(config *flags_pkg.Config, store *runtimeconfig.Store) (*Client, error) 
 	networkHTTPClient := dnsresolver.GetHTTPClientWithPreference(35*time.Second, config.PreferIPVersion)
 	streamHTTPClient := dnsresolver.GetStreamingHTTPClientWithPreference(config.PreferIPVersion)
 
+	c.host = hostv1connect.NewHostServiceClient(wrapWithDPoP(httpClient, c), baseURL)
+	if config.ServiceManifestFile != "" {
+		m, e := hostops.ReadManifest(config.ServiceManifestFile)
+		if e == nil {
+			c.hostPolicy, e = hostops.ReadPolicy(m)
+			if e == nil {
+				c.hostManifest = m
+			}
+		}
+		if e != nil {
+			log.Printf("Privileged v2 installation policy unavailable: %v", e)
+		}
+	}
 	c.config = configv1connect.NewConfigServiceClient(wrapWithDPoP(streamHTTPClient, c), baseURL)
 	c.privileged = configv1connect.NewPrivilegedDeliveryServiceClient(wrapWithDPoP(streamHTTPClient, c), baseURL)
 	c.events = agentv1connect.NewAgentEventServiceClient(wrapWithDPoP(streamHTTPClient, c), baseURL)
@@ -283,6 +305,11 @@ func (c *Client) Run(ctx context.Context) error {
 	// Startup trust bundle self-healing: ensure control plane keys are pinned
 	_ = c.ensureTrustBundle(ctx)
 
+	initPending := false
+	if err := c.initializeHost(ctx); err != nil {
+		initPending = true
+		log.Printf("Host protocol/baseline initialization pending: %v", err)
+	}
 	// Startup is where a rejection is most expensive: returning an error here
 	// sends the caller back through New + the whole handshake, so a panel that
 	// is rate limiting or briefly refusing the token would be re-handshaked at
@@ -338,8 +365,14 @@ func (c *Client) Run(ctx context.Context) error {
 		}()
 	}
 	capabilities := capability.Detect(runtimeconfig.RemoteControlEnabled())
+	if initPending {
+		start(c.runHostInitialization)
+	}
 	start(c.runAgentEvents)
 	start(c.runConfigUpdates)
+	if c.privilegedStore != nil {
+		start(c.runReceiptOutbox)
+	}
 	if c.privilegedStore != nil {
 		start(c.runPrivilegedUpdates)
 	}
@@ -567,6 +600,9 @@ func (c *Client) runPrivilegedUpdates(ctx context.Context) {
 // honour: doing so would turn the panel's mistake into a silent privilege
 // grant.
 func (c *Client) recordPrivilegedRevision(parent context.Context, revision *configv1.PrivilegedRevision) error {
+	if revision.GetInstallationBaseline() {
+		return c.acceptBaseline(parent, revision)
+	}
 	state := configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_NEEDS_CONFIRMATION
 	var detail *commonv1.ErrorDetail
 

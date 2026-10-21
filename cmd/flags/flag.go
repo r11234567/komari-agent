@@ -1,6 +1,7 @@
 package flags_pkg
 
 type Config struct {
+	ServiceManifestFile  string  `json:"-"`
 	AutoDiscoveryKey     string  `json:"auto_discovery_key" env:"AGENT_AUTO_DISCOVERY_KEY"`           // 自动发现密钥
 	ServerName           string  `json:"server_name" env:"AGENT_SERVER_NAME"`                         // 首次自动发现时显示的服务器名称
 	DisableAutoUpdate    bool    `json:"disable_auto_update" env:"AGENT_DISABLE_AUTO_UPDATE"`         // 禁用自动更新
