@@ -93,6 +93,12 @@ func update(args []string, out io.Writer) error {
 	if err := requireRoot(); err != nil {
 		return err
 	}
+	unlock, lockErr := acquireHostLock()
+	if lockErr != nil {
+		return lockErr
+	}
+	defer unlock()
+
 	m, err := hostops.ReadManifest(*manifest)
 	if err != nil {
 		return err
@@ -262,6 +268,12 @@ func migrate(args []string, out io.Writer) error {
 	if err = requireRoot(); err != nil {
 		return err
 	}
+	unlock, lockErr := acquireHostLock()
+	if lockErr != nil {
+		return lockErr
+	}
+	defer unlock()
+
 	binary, err := verifiedArtifact(*artifact, *digest)
 	if err != nil {
 		return err
@@ -287,7 +299,7 @@ func migrate(args []string, out io.Writer) error {
 		return errors.New("service already has a manifest; refusing to replace its policy")
 	}
 	journal := filepath.Join("/var/lib/komari-host", m.ServiceName)
-	for _, dir := range []string{filepath.Dir(m.Executable), hostops.Registry, journal, filepath.Join("/etc/systemd/system", m.ServiceName+".d")} {
+	for _, dir := range []string{filepath.Dir(m.Executable), hostops.Registry, journal, filepath.Join("/etc/systemd/system", m.ServiceName+".service.d")} {
 		if err = ensureTrustedDir(dir); err != nil {
 			return err
 		}
@@ -338,7 +350,7 @@ func migrate(args []string, out io.Writer) error {
 		unit.WriteString(unitQuote(a))
 	}
 	unit.WriteByte('\n')
-	if err = hostops.AtomicWrite(filepath.Join("/etc/systemd/system", m.ServiceName+".d", "90-komari-trusted-layout.conf"), []byte(unit.String()), 0o600); err != nil {
+	if err = hostops.AtomicWrite(filepath.Join("/etc/systemd/system", m.ServiceName+".service.d", "90-komari-trusted-layout.conf"), []byte(unit.String()), 0o600); err != nil {
 		return err
 	}
 	if _, err = systemctl("daemon-reload"); err != nil {

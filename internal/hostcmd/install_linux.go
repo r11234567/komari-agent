@@ -27,6 +27,12 @@ func install(args []string, out io.Writer) error {
 	if err := requireRoot(); err != nil {
 		return err
 	}
+	unlock, lockErr := acquireHostLock()
+	if lockErr != nil {
+		return lockErr
+	}
+	defer unlock()
+
 	if !hostops.ValidService(*service) || !hostops.ValidService(*account) {
 		return errors.New("invalid service or account name")
 	}
