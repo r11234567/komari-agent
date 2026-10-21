@@ -87,9 +87,8 @@ type Client struct {
 	agentID    string
 	sequence   atomic.Uint64
 	store      *runtimeconfig.Store
-	// privilegedStore records privileged revisions without applying them. The
-	// Agent only ever writes a pending revision here; promoting it is an
-	// explicit local decision made through the CLI.
+	// privilegedStore is daemon-owned. Only a verified current v2 approval can
+	// activate a same-identity candidate; host actions remain unavailable.
 	privilegedStore *privileged.Store
 	// credentialStore holds the enrolled identity, including the panel signing
 	// keys this Agent pinned. It is what makes a delivered instruction

@@ -192,13 +192,7 @@ func (s *Store) RecordPending(revision *configv1.PrivilegedRevision) error {
 	return s.commit(next)
 }
 
-// Promote makes the pending revision active.
-//
-// It refuses when the resulting settings would exceed the privilege the Agent
-// actually holds. That check is not redundant with the panel's classification:
-// the panel decides what an upgrade requires, but only the host knows what it
-// ended up with, and trusting the panel's expectation over the observed state
-// is how a failed upgrade would silently look like a successful one.
+// Promote is a retired compatibility API; unsigned local promotion is forbidden.
 func (s *Store) Promote(actual reportv1.PrivilegeMode) (Settings, error) {
 	return s.Active(), errors.New("unsigned promotion retired; daemon requires a current signed v2 approval")
 }
@@ -239,11 +233,7 @@ func (s *Store) DiscardPending() error {
 	return s.commit(next)
 }
 
-// checkSupported refuses settings the host cannot honour.
-//
-// Remote control, WebSSH and execution all run commands with the Agent's own
-// process identity, so enabling them on a non-privileged Agent would announce
-// a capability that does not exist.
+// checkSupported validates actual identity and rejects unavailable host actions.
 func checkSupported(settings Settings, actual reportv1.PrivilegeMode) error {
 	if settings.RequiredPrivilegeMode != reportv1.PrivilegeMode_PRIVILEGE_MODE_UNSPECIFIED && settings.RequiredPrivilegeMode != actual {
 		return errors.New("actual daemon identity does not match required privilege mode")

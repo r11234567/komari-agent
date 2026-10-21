@@ -62,3 +62,64 @@ func TestRegressionProtocolSettingsSilentlyIgnored(t *testing.T) {
 		t.Fatal("custom_dns is accepted and revision advances, but Snapshot has no custom DNS field and resolver is not updated")
 	}
 }
+
+func TestRegressionRemoteNICFalseOverridesBootstrap(t *testing.T) {
+	oldFlags := *flags_pkg.GlobalConfig
+	flags_pkg.GlobalConfig.GetIpAddrFromNic = true
+	t.Cleanup(func() { *flags_pkg.GlobalConfig = oldFlags })
+	store, err := New(FromFlags(flags_pkg.GlobalConfig), filepath.Join(t.TempDir(), "runtime.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := active.Load()
+	SetActive(store)
+	t.Cleanup(func() { SetActive(old) })
+	no := false
+	if _, err = store.Apply(&configv1.DesiredConfig{Revision: 1, Runtime: &configv1.RuntimeConfig{GetIpAddrFromNic: &no}}); err != nil {
+		t.Fatal(err)
+	}
+	if Current().GetIPAddrFromNIC {
+		t.Fatal("remote false could not disable a true bootstrap NIC setting")
+	}
+}
+func TestRegressionRuntimeSnapshotAndACKAreAtomicAcrossRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runtime.json")
+	initial := FromFlags(&flags_pkg.Config{Interval: 3})
+	store, err := New(initial, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := []byte("immutable-ack-r1")
+	if _, err = store.ApplyWithReceipt(&configv1.DesiredConfig{Revision: 1, Runtime: &configv1.RuntimeConfig{}}, first); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := New(initial, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.Current().Revision != 1 || string(reopened.Receipt()) != string(first) {
+		t.Fatal("crash lost snapshot or its ACK")
+	}
+	if _, err = reopened.ApplyWithReceipt(&configv1.DesiredConfig{Revision: 2, Runtime: &configv1.RuntimeConfig{}}, []byte("immutable-ack-r2")); err != nil {
+		t.Fatal(err)
+	}
+	if string(reopened.Receipt()) != string(first) {
+		t.Fatal("new revision overwrote the old immutable receipt")
+	}
+	if err = reopened.FinishReceipt([]byte("wrong-payload")); err != nil {
+		t.Fatal(err)
+	}
+	if string(reopened.Receipt()) != string(first) {
+		t.Fatal("concurrent send deleted a different receipt")
+	}
+	if err = reopened.FinishReceipt(first); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err = New(initial, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(reopened.Receipt()) != "immutable-ack-r2" {
+		t.Fatal("next receipt did not survive restart")
+	}
+}

@@ -17,6 +17,8 @@ jobs:
           go-version-file: go.mod
       - name: Existing behavior regression tests
         run: scripts/ci/run-go-tests.sh ./cmd ./core/hostops ./core/statelock ./internal/hostcmd ./core/runtimeconfig ./core/privileged ./core/capability ./core/localauth ./clientcore ./server ./terminal ./rescue ./update ./monitoring/unit
+      - name: Signed approval, protected policy, final gates and lost ACK recovery
+        run: scripts/ci/test-approved-delivery.sh
       - name: Trusted installation and migration on disposable systemd runner
         run: scripts/ci/test-trusted-install.sh
       - name: Cross-platform host tool compilation

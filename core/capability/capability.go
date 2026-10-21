@@ -25,9 +25,9 @@ func Detect(remoteControlEnabled bool) *reportv1.AgentCapabilities {
 	return result
 }
 
-// RemoteControlAllowed is the enforcement point for execution and terminal
-// access. Remote control always runs commands with the Agent process identity,
-// so a non-root/non-administrator Agent must never expose it.
+// RemoteControlAllowed enforces the master switch. A signed same-identity
+// grant permits non-root access using the daemon account only. Final execution
+// and terminal entry points additionally require their separate sub-capability.
 func RemoteControlAllowed(remoteControlEnabled bool) (bool, string) {
 	mode, privilegedOS, limitation := privilegeState()
 	cfg := runtimeconfig.EffectiveForMode(mode)
