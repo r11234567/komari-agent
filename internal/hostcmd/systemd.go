@@ -26,12 +26,24 @@ func systemctl(args ...string) (string, error) {
 	c.Stdout = &out
 	c.Stderr = &out
 	if err := c.Run(); err != nil {
-		return "", fmt.Errorf("systemctl %s failed: %w", args[0], err)
+		return "", fmt.Errorf("systemctl %s failed: %w: %s", args[0], err, strings.TrimSpace(out.String()))
 	}
 	if out.exceeded {
 		return "", errors.New("systemctl output exceeds limit")
 	}
 	return out.String(), nil
+}
+
+// Each call is an explicit authenticated transaction/recovery action, not an
+// automatic restart loop. A broken target can exhaust systemd's start counter;
+// restoring the reviewed original profile must not remain blocked by that
+// counter. Normal Restart= policy and its rate limits remain configured.
+func restartReviewedService(service string) error {
+	if _, err := systemctl("reset-failed", service); err != nil {
+		return err
+	}
+	_, err := systemctl("restart", service)
+	return err
 }
 
 type limitedBuffer struct {

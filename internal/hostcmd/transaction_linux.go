@@ -638,14 +638,14 @@ func executeTransaction(ctx context.Context, m *hostops.Manifest, p *hostops.Pol
 		if _, err = systemctl("enable", helperUnit(m)); err != nil {
 			return err
 		}
-		if _, err = systemctl("restart", helperUnit(m)); err != nil {
+		if err = restartReviewedService(helperUnit(m)); err != nil {
 			return err
 		}
 		if err = verifyService(m.ServiceName+"-rescue", 0, 1); err != nil {
 			return err
 		}
 	}
-	if _, err = systemctl("restart", m.ServiceName); err != nil {
+	if err = restartReviewedService(m.ServiceName); err != nil {
 		return err
 	}
 	actualUID := uid
@@ -769,11 +769,11 @@ func restoreTransaction(m *hostops.Manifest, j *hostJournal) error {
 		if _, err := systemctl("enable", helperUnit(m)); err != nil {
 			return err
 		}
-		if _, err := systemctl("restart", helperUnit(m)); err != nil {
+		if err := restartReviewedService(helperUnit(m)); err != nil {
 			return err
 		}
 	}
-	if _, err := systemctl("restart", m.ServiceName); err != nil {
+	if err := restartReviewedService(m.ServiceName); err != nil {
 		return err
 	}
 	policy, err := hostops.ReadPolicy(m)
