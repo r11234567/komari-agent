@@ -331,6 +331,12 @@ func apply(args []string, out io.Writer) error {
 	var helperVersion string
 	for _, a := range r.Authorization.Actions {
 		if a == 2 {
+			if *artifact == "" {
+				*artifact = filepath.Join("/var/cache/komari", m.ServiceName, "komari-agent-rescue")
+			}
+			if *release == "" {
+				*release = *artifact + ".release.json"
+			}
 			var signed hostops.ReleaseManifest
 			if err = hostops.ReadJSON(*release, &signed, true); err != nil {
 				return err
@@ -361,6 +367,9 @@ func apply(args []string, out io.Writer) error {
 		}
 	}
 	fmt.Fprintf(out, "service=%s actual_user=%s main_pid=%s policy_mode=%d target_mode=%d actions=%v\n", m.ServiceName, o.User, o.MainPID, p.PrivilegeMode, r.Authorization.TargetPrivilegeMode, r.Authorization.Actions)
+	if helperVersion != "" {
+		fmt.Fprintf(out, "verified_helper_release=%s\n", helperVersion)
+	}
 	operator, err := authenticate()
 	if err != nil {
 		return err
@@ -486,8 +495,9 @@ func executeTransaction(ctx context.Context, m *hostops.Manifest, p *hostops.Pol
 		return errors.New("host operation is not applying")
 	}
 	settings := privileged.SettingsFromProto(r.Privileged)
-	// Ceilings in the active profile also constrain any previously writable
-	// bootstrap/snapshot. A host transition never grants more than this approval.
+	// Local ceilings remain independent of panel targets, so a later approved
+	// same-identity change can re-enable a capability. Daemon startup verifies
+	// historical snapshots against the root-pinned signature before using them.
 	p.PrivilegeMode = int32(settings.RequiredPrivilegeMode)
 	p.HelperInstalled = settings.RescueHelperEnabled
 	p.HelperAuthorized = settings.RescueHelperEnabled
@@ -732,6 +742,9 @@ func finishHost(ctx context.Context, m *hostops.Manifest, p *panel, j *hostJourn
 				return err
 			}
 			r := resp.Msg.Revision
+			if err = hostops.VerifySignedRevision(p.trust, r); err != nil {
+				return err
+			}
 			if r.GetRevision() != old.Revision || r.GetApprovalGeneration() != old.ApprovalGeneration {
 				return errors.New("host result belongs to a superseded target; inspect the journal and restore before another grant")
 			}
@@ -789,14 +802,6 @@ func resume(args []string, out io.Writer, restore bool) error {
 	if err != nil {
 		return err
 	}
-	t, err := hostops.ReadTrust(m)
-	if err != nil {
-		return err
-	}
-	p, err := newPanel(m, t)
-	if err != nil {
-		return err
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	if restore || (j.Phase != "local_applied" && j.Phase != "restored") {
@@ -811,10 +816,26 @@ func resume(args []string, out io.Writer, restore bool) error {
 		if err = j.save(); err != nil {
 			return err
 		}
+		t, e := hostops.ReadTrust(m)
+		if e != nil {
+			return fmt.Errorf("local restoration complete; cannot deliver receipt: %w", e)
+		}
+		p, e := newPanel(m, t)
+		if e != nil {
+			return fmt.Errorf("local restoration complete; cannot deliver receipt: %w", e)
+		}
 		if err = j.report(ctx, p, hostv1.HostOperationPhase_HOST_OPERATION_PHASE_RESTORED, "interrupted operation restored by local administrator"); err != nil {
 			return fmt.Errorf("local restoration complete; recovery receipt pending: %w", err)
 		}
 		return archiveJournal(&j)
+	}
+	t, err := hostops.ReadTrust(m)
+	if err != nil {
+		return err
+	}
+	p, err := newPanel(m, t)
+	if err != nil {
+		return err
 	}
 	if j.Phase == "restored" {
 		if err = j.report(ctx, p, hostv1.HostOperationPhase_HOST_OPERATION_PHASE_RESTORED, j.Error); err != nil {
@@ -822,23 +843,30 @@ func resume(args []string, out io.Writer, restore bool) error {
 		}
 		return archiveJournal(&j)
 	}
-	current, err := p.current(ctx)
-	if err != nil {
-		return fmt.Errorf("cannot establish current unexpired authority; use restore to recover: %w", err)
-	}
 	var original configv1.PrivilegedRevision
 	if err = proto.Unmarshal(j.Revision, &original); err != nil {
 		return err
-	}
-	if !proto.Equal(current.Authorization, original.Authorization) {
-		return errors.New("approval superseded; restore the old service before another apply")
 	}
 	op, err := p.get(ctx, j.ID)
 	if err != nil {
 		return err
 	}
-	if err = hostops.VerifyOperation(t, op, current.Authorization, j.ID); err != nil {
+	if err = hostops.VerifyOperation(t, op, original.Authorization, j.ID); err != nil {
 		return fmt.Errorf("lease expired or invalid; restore required: %w", err)
+	}
+	if op.Phase == 3 {
+		j.Receipt = nil
+		if err = j.save(); err != nil {
+			return err
+		}
+		return finishHost(ctx, m, p, &j, out)
+	}
+	current, err := p.current(ctx)
+	if err != nil {
+		return fmt.Errorf("cannot establish current unexpired authority; use restore to recover: %w", err)
+	}
+	if !proto.Equal(current.Authorization, original.Authorization) {
+		return errors.New("approval superseded; restore before another grant")
 	}
 	if op.Phase < 3 {
 		if err = j.report(ctx, p, hostv1.HostOperationPhase_HOST_OPERATION_PHASE_LOCAL_APPLIED, ""); err != nil {

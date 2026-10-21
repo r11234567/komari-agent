@@ -142,7 +142,10 @@ func install(args []string, out io.Writer) error {
 		unit.WriteByte(' ')
 		unit.WriteString(unitQuote(a))
 	}
-	unit.WriteString("\nWorkingDirectory=" + unitQuote(stateDir) + "\nUser=" + *account + "\nRestart=on-failure\nRestartSec=5\nAmbientCapabilities=CAP_NET_RAW\nCapabilityBoundingSet=CAP_NET_RAW\nNoNewPrivileges=true\n[Install]\nWantedBy=multi-user.target\n")
+	// WorkingDirectory is a unit path directive, not an ExecStart argv item.
+	// Quoting it produces a literal leading quote and systemd rejects the unit.
+	// stateDir contains only a fixed prefix and the validated service ID.
+	unit.WriteString("\nWorkingDirectory=" + stateDir + "\nUser=" + *account + "\nRestart=on-failure\nRestartSec=5\nAmbientCapabilities=CAP_NET_RAW\nCapabilityBoundingSet=CAP_NET_RAW\nNoNewPrivileges=true\n[Install]\nWantedBy=multi-user.target\n")
 	if err = ensureTrustedDir("/etc/systemd/system"); err != nil {
 		return err
 	}

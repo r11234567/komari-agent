@@ -3,6 +3,7 @@ package rescue
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -73,8 +74,20 @@ type Helper struct {
 }
 
 func New(config Config) (*Helper, error) {
-	credStore, _ := credentials.Open(config.CredentialsFile)
+	var credStore *credentials.Store
 	var identity credentials.Identity
+	if config.HostManifest != "" {
+		data, err := hostops.ReadCandidate(config.CredentialsFile)
+		if err != nil {
+			return nil, err
+		}
+		if err = json.Unmarshal(data, &identity); err != nil {
+			return nil, err
+		}
+		config.Token = identity.AccessToken
+	} else {
+		credStore, _ = credentials.Open(config.CredentialsFile)
+	}
 	if credStore != nil {
 		if id, ok := credStore.Identity(); ok && id.AccessToken != "" {
 			identity = id
