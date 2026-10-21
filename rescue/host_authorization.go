@@ -80,7 +80,15 @@ func (h *Helper) watchAuthorization(ctx context.Context) {
 			} else {
 				h.leaseReady.Store(true)
 			}
-			_ = hostops.WriteJSON(hostops.HelperStatusPath(h.manifest), hostops.HelperStatus{PID: os.Getpid(), Authorized: h.authorized.Load(), LeaseReady: h.leaseReady.Load(), ObservedAt: time.Now().UTC()}, 0o644)
+			ticks, e := hostops.ProcessStartTicks(os.Getpid())
+			if e != nil {
+				continue
+			}
+			executable, e := os.Executable()
+			if e != nil {
+				continue
+			}
+			_ = hostops.WriteJSON(hostops.HelperStatusPath(h.manifest), hostops.HelperStatus{PID: os.Getpid(), StartTicks: ticks, Executable: executable, Authorized: h.authorized.Load(), LeaseReady: h.leaseReady.Load(), ObservedAt: time.Now().UTC()}, 0o644)
 		}
 	}
 }

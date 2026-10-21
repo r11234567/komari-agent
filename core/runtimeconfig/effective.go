@@ -76,6 +76,17 @@ func Effective() EffectiveConfig {
 			s.ExecutionEnabled = s.ExecutionEnabled && p.AllowExecution
 			s.EnableGPU = s.EnableGPU && p.AllowGPU
 			s.RescueHelperEnabled = s.RescueHelperEnabled && p.AllowRescueHelper && p.HelperInstalled && p.HelperAuthorized
+			// Formerly writable historical state must not revive a capability
+			// during restart, before the current host-approved target loads.
+			if store := privileged.ActiveStore(); store != nil && p.HostSettings != nil && store.State().AppliedRevision <= p.HostRevision {
+				target := p.HostSettings
+				s.RemoteControlEnabled = s.RemoteControlEnabled && target.RemoteControlEnabled
+				s.WebSSHEnabled = s.WebSSHEnabled && target.WebSSHEnabled
+				s.ExecutionEnabled = s.ExecutionEnabled && target.ExecutionEnabled
+				s.EnableGPU = s.EnableGPU && target.EnableGPU
+				s.RescueHelperEnabled = s.RescueHelperEnabled && target.RescueHelperEnabled
+				result.Sources["host_transition_ceiling"] = fmt.Sprintf("protected host revision r%d", p.HostRevision)
+			}
 			if p.ForceDenyRemoteControl {
 				result.BlockedReason = "protected local force-deny"
 			}

@@ -152,6 +152,8 @@ type AppliedRecord struct {
 }
 type HelperStatus struct {
 	PID        int       `json:"pid"`
+	StartTicks uint64    `json:"start_ticks"`
+	Executable string    `json:"executable"`
 	Authorized bool      `json:"authorized"`
 	LeaseReady bool      `json:"lease_ready"`
 	ObservedAt time.Time `json:"observed_at"`

@@ -113,7 +113,10 @@ func (c *Client) recordPrivilegedRevision(ctx context.Context, r *configv1.Privi
 	helperInstalled, helperRunning, helperAuthorized := false, false, false
 	if settings.RescueHelperEnabled {
 		status, e := hostops.ReadHelperStatus(c.hostManifest)
-		if e != nil || !status.Authorized || !status.LeaseReady {
+		if e != nil {
+			return fmt.Errorf("helper observation failed: %w", e)
+		}
+		if !status.Authorized || !status.LeaseReady {
 			return errors.New("approved helper has not reached verified running/authorized/lease-ready status")
 		}
 		helperInstalled = policy.HelperInstalled

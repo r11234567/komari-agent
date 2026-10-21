@@ -499,6 +499,8 @@ func executeTransaction(ctx context.Context, m *hostops.Manifest, p *hostops.Pol
 	// same-identity change can re-enable a capability. Daemon startup verifies
 	// historical snapshots against the root-pinned signature before using them.
 	p.PrivilegeMode = int32(settings.RequiredPrivilegeMode)
+	p.HostRevision = r.Revision
+	p.HostSettings = &settings
 	p.HelperInstalled = settings.RescueHelperEnabled
 	p.HelperAuthorized = settings.RescueHelperEnabled
 	if err = hostops.WriteJSON(m.HostPolicyFile, p, 0o644); err != nil {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -37,12 +38,26 @@ func ReadHelperStatus(m *Manifest) (*HelperStatus, error) {
 	if !root {
 		return nil, errors.New("helper PID is not root")
 	}
+	expected := filepath.Join(filepath.Dir(m.HostTool), "komari-agent-rescue")
 	exe, err := os.Readlink(prefix + "/exe")
+	// Linux ptrace rules prevent a non-root daemon from reading a root
+	// process's exe link. Its root-owned heartbeat binds executable and PID
+	// start ticks; UID and cgroup are still observed from the kernel.
+	if err != nil {
+		if !os.IsPermission(err) || os.Geteuid() == 0 {
+			return nil, err
+		}
+		exe = status.Executable
+	}
+	if exe != expected || status.Executable != expected {
+		return nil, errors.New("helper PID executable mismatch")
+	}
+	ticks, err := ProcessStartTicks(status.PID)
 	if err != nil {
 		return nil, err
 	}
-	if exe != filepath.Join(filepath.Dir(m.HostTool), "komari-agent-rescue") {
-		return nil, errors.New("helper PID executable mismatch")
+	if ticks == 0 || ticks != status.StartTicks {
+		return nil, errors.New("helper PID was reused")
 	}
 	cgroup, err := os.ReadFile(prefix + "/cgroup")
 	if err != nil {
@@ -55,6 +70,22 @@ func ReadHelperStatus(m *Manifest) (*HelperStatus, error) {
 		return nil, err
 	}
 	return &status, nil
+}
+
+func ProcessStartTicks(pid int) (uint64, error) {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0, err
+	}
+	end := strings.LastIndex(string(b), ") ")
+	if end < 0 {
+		return 0, errors.New("invalid proc stat")
+	}
+	fields := strings.Fields(string(b)[end+2:])
+	if len(fields) < 20 {
+		return 0, errors.New("truncated proc stat")
+	}
+	return strconv.ParseUint(fields[19], 10, 64)
 }
 
 func HostActionsReady(m *Manifest) bool {

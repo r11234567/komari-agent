@@ -44,7 +44,7 @@ func (c *Client) validatePersistedPrivileged() error {
 	if err != nil {
 		return err
 	}
-	if i.InstructionType != "komari.config.v2.PrivilegedRevision" || !bytes.Equal(i.Body, body) || r.AgentId != id.AgentID || r.Revision != state.AppliedRevision || r.ConfigHash != privileged.Hash(privileged.SettingsFromProto(r.Privileged)) || !privileged.Subset(state.Active, privileged.SettingsFromProto(r.Privileged)) {
+	if i.InstructionType != "komari.config.v2.PrivilegedRevision" || !bytes.Equal(i.Body, body) || r.AgentId != id.AgentID || r.GetAuthorization().GetServiceId() != c.hostManifest.ServiceName || r.Revision != state.AppliedRevision || r.ConfigHash != privileged.Hash(privileged.SettingsFromProto(r.Privileged)) || !privileged.Subset(state.Active, privileged.SettingsFromProto(r.Privileged)) {
 		return errors.New("persisted active privileges do not match the protected signed snapshot")
 	}
 	return nil
