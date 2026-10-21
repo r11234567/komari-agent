@@ -126,6 +126,7 @@ func (c *Client) recordPrivilegedRevision(ctx context.Context, r *configv1.Privi
 	message.Observation.HelperInstalled = helperInstalled
 	message.Observation.HelperRunning = helperRunning
 	message.Observation.HelperAuthorized = helperAuthorized
+	message.Observation.HelperLeaseReady = helperRunning && helperAuthorized
 	if operation != nil {
 		message.Observation.OperationId = operation.OperationId
 	}

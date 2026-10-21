@@ -38,6 +38,8 @@ import (
 	rescuev1 "github.com/r11234567/komari-proto/gen/go/komari/rescue/v1"
 	rescueconnect "github.com/r11234567/komari-proto/gen/go/komari/rescue/v1/rescuev1connect"
 	securityv1 "github.com/r11234567/komari-proto/gen/go/komari/security/v1"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -248,7 +250,7 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	mux.Handle(p, h)
 	p, h = rescueconnect.NewRescueServiceHandler(panel)
 	mux.Handle(p, h)
-	server := httptest.NewServer(mux)
+	server := httptest.NewServer(h2c.NewHandler(mux, &http2.Server{}))
 	defer server.Close()
 	if err = Run([]string{"install", "--service", service, "--user", "komari-stage6-agent", "--binary-dir", dir, "--", "--disable-auto-update"}, io.Discard); err != nil {
 		t.Fatal(err)
