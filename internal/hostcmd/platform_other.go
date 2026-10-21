@@ -28,3 +28,6 @@ func trust([]string, io.Writer) error { return errors.New("host trust setup requ
 func resume([]string, io.Writer, bool) error {
 	return errors.New("host recovery requires Linux systemd")
 }
+func fetchHelper([]string, io.Writer) error {
+	return errors.New("helper release staging requires the accepted Linux systemd adapter")
+}

@@ -22,6 +22,8 @@ func Run(args []string, out io.Writer) error {
 		return apply(args[1:], out)
 	case "trust":
 		return trust(args[1:], out)
+	case "fetch-helper":
+		return fetchHelper(args[1:], out)
 	case "resume", "restore":
 		return resume(args[1:], out, args[0] == "restore")
 	case "diagnose":

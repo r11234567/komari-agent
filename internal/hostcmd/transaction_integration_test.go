@@ -251,7 +251,7 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	p, h = rescueconnect.NewRescueServiceHandler(panel)
 	mux.Handle(p, h)
 	server := httptest.NewServer(h2c.NewHandler(mux, &http2.Server{}))
-	defer server.Close()
+	t.Cleanup(server.Close)
 	if err = Run([]string{"install", "--service", service, "--user", "komari-stage6-agent", "--binary-dir", dir, "--", "--disable-auto-update"}, io.Discard); err != nil {
 		t.Fatal(err)
 	}

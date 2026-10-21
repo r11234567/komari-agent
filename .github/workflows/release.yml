@@ -64,6 +64,18 @@ jobs:
           sha256sum "$BINARY_NAME" > "$BINARY_NAME.sha256"
           sha256sum "$HOST_BINARY_NAME" > "$HOST_BINARY_NAME.sha256"
 
+      - name: Sign exact helper release manifest
+        env:
+          KOMARI_RELEASE_SIGNING_KEY: ${{ secrets.KOMARI_RELEASE_SIGNING_KEY }}
+          KOMARI_RELEASE_SIGNING_KEY_ID: ${{ vars.KOMARI_RELEASE_SIGNING_KEY_ID }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_OS: ${{ matrix.goos }}
+          RELEASE_ARCH: ${{ matrix.goarch }}
+        run: |
+          helper="komari-agent-rescue-$RELEASE_OS-$RELEASE_ARCH"
+          if [ "$RELEASE_OS" = windows ]; then helper="$helper.exe"; fi
+          go run scripts/sign-helper-release.go "$helper" "$RELEASE_TAG" "$RELEASE_OS" "$RELEASE_ARCH"
+
 
       - name: Upload binary to release
         env:
@@ -81,6 +93,7 @@ jobs:
             RESCUE_BINARY_NAME=${RESCUE_BINARY_NAME}.exe
           fi
           gh release upload ${{ github.event.release.tag_name }} $RESCUE_BINARY_NAME --repo ${{ github.repository }}
+          gh release upload ${{ github.event.release.tag_name }} "$RESCUE_BINARY_NAME.release.json" --repo ${{ github.repository }}
           HOST_BINARY_NAME=komari-host-${{ matrix.goos }}-${{ matrix.goarch }}
           if [ "${{ matrix.goos }}" = "windows" ]; then HOST_BINARY_NAME=${HOST_BINARY_NAME}.exe; fi
           gh release upload ${{ github.event.release.tag_name }} "$HOST_BINARY_NAME" "$BINARY_NAME.sha256" "$HOST_BINARY_NAME.sha256" --repo ${{ github.repository }}
