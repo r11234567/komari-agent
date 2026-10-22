@@ -82,6 +82,28 @@ jobs:
           path: ci-artifacts/
           retention-days: 30
 
+  windows-monitoring-installer:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate installer and test its actual argument gate
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force ci-artifacts | Out-Null
+          [scriptblock]::Create((Get-Content ./install.ps1 -Raw)) | Out-Null
+          python scripts/test_installers.py WindowsInstallerTests 2>&1 | Tee-Object ci-artifacts/windows-installer-unit.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install released monitoring Agent and verify real SCM child process
+        shell: powershell
+        run: ./scripts/ci/test-windows-monitoring-install.ps1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-monitoring-installer-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+
   windows-state-regressions:
     runs-on: windows-latest
     timeout-minutes: 15

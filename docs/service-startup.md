@@ -61,6 +61,17 @@ sudo tail -n 60 /var/log/komari-agent.log
 
 ## Windows
 
+Windows 安装器目前仅开放普通监控模式：服务固定使用 `LocalService`，强制关闭远程控制、WebSSH、远程执行，不安装救援或提权脚本。无需新版 Agent，使用当前发布的二进制即可；Windows 的特权 v2 初始化、特权配置下发和主机动作仍不受支持。不要用面板的特权配置完成状态判断普通监控是否在线。
+
+在管理员 PowerShell 执行：
+
+```powershell
+$script = irm 'https://raw.githubusercontent.com/r11234567/komari-agent/main/install.ps1'
+& ([scriptblock]::Create($script)) -e 'https://panel.example.com'
+```
+
+首次安装没有凭据时，安装器会等待登录，并输出下面的登录、启动命令。重复运行安装命令会保留共享状态及节点身份；`--install-rescue` 和 `--install-runtime-identity root-or-administrator` 会在改动服务前拒绝。
+
 LocalService、LocalSystem 和交互用户的 APPDATA 各不相同。新安装器为 NSSM 显式设置全部四个状态路径，并在可执行文件旁写入相同的 CLI 默认值。使用管理员 PowerShell 注册和启动：
 
 ```powershell
