@@ -17,6 +17,10 @@ jobs:
           go-version-file: go.mod
       - name: Compile host and daemon contracts before executing tests
         run: bash scripts/ci/check-stage6-compile.sh
+      - name: Release signing configuration and end-to-end verification
+        env:
+          KOMARI_TEST_LOG_DIR: ci-artifacts/release-signing
+        run: scripts/ci/run-go-tests.sh scripts/sign-helper-release.go scripts/sign-helper-release_test.go
       - name: Existing behavior regression tests
         run: scripts/ci/run-go-tests.sh ./cmd ./cmd/flags ./core/hostops ./core/statelock ./internal/hostcmd ./core/runtimeconfig ./core/privileged ./core/capability ./core/localauth ./clientcore ./server ./terminal ./rescue ./update ./monitoring/unit
       - name: Public CLI surface, redaction and read-only inspection

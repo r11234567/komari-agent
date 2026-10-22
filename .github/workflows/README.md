@@ -171,9 +171,18 @@ for a snapshot.
 
 Jobs:
 
+- Checks `KOMARI_RELEASE_SIGNING_KEY` (Actions Secret) and
+  `KOMARI_RELEASE_SIGNING_KEY_ID` (Actions Variable) against the reviewed
+  `docs/release-signing-key.json` before starting the build matrix. The private
+  key is provisioned once; it is never generated during a release or enrollment.
 - Builds Windows, Linux, macOS, and FreeBSD binaries.
 - Embeds the release tag as `update.CurrentVersion`.
-- Uploads the matching binary to the GitHub release.
+- Signs the exact rescue-helper artifact manifest for each target.
+- Publishes the complete artifact set and publisher public metadata only after
+  every matrix target has built and signed successfully. Uploads can be retried.
+- Keeps preflight, build, signing and publishing logs (including failures) as
+  Actions artifacts for 30 days. Public metadata can be published; private keys
+  are never logged, uploaded or sent to nodes.
 
 ## `release-docker.yml`
 

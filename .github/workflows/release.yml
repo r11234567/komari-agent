@@ -8,11 +8,37 @@ permissions:
   contents: write
 
 jobs:
-  build-and-attach:
+  signing-preflight:
     if: ${{ !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Validate provisioned publisher key before building any target
+        env:
+          KOMARI_RELEASE_SIGNING_KEY: ${{ secrets.KOMARI_RELEASE_SIGNING_KEY }}
+          KOMARI_RELEASE_SIGNING_KEY_ID: ${{ vars.KOMARI_RELEASE_SIGNING_KEY_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ci-artifacts
+          trap 'echo "$?" > ci-artifacts/preflight-exit.txt' EXIT
+          go run scripts/sign-helper-release.go --check 2>&1 | tee ci-artifacts/signing-preflight.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-signing-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+
+  build-and-attach:
+    needs: signing-preflight
     runs-on: ubuntu-latest
 
     strategy:
+      fail-fast: false
       matrix:
         exclude:
           - goos: windows
@@ -43,6 +69,10 @@ jobs:
           CGO_ENABLED: 0
           VERSION: ${{ github.event.release.tag_name }}
         run: |
+          set -euo pipefail
+          mkdir -p ci-artifacts
+          exec > >(tee ci-artifacts/build.log) 2>&1
+          trap 'echo "$?" > ci-artifacts/build-exit.txt' EXIT
           BINARY_NAME=komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}
           if [ "${{ matrix.goos }}" = "windows" ]; then
             BINARY_NAME=${BINARY_NAME}.exe
@@ -50,7 +80,7 @@ jobs:
             # macOS binaries typically do not have a file extension
             true
           fi
-            go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}" -o $BINARY_NAME
+          go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}" -o $BINARY_NAME
 
           RESCUE_BINARY_NAME=komari-agent-rescue-${{ matrix.goos }}-${{ matrix.goarch }}
           if [ "${{ matrix.goos }}" = "windows" ]; then
@@ -72,29 +102,53 @@ jobs:
           RELEASE_OS: ${{ matrix.goos }}
           RELEASE_ARCH: ${{ matrix.goarch }}
         run: |
+          set -euo pipefail
+          trap 'echo "$?" > ci-artifacts/signing-exit.txt' EXIT
           helper="komari-agent-rescue-$RELEASE_OS-$RELEASE_ARCH"
           if [ "$RELEASE_OS" = windows ]; then helper="$helper.exe"; fi
-          go run scripts/sign-helper-release.go "$helper" "$RELEASE_TAG" "$RELEASE_OS" "$RELEASE_ARCH"
+          go run scripts/sign-helper-release.go "$helper" "$RELEASE_TAG" "$RELEASE_OS" "$RELEASE_ARCH" 2>&1 | tee ci-artifacts/signing.log
 
+      - name: Retain built and signed release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-binaries-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            komari-agent-*
+            komari-host-*
+          if-no-files-found: error
+          retention-days: 30
 
-      - name: Upload binary to release
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-logs-${{ matrix.goos }}-${{ matrix.goarch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+
+  publish:
+    needs: build-and-attach
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-binaries-*
+          path: release-assets
+          merge-multiple: true
+      - name: Publish only after every target builds and signs successfully
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          BINARY_NAME=komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            BINARY_NAME=${BINARY_NAME}.exe
-          elif [ "${{ matrix.goos }}" = "darwin" ]; then
-            true
-          fi
-          gh release upload ${{ github.event.release.tag_name }} $BINARY_NAME --repo ${{ github.repository }}
-          RESCUE_BINARY_NAME=komari-agent-rescue-${{ matrix.goos }}-${{ matrix.goarch }}
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            RESCUE_BINARY_NAME=${RESCUE_BINARY_NAME}.exe
-          fi
-          gh release upload ${{ github.event.release.tag_name }} $RESCUE_BINARY_NAME --repo ${{ github.repository }}
-          gh release upload ${{ github.event.release.tag_name }} "$RESCUE_BINARY_NAME.release.json" --repo ${{ github.repository }}
-          HOST_BINARY_NAME=komari-host-${{ matrix.goos }}-${{ matrix.goarch }}
-          if [ "${{ matrix.goos }}" = "windows" ]; then HOST_BINARY_NAME=${HOST_BINARY_NAME}.exe; fi
-          gh release upload ${{ github.event.release.tag_name }} "$HOST_BINARY_NAME" "$BINARY_NAME.sha256" "$HOST_BINARY_NAME.sha256" --repo ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
         shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ci-artifacts
+          trap 'echo "$?" > ci-artifacts/publish-exit.txt' EXIT
+          gh release upload "$RELEASE_TAG" release-assets/* docs/release-signing-key.json --repo "$RELEASE_REPOSITORY" --clobber 2>&1 | tee ci-artifacts/publish.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-publish-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30

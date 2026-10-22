@@ -53,7 +53,9 @@ Fetch uses a fixed repository/platform asset, verifies a separately pinned publi
 
 The helper independently checks current signed authorization and signed rescue tasks. It withdraws authorization and cancels managed actions when the signed target revokes it or validation/connectivity fails. Root-owned fresh heartbeat, PID start ticks, kernel UID and systemd cgroup are checked separately for installed/running/authorized/lease-ready status. A non-root daemon is not required to readlink a root process's `/proc/PID/exe`. Uninstallation is a separately approved host action.
 
-Actual signed helper release publishing requires repository secret `KOMARI_RELEASE_SIGNING_KEY` (base64 Ed25519 private key, 64 bytes) and repository variable `KOMARI_RELEASE_SIGNING_KEY_ID`. They have not been configured by this development task. The independently verified corresponding public key must be pinned locally. CI test keys cannot authorize production releases.
+Actual signed helper release publishing requires repository secret `KOMARI_RELEASE_SIGNING_KEY` (base64 Ed25519 private key, 64 bytes) and repository variable `KOMARI_RELEASE_SIGNING_KEY_ID`. The current publisher public key and ID are recorded in [`release-signing-key.json`](release-signing-key.json) and attached to stable releases. Release preflight verifies that the provisioned secret matches this reviewed public key before building any targets. The private key is provisioned once and reused; release jobs do not generate new keys.
+
+The publisher key proves who produced a helper artifact. It is independent of each node's enrollment key and the panel's approval signing key. Node keys are generated during connection/enrollment and identify that node; they cannot authorize a publisher's software. Administrators must independently verify and pin the publisher public key locally with `--release-key-id` and `--release-public-key` before installing the helper. Downloading public metadata alone does not make it a trusted root. CI test keys cannot authorize production releases, and production publisher private keys never belong on nodes.
 
 ## Acceptance
 
