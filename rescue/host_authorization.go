@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"time"
@@ -65,6 +67,7 @@ func (h *Helper) watchAuthorization(ctx context.Context) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	defer os.Remove(hostops.HelperStatusPath(h.manifest))
+	lastAuthorizationError, lastHeartbeatError := "", ""
 	for {
 		select {
 		case <-ctx.Done():
@@ -73,24 +76,48 @@ func (h *Helper) watchAuthorization(ctx context.Context) {
 		case <-ticker.C:
 			err := h.checkAuthorization(ctx)
 			if err != nil {
+				message := truncateError(err.Error())
+				if message != lastAuthorizationError {
+					log.Printf("rescue authorization check failed: %s", message)
+				}
+				lastAuthorizationError = message
 				if h.authorized.Swap(false) {
 					_ = CloseTemporarySSHAccess(ctx, h.action)
 				}
 				h.leaseReady.Store(false)
 			} else {
+				if lastAuthorizationError != "" {
+					log.Print("rescue authorization check recovered")
+				}
+				lastAuthorizationError = ""
 				h.leaseReady.Store(true)
 			}
-			ticks, e := hostops.ProcessStartTicks(os.Getpid())
-			if e != nil {
-				continue
+			if err := h.publishHostStatus(); err != nil {
+				message := truncateError(err.Error())
+				if message != lastHeartbeatError {
+					log.Printf("publish rescue heartbeat failed: %s", message)
+				}
+				lastHeartbeatError = message
+			} else {
+				if lastHeartbeatError != "" {
+					log.Print("rescue heartbeat publishing recovered")
+				}
+				lastHeartbeatError = ""
 			}
-			executable, e := os.Executable()
-			if e != nil {
-				continue
-			}
-			_ = hostops.WriteJSON(hostops.HelperStatusPath(h.manifest), hostops.HelperStatus{PID: os.Getpid(), StartTicks: ticks, Executable: executable, Authorized: h.authorized.Load(), LeaseReady: h.leaseReady.Load(), ObservedAt: time.Now().UTC()}, 0o644)
 		}
 	}
+}
+
+func (h *Helper) publishHostStatus() error {
+	ticks, err := hostops.ProcessStartTicks(os.Getpid())
+	if err != nil {
+		return fmt.Errorf("read process start ticks: %w", err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("read process executable: %w", err)
+	}
+	return hostops.WriteJSON(hostops.HelperStatusPath(h.manifest), hostops.HelperStatus{PID: os.Getpid(), StartTicks: ticks, Executable: executable, Authorized: h.authorized.Load(), LeaseReady: h.leaseReady.Load(), ObservedAt: time.Now().UTC()}, 0o644)
 }
 func (h *Helper) cancelOnRevocation(ctx context.Context, cancel context.CancelFunc) {
 	ticker := time.NewTicker(100 * time.Millisecond)

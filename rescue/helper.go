@@ -203,8 +203,14 @@ func DefaultInstanceIDPath() string {
 
 func (h *Helper) Run(ctx context.Context) error {
 	if h.hostTrust != nil {
+		if err := hostops.PrepareHelperStatus(h.manifest); err != nil {
+			return fmt.Errorf("prepare rescue heartbeat directory: %w", err)
+		}
 		if err := h.checkAuthorization(ctx); err != nil {
 			return err
+		}
+		if err := h.publishHostStatus(); err != nil {
+			return fmt.Errorf("publish initial rescue heartbeat: %w", err)
 		}
 		go h.watchAuthorization(ctx)
 	}

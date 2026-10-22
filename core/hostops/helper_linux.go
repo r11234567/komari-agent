@@ -12,6 +12,35 @@ import (
 	"time"
 )
 
+// PrepareHelperStatus runs in the root helper on every start. /run is volatile,
+// and legacy migration never guaranteed this directory existed in the first place.
+func PrepareHelperStatus(m *Manifest) error {
+	if os.Geteuid() != 0 || m == nil || m.InitSystem != "systemd" || !ValidService(m.ServiceName) {
+		return errors.New("helper heartbeat preparation requires a root systemd helper")
+	}
+	dir := filepath.Dir(HelperStatusPath(m))
+	if err := TrustedPath(filepath.Dir(dir)); err != nil {
+		return err
+	}
+	if err := os.Mkdir(dir, 0o755); err != nil && !os.IsExist(err) {
+		return err
+	}
+	// Never repair ownership, follow a symlink or accept a writable existing
+	// directory. Only a directory already protected from other users is usable.
+	if err := TrustedPath(dir); err != nil {
+		return err
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return errors.New("helper heartbeat parent is not a directory")
+	}
+	// A restrictive inherited umask must not hide public evidence from the Agent.
+	return os.Chmod(dir, 0o755)
+}
+
 func ReadHelperStatus(m *Manifest) (*HelperStatus, error) {
 	var status HelperStatus
 	if err := ReadJSON(HelperStatusPath(m), &status, true); err != nil {

@@ -559,8 +559,17 @@ func apply(args []string, out io.Writer) error {
 		if restoreErr := restoreTransaction(m, j); restoreErr != nil {
 			return fmt.Errorf("apply failed: %v; restoration also failed: %w; journal=%s", err, restoreErr, journalPath)
 		}
-		_ = j.report(ctx, panel, hostv1.HostOperationPhase_HOST_OPERATION_PHASE_RESTORED, err.Error())
-		return fmt.Errorf("apply failed; original service restored: %w", err)
+		// Restoration does not depend on the expired/superseded execution grant.
+		// Give its receipt a fresh bounded deadline and never hide a lost ACK.
+		recoveryCtx, recoveryCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer recoveryCancel()
+		if reportErr := j.reportRestoration(recoveryCtx, panel, err.Error()); reportErr != nil {
+			return fmt.Errorf("apply failed: %v; original service restored; recovery receipt pending: %w; run komari-host restore --manifest %s", err, reportErr, m.ManifestPath)
+		}
+		if archiveErr := archiveJournal(j); archiveErr != nil {
+			return fmt.Errorf("apply failed: %v; original service restored and panel confirmed recovery; archive pending: %w; run komari-host restore --manifest %s", err, archiveErr, m.ManifestPath)
+		}
+		return fmt.Errorf("apply failed; original service restored, recovery receipt accepted and transaction archived; save and confirm a new revision: %w", err)
 	}
 	j.Phase = "local_applied"
 	if err = j.save(); err != nil {
@@ -912,6 +921,38 @@ func (j *hostJournal) report(ctx context.Context, p *panel, phase hostv1.HostOpe
 	j.Receipt = nil
 	return j.save()
 }
+
+func (j *hostJournal) reportRestoration(ctx context.Context, p *panel, detail string) error {
+	if err := j.prepareRestorationReceipt(); err != nil {
+		return err
+	}
+	// Older hosts cleared an accepted restoration receipt but left the active
+	// journal behind. A new receipt for that terminal operation is illegal.
+	// Reconcile the signed operation instead, including after a lost archive ACK.
+	op, err := p.get(ctx, j.ID)
+	if err != nil {
+		return err
+	}
+	if op.GetPhase() == hostv1.HostOperationPhase_HOST_OPERATION_PHASE_RESTORED {
+		var original configv1.PrivilegedRevision
+		if err = proto.Unmarshal(j.Revision, &original); err != nil {
+			return err
+		}
+		if original.Authorization == nil {
+			return errors.New("restoration journal has no original authorization")
+		}
+		if err = hostops.VerifyOperation(p.trust, op, original.Authorization, j.ID); err != nil {
+			return fmt.Errorf("cannot verify the panel's existing restoration: %w", err)
+		}
+		if len(j.Receipt) != 0 {
+			j.SupersededReceipts = append(j.SupersededReceipts, j.Receipt)
+			j.Receipt = nil
+		}
+		return j.save()
+	}
+	return j.report(ctx, p, hostv1.HostOperationPhase_HOST_OPERATION_PHASE_RESTORED, detail)
+}
+
 func finishHost(ctx context.Context, m *hostops.Manifest, p *panel, j *hostJournal, out io.Writer) error {
 	fmt.Fprintln(out, "Local service identity/profile verified; host result recorded. Waiting for the restarted daemon to load and acknowledge the revision.")
 	deadline := time.NewTimer(45 * time.Second)
@@ -1050,9 +1091,6 @@ func resume(args []string, out io.Writer, restore bool) error {
 		}
 		// A failed/superseded/expired grant is never resumed by increasing
 		// authority. Recovery restores locally even if the panel is unavailable.
-		if err = j.prepareRestorationReceipt(); err != nil {
-			return err
-		}
 		t, e := hostops.ReadTrust(m)
 		if e != nil {
 			return fmt.Errorf("local restoration complete; cannot deliver receipt: %w", e)
@@ -1061,7 +1099,7 @@ func resume(args []string, out io.Writer, restore bool) error {
 		if e != nil {
 			return fmt.Errorf("local restoration complete; cannot deliver receipt: %w", e)
 		}
-		if err = j.report(ctx, p, hostv1.HostOperationPhase_HOST_OPERATION_PHASE_RESTORED, "interrupted operation restored by local administrator"); err != nil {
+		if err = j.reportRestoration(ctx, p, "interrupted operation restored by local administrator"); err != nil {
 			return fmt.Errorf("local restoration complete; recovery receipt pending: %w", err)
 		}
 		if err = archiveJournal(&j); err != nil {
