@@ -6,6 +6,7 @@ if [ "${GITHUB_ACTIONS:-}" != true ]; then echo 'Disposable GitHub runner requir
 root=$(pwd)
 log_dir="$root/ci-artifacts/installer-recovery"
 mkdir -p "$log_dir"
+: > "$log_dir/release-requests.log"
 exec > >(tee "$log_dir/recovery.log") 2>&1
 service="komari-installer-${GITHUB_RUN_ID}"
 pristine="$service-pristine"
@@ -14,6 +15,7 @@ saved_parent="/var/lib/komari-installer-parent-${GITHUB_RUN_ID}"
 cleanup() {
     local status=$?
     trap - EXIT
+    set +e
     mkdir -p "$log_dir/installer-logs"
     if sudo test -d /var/lib/komari-host/installer-logs; then
         sudo cp -a /var/lib/komari-host/installer-logs/. "$log_dir/installer-logs/" || true
@@ -31,6 +33,9 @@ cleanup() {
     sudo namei -l /var/lib/komari > "$log_dir/state-parent.log" 2>&1 || true
     getent passwd komari > "$log_dir/service-account.log" || true
     printf '%s\n' "$status" > "$log_dir/exit-code.txt"
+    # The installer uses umask 077 and sudo creates some fixture logs as root.
+    # The upload action runs as runner and must read every retained file.
+    sudo chown -R "$(id -u):$(id -g)" "$log_dir" || true
     exit "$status"
 }
 trap cleanup EXIT
