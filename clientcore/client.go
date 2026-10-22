@@ -65,13 +65,15 @@ var (
 )
 
 type Client struct {
-	host         hostv1connect.HostServiceClient
-	hostManifest *hostops.Manifest
-	hostPolicy   *hostops.Policy
-	hostTrust    *hostops.Trust
-	startupID    string
-	receiptMu    sync.Mutex
-	privilegedMu sync.Mutex
+	host              hostv1connect.HostServiceClient
+	hostManifest      *hostops.Manifest
+	hostPolicy        *hostops.Policy
+	hostTrust         *hostops.Trust
+	startupID         string
+	receiptMu         sync.Mutex
+	privilegedMu      sync.Mutex
+	runtimeSyncMu     sync.Mutex
+	runtimeReconciled bool
 
 	config     configv1connect.ConfigServiceClient
 	privileged configv1connect.PrivilegedDeliveryServiceClient
@@ -1365,16 +1367,27 @@ func (c *Client) SubmitReport(parent context.Context) error {
 }
 
 func (c *Client) SyncConfig(parent context.Context) error {
+	c.runtimeSyncMu.Lock()
+	defer c.runtimeSyncMu.Unlock()
 	ctx, cancel := context.WithTimeout(parent, configDeadline)
 	defer cancel()
-	req := connect.NewRequest(&configv1.GetDesiredConfigRequest{AgentId: c.agentIDValue(), AppliedRevision: c.store.Current().Revision})
+	after := c.store.Current().Revision
+	if !c.runtimeReconciled {
+		// Revision equality from a persisted file is not a current-startup ACK.
+		after = 0
+	}
+	req := connect.NewRequest(&configv1.GetDesiredConfigRequest{AgentId: c.agentIDValue(), AppliedRevision: after})
 	c.authorize(req.Header())
 	response, err := c.config.GetDesiredConfig(ctx, req)
 	if err != nil || response.Msg.Desired == nil {
 		return err
 	}
 	c.rememberAgentID(response.Msg.Desired.AgentId)
-	return c.applyDesiredConfig(parent, response.Msg.Desired)
+	if err := c.applyDesiredConfig(parent, response.Msg.Desired); err != nil {
+		return err
+	}
+	c.runtimeReconciled = true
+	return nil
 }
 
 func (c *Client) applyDesiredConfig(parent context.Context, desired *configv1.DesiredConfig) error {
@@ -1389,6 +1402,7 @@ func (c *Client) applyDesiredConfig(parent context.Context, desired *configv1.De
 	}
 	_, applyErr := c.store.ApplyWithReceipt(desired, payload)
 	if applyErr != nil {
+		log.Printf("Runtime configuration revision %d rejected: %v", desired.Revision, applyErr)
 		ack.Status = configv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_REJECTED
 		ack.Errors = []*commonv1.ErrorDetail{{Code: "CONFIG_REJECTED", Message: applyErr.Error()}}
 		payload, err = proto.Marshal(ack)
@@ -1399,7 +1413,13 @@ func (c *Client) applyDesiredConfig(parent context.Context, desired *configv1.De
 			return err
 		}
 	}
-	return c.flushReceipts(parent)
+	if err := c.flushReceipts(parent); err != nil {
+		return err
+	}
+	if applyErr == nil {
+		log.Printf("Runtime configuration revision %d validated against panel snapshot and loaded", desired.Revision)
+	}
+	return nil
 }
 
 func (c *Client) authorize(headers http.Header) {

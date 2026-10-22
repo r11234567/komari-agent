@@ -122,3 +122,46 @@ func TestRegressionRuntimeSnapshotAndACKAreAtomicAcrossRestart(t *testing.T) {
 		t.Fatal("next receipt did not survive restart")
 	}
 }
+
+func TestStartupSameRevisionValidatesContentAndPersistsFreshACK(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runtime.json")
+	initial := FromFlags(&flags_pkg.Config{Interval: 3})
+	s, err := New(initial, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	day := uint32(7)
+	desired := &configv1.DesiredConfig{Revision: 4, Runtime: &configv1.RuntimeConfig{TrafficResetDay: &day}}
+	if _, err = s.Apply(desired); err != nil {
+		t.Fatal(err)
+	}
+	s, err = New(initial, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.ApplyWithReceipt(desired, []byte("current-startup-ack")); err != nil {
+		t.Fatal(err)
+	}
+	s, err = New(initial, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Current().Revision != 4 || s.Current().TrafficResetDay != 7 || string(s.Receipt()) != "current-startup-ack" {
+		t.Fatal("same-revision startup confirmation was lost")
+	}
+	previous, ok := s.Previous()
+	if !ok || previous.Revision != 0 {
+		t.Fatal("reconfirmation replaced rollback history")
+	}
+	day = 9
+	if _, err = s.ApplyWithReceipt(desired, []byte("false-success")); err == nil {
+		t.Fatal("same revision with changed content was silently acknowledged")
+	}
+	if s.Current().TrafficResetDay != 7 || string(s.Receipt()) != "current-startup-ack" {
+		t.Fatal("rejection mutated current config or receipt")
+	}
+	unsupported := "192.0.2.53"
+	if _, err = s.ApplyWithReceipt(&configv1.DesiredConfig{Revision: 4, Runtime: &configv1.RuntimeConfig{CustomDns: &unsupported}}, []byte("unsupported")); err == nil {
+		t.Fatal("same revision bypassed supported-field validation")
+	}
+}

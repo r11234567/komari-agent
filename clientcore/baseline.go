@@ -22,6 +22,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -59,18 +60,24 @@ func (c *Client) initializeHost(parent context.Context) error {
 	var proposal configv1.InitializeNodeConfigRequest
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		// Existing local revisions are migration history, never a fresh install.
-		if c.store.Current().Revision != 0 || c.privilegedStore.State().AppliedRevision != 0 || c.privilegedStore.State().PendingRevision != 0 {
+		if c.privilegedStore.State().AppliedRevision != 0 || c.privilegedStore.State().PendingRevision != 0 {
 			return c.flushReceipts(ctx)
 		}
 		runtime := c.store.Current()
 		local := c.localBaseline()
+		preserve := runtime.Revision != 0 || strings.HasPrefix(c.hostPolicy.DisableSource, "legacy-")
+		if preserve {
+			// Migrating a node cannot grant any optional capability. Its existing
+			// ordinary revision remains on the separate convergence track.
+			local = privileged.Settings{RequiredPrivilegeMode: actual}
+		}
 		policyData, e := os.ReadFile(c.hostManifest.HostPolicyFile)
 		if e != nil {
 			return e
 		}
 		policyHash := sha256.Sum256(policyData)
 		proposal = configv1.InitializeNodeConfigRequest{AgentId: c.agentIDValue(), ServiceId: c.hostManifest.ServiceName, PolicyHash: hex.EncodeToString(policyHash[:]), Privileged: local.Proto(), Runtime: &configv1.RuntimeConfig{MemoryIncludeCache: &runtime.MemoryIncludeCache, DetailedGpu: &runtime.DetailedGPU, IncludeNics: runtime.IncludeNics, ExcludeNics: runtime.ExcludeNics, IncludeMountpoints: runtime.IncludeMountpoints, ReportInterval: durationpb.New(runtime.ReportInterval), TrafficResetDay: &runtime.TrafficResetDay, GetIpAddrFromNic: &runtime.GetIPAddrFromNIC}}
+		proposal.PreserveRuntime = preserve
 		data, err = proto.MarshalOptions{Deterministic: true}.Marshal(&proposal)
 		if err != nil {
 			return err
@@ -101,17 +108,43 @@ func (c *Client) initializeHost(parent context.Context) error {
 		return err
 	}
 	if !response.Msg.Initialized {
-		return c.flushReceipts(ctx)
+		// Existing privileged history is handled by its normal signed stream.
+		stateReq := connect.NewRequest(&configv1.GetNodeConfigStateRequest{AgentId: c.agentIDValue()})
+		c.authorize(stateReq.Header())
+		state, stateErr := c.privileged.GetNodeConfigState(ctx, stateReq)
+		if stateErr == nil && state.Msg.Desired != nil {
+			return c.flushReceipts(ctx)
+		}
+		if stateErr == nil && state.Msg.AppliedRevision == 0 && !proposal.PreserveRuntime && (c.store.Current().Revision != 0 || strings.HasPrefix(c.hostPolicy.DisableSource, "legacy-") || response.Msg.SkippedReason == "ordinary configuration history must be preserved") {
+			// Older agents may have saved a fresh-install proposal, received
+			// initialized=false, and then loaded an existing runtime revision.
+			// No baseline was accepted: a current state read must confirm no
+			// privileged history before upgrading that unaccepted proposal.
+			proposal.PreserveRuntime = true
+			proposal.Privileged = (privileged.Settings{RequiredPrivilegeMode: actual}).Proto()
+			data, err := proto.MarshalOptions{Deterministic: true}.Marshal(&proposal)
+			if err != nil {
+				return err
+			}
+			if err = hostops.AtomicWrite(path, data, 0o600); err != nil {
+				return err
+			}
+			return errors.New("unaccepted initialization request upgraded to deny-only migration; retry pending")
+		}
+		return fmt.Errorf("configuration baseline not initialized: %s", response.Msg.SkippedReason)
 	}
-	if response.Msg.Runtime == nil || response.Msg.Privileged == nil {
+	if response.Msg.Privileged == nil || !proposal.PreserveRuntime && response.Msg.Runtime == nil {
 		return errors.New("incomplete initialization response")
 	}
 	// Persisted request is immutable across retries; server cannot use the
 	// baseline channel to smuggle a later runtime or privileged configuration.
-	if response.Msg.Runtime.Revision != 1 || !proto.Equal(response.Msg.Runtime.Runtime, proposal.Runtime) {
+	if !proposal.PreserveRuntime && (response.Msg.Runtime.Revision != 1 || !proto.Equal(response.Msg.Runtime.Runtime, proposal.Runtime)) {
 		return errors.New("runtime baseline differs from local installation")
 	}
-	if c.store.Current().Revision < 1 {
+	if proposal.PreserveRuntime && response.Msg.Runtime != nil {
+		return errors.New("migration baseline must not replace ordinary configuration")
+	}
+	if !proposal.PreserveRuntime && c.store.Current().Revision < 1 {
 		ack := &configv1.AcknowledgeConfigRequest{AgentId: c.agentIDValue(), Revision: 1, Status: configv1.ConfigApplyStatus_CONFIG_APPLY_STATUS_APPLIED, FinishedAt: timestamppb.Now()}
 		payload, e := proto.Marshal(ack)
 		if e != nil {
@@ -170,6 +203,12 @@ func (c *Client) acceptBaseline(ctx context.Context, r *configv1.PrivilegedRevis
 	}
 	local := c.localBaseline()
 	actual := capability.Detect(false).PrivilegeMode
+	denied := privileged.Settings{RequiredPrivilegeMode: actual}
+	if privileged.SettingsFromProto(r.Privileged) == denied {
+		// A deny-only baseline is safe even when a fresh installation policy
+		// permits more; it never imports a missing historical privilege grant.
+		local = denied
+	}
 	a := r.Authorization
 	if a == nil || a.ServiceId != c.hostManifest.ServiceName || a.AgentId != c.agentIDValue() || a.Revision != 1 || a.ConfigHash != r.ConfigHash || a.ApprovalGeneration != 1 || a.TargetPrivilegeMode != actual {
 		return errors.New("baseline authorization binding mismatch")
