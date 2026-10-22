@@ -14,6 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: recursive
       - name: Require successful main CI for the exact release commit
         uses: actions/github-script@v9
         with:
@@ -26,7 +28,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p ci-artifacts
-          node scripts/ci/check-protocol.cjs 2>&1 | tee ci-artifacts/protocol-pin.log
+          node scripts/ci/check-protocol.cjs --resolve-go 2>&1 | tee ci-artifacts/protocol-pin.log
       - name: Validate provisioned publisher key before building any target
         env:
           KOMARI_RELEASE_SIGNING_KEY: ${{ secrets.KOMARI_RELEASE_SIGNING_KEY }}
@@ -67,6 +69,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+        with:
+          submodules: recursive
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -141,6 +145,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: recursive
       - uses: actions/download-artifact@v4
         with:
           pattern: release-binaries-*

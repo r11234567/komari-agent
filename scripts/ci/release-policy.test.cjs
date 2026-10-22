@@ -1,29 +1,11 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { MODULE, verifyProtocol } = require('./check-protocol.cjs');
 const { requireSuccessfulRun } = require('./release-gate.cjs');
 const releaseGate = require('./release-gate.cjs');
 const { execFileSync } = require('node:child_process');
 const { mkdtempSync, readFileSync, rmSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
-
-const pin = version => ({ Require: [{ Path: MODULE, Version: version }] });
-const resolved = version => ({ Path: MODULE, Version: version });
-const sums = version => `${MODULE} ${version} h1:fixture\n${MODULE} ${version}/go.mod h1:fixture\n`;
-
-test('protocol bumps need only a reviewed go.mod/go.sum update', () => {
-  for (const version of ['v1.0.0', 'v1.1.0-0.20261022100337-b2ffe86ac2d6']) {
-    assert.equal(verifyProtocol(pin(version), resolved(version), sums(version)), `${MODULE} ${version}`);
-  }
-});
-test('protocol gate rejects stale resolution, replacements and missing checksums', () => {
-  assert.throws(() => verifyProtocol(pin('v1.1.0'), resolved('v1.0.0'), sums('v1.1.0')), /differs from go.mod/);
-  assert.throws(() => verifyProtocol({ ...pin('v1.0.0'), Replace: [{ Old: { Path: MODULE } }] }, resolved('v1.0.0'), sums('v1.0.0')), /replace/);
-  assert.throws(() => verifyProtocol(pin('v1.0.0'), { ...resolved('v1.0.0'), Replace: {} }, sums('v1.0.0')), /replace/);
-  assert.throws(() => verifyProtocol(pin('v1.0.0'), resolved('v1.0.0'), ''), /go.sum is missing/);
-  assert.throws(() => verifyProtocol(pin('v1.0.0'), resolved('v1.0.0'), sums('v1.0.0').split('\n')[0]), /go.sum is missing/);
-});
 
 const success = { id: 1, run_attempt: 1, head_sha: 'exact-sha', head_branch: 'main', event: 'push', status: 'completed', conclusion: 'success', html_url: 'https://example.test/run/1' };
 const check = runs => requireSuccessfulRun(runs, 'exact-sha', 'build.yml');

@@ -12,7 +12,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/klauspost/cpuid/v2 v2.4.1
 	github.com/prometheus-community/pro-bing v0.9.1
-	github.com/r11234567/komari-proto v0.1.38-0.20261022100337-b2ffe86ac2d6
+	github.com/r11234567/komari-proto v0.0.0
 	github.com/rhysd/go-github-selfupdate v1.2.3
 	github.com/shirou/gopsutil/v4 v4.26.9
 	github.com/spf13/cobra v1.10.2
@@ -42,3 +42,6 @@ require (
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 )
+
+// The protocol revision is pinned by the third_party/komari-proto gitlink.
+replace github.com/r11234567/komari-proto => ./third_party/komari-proto
