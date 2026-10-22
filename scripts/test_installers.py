@@ -146,6 +146,33 @@ class WindowsInstallerTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             return result.stdout
 
+    def test_monitoring_install_is_allowed_without_host_actions(self):
+        # Execute the actual parser/gate, before the Windows administrator API.
+        # This also covers irm + scriptblock invocation (no script file path).
+        preflight = PS.split('$IsAdministrator =', 1)[0]
+        script = "$ErrorActionPreference = 'Stop'\n" + r"""
+function Check-Install([string[]]$Options, [bool]$ShouldFail) {
+    try {
+        $result = & ([scriptblock]::Create($Source + [Environment]::NewLine + '$KomariArgs -join "|"')) @Options
+        if ($ShouldFail) { throw 'unexpectedly allowed installation' }
+        if ($result -notlike '*--disable-remote-control*') { throw 'missing local remote-control deny' }
+    }
+    catch {
+        if (-not $ShouldFail -or $_.Exception.Message -eq 'unexpectedly allowed installation') { throw }
+    }
+}
+"""
+        # A here-string avoids interpreting PowerShell quotes/variables twice.
+        script += "\n$Source = @'\n" + preflight + "\n'@\n"
+        script += r"""
+Check-Install @('-e', 'https://panel.test') $false
+Check-Install @('--install-runtime-identity', 'current-user') $false
+Check-Install @('--install-rescue') $true
+Check-Install @('--install-runtime-identity', 'root-or-administrator') $true
+Write-Output 'monitoring allowed, administrative installs rejected'
+"""
+        self.assertIn('monitoring allowed', self.run_ps(script))
+
     def test_windows_cli_and_nssm_share_all_state_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             escaped_tmp = tmp.replace("'", "''")
@@ -159,12 +186,14 @@ $KomariArgs = @('--credentials-file=custom credentials.json')
 function Get-ReleaseVersion {{ 'test' }}
 """
             functions = "\n".join(ps_function(name) for name in ["Quote-Argument", "Join-Arguments", "Get-AgentOption"])
-            layout = "$Version = Get-ReleaseVersion" + between(PS, "$Version = Get-ReleaseVersion", "$ExistingTask =")
+            layout = "$Version = Get-ReleaseVersion" + between(PS, "$Version = Get-ReleaseVersion", "# Fail before stopping")
             manifest = "# Pass all paths explicitly" + between(PS, "# Pass all paths explicitly", "$Nssm = Ensure-Nssm")
             output = self.run_ps(setup + functions + layout + manifest + '\nGet-Content $ServiceConfigPath -Raw\n')
             config = json.loads(output)
-            self.assertEqual(config["credentials_file"], str(Path(tmp) / "install space" / "custom credentials.json"))
-            self.assertEqual(config["runtime_state_file"], str(Path(tmp) / "program data" / "Komari" / "komari-test" / "runtime-config.json"))
+            # Windows PowerShell expands 8.3 temp-directory aliases (RUNNER~1)
+            # while Python can retain them. Compare the actual canonical paths.
+            self.assertEqual(Path(config["credentials_file"]).resolve(), (Path(tmp) / "install space" / "custom credentials.json").resolve())
+            self.assertEqual(Path(config["runtime_state_file"]).resolve(), (Path(tmp) / "program data" / "Komari" / "komari-test" / "runtime-config.json").resolve())
             self.assertTrue(config["privileged_state_file"].endswith("privileged.json"))
             self.assertTrue(config["replay_state_file"].endswith("nonces.json"))
 

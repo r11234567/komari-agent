@@ -59,7 +59,16 @@ for ($i = 0; $i -lt $args.Count; $i++) {
 }
 
 if (-not $UninstallOnly) {
-    throw 'Trusted v2 Windows installation is not yet supported: SCM/ACL migration must pass platform acceptance first. No privileged host actions are available.'
+    # Monitoring does not need the Linux-only trusted host protocol. Retain the
+    # legacy shared-path manifest, without claiming v2 administrative support.
+    if ($InstallRescue) {
+        throw 'Windows monitoring installation does not support --install-rescue.'
+    }
+    if ($RuntimeIdentity -notin @('service-account', 'current-user')) {
+        throw 'Windows monitoring installation requires --install-runtime-identity service-account; LocalSystem installation is not supported.'
+    }
+    $RemoteControlDisabled = $true
+    $KomariArgs += '--disable-remote-control'
 }
 
 $IsAdministrator = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
@@ -77,25 +86,6 @@ if (-not $IsAdministrator) {
     Log-Error "Administrator privileges are required to install or uninstall the Agent service."
     exit 1
 }
-if ($RuntimeIdentity -eq "service-account" -and -not $RemoteControlDisabled) {
-    $RemoteControlDisabled = $true
-    $KomariArgs += "--disable-remote-control"
-}
-if ($InstallRescue) {
-    if (-not $IsAdministrator) {
-        Log-Error "Administrator privileges are required to install the independent rescue helper."
-        exit 1
-    }
-    if (-not $RemoteControlDisabled) {
-        Log-Error "The rescue helper is available only when normal remote control is disabled."
-        exit 1
-    }
-    if ([string]::IsNullOrWhiteSpace($AgentEndpoint) -or [string]::IsNullOrWhiteSpace($AgentToken)) {
-        Log-Error "The rescue helper requires explicit --endpoint and --token Agent arguments."
-        exit 1
-    }
-}
-
 if ([string]::IsNullOrWhiteSpace($InstallDir)) {
     $InstallDir = Join-Path $env:ProgramFiles "Komari"
 }
@@ -295,7 +285,7 @@ $RuntimeStateDir = Join-Path $env:ProgramData "Komari"
 if ($ServiceName -ne "komari-agent") { $RuntimeStateDir = Join-Path $RuntimeStateDir $ServiceName }
 $RuntimeStatePath = Get-AgentOption "--runtime-state-file" (Join-Path $RuntimeStateDir "runtime-config.json")
 $CredentialsPath = Get-AgentOption "--credentials-file" (Join-Path $RuntimeStateDir "credentials.json")
-$PrivilegedStatePath = Get-AgentOption "--privileged-state-file" (Join-Path $InstallDir "privileged.json")
+$PrivilegedStatePath = Get-AgentOption "--privileged-state-file" (Join-Path $RuntimeStateDir "privileged.json")
 $ReplayStatePath = Get-AgentOption "--replay-state-file" (Join-Path $RuntimeStateDir "nonces.json")
 $ServiceConfigPath = Join-Path $InstallDir "service-config.json"
 $LegacyRuntimeStatePath = Join-Path $InstallDir "runtime-config.json"
@@ -313,10 +303,27 @@ if (-not (Test-Path $RuntimeStatePath) -and (Test-Path $LegacyRuntimeStatePath))
     Copy-Item $LegacyRuntimeStatePath $RuntimeStatePath -Force
 }
 
+# Fail before stopping an existing service or replacing its executable. A root
+# rescue installation must not be silently removed by a monitoring update.
+if (Get-Service -Name $RescueServiceName -ErrorAction SilentlyContinue) {
+    throw "Existing rescue service $RescueServiceName requires explicit removal before installing monitoring-only mode."
+}
+
+$Nssm = Ensure-Nssm
+$AgentFile = "komari-agent-windows-$Arch.exe"
+$StagedAgentPath = Join-Path $InstallDir 'komari-agent.download.exe'
+try {
+    Invoke-WebRequest -Uri (Get-ReleaseUrl $Version $AgentFile) -OutFile $StagedAgentPath -UseBasicParsing
+}
+catch {
+    Remove-Item $StagedAgentPath -Force -ErrorAction SilentlyContinue
+    throw
+}
+
 $ExistingTask = Get-ScheduledTask -TaskName $UserTaskName -ErrorAction SilentlyContinue
 if ($ExistingTask) { Unregister-ScheduledTask -TaskName $UserTaskName -Confirm:$false }
 if ($IsAdministrator) {
-    foreach ($Name in @($ServiceName, $RescueServiceName)) {
+    foreach ($Name in @($ServiceName)) {
         $ExistingService = Get-Service -Name $Name -ErrorAction SilentlyContinue
         if ($ExistingService) {
             Stop-Service -Name $Name -Force -ErrorAction SilentlyContinue
@@ -324,47 +331,22 @@ if ($IsAdministrator) {
             Wait-ServiceAbsent $Name
         }
     }
-    Get-NetFirewallRule -DisplayName "Komari Rescue Helper" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
-    $PreviousRescueDir = Join-Path $env:ProgramData "Komari\Rescue\$RescueServiceName"
-	Restore-KomariNetworkIsolation $PreviousRescueDir
-    Remove-Item $PreviousRescueDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Remove-Item $AgentOutputLog, $AgentErrorLog -Force -ErrorAction SilentlyContinue
 
-$AgentFile = "komari-agent-windows-$Arch.exe"
-Invoke-WebRequest -Uri (Get-ReleaseUrl $Version $AgentFile) -OutFile $AgentPath -UseBasicParsing
-
-$ElevateScriptPath = Join-Path $InstallDir "elevate.ps1"
-$LocalElevateScript = Join-Path $PSScriptRoot "scripts\elevate.ps1"
-if (-not (Test-Path $LocalElevateScript)) {
-    $LocalElevateScript = Join-Path $PSScriptRoot "elevate.ps1"
-}
-if (Test-Path $LocalElevateScript) {
-    Copy-Item $LocalElevateScript $ElevateScriptPath -Force
-}
-else {
-    try {
-        $ElevateUrl = "https://raw.githubusercontent.com/$ReleaseRepository/main/scripts/elevate.ps1"
-        if (-not [string]::IsNullOrWhiteSpace($GitHubProxy)) {
-            $ElevateUrl = "$($GitHubProxy.TrimEnd('/'))/$ElevateUrl"
-        }
-        Invoke-WebRequest -Uri $ElevateUrl -OutFile $ElevateScriptPath -UseBasicParsing
-    }
-    catch {
-        Log-Info "Note: could not download elevate.ps1 directly: $_"
-    }
-}
-if (Test-Path $ElevateScriptPath) {
-    Log-Success "Host elevation script installed to $ElevateScriptPath"
+Move-Item $StagedAgentPath $AgentPath -Force
+$LegacyPrivilegedStatePath = Join-Path $InstallDir 'privileged.json'
+if (-not (Test-Path $PrivilegedStatePath) -and (Test-Path $LegacyPrivilegedStatePath)) {
+    Copy-Item $LegacyPrivilegedStatePath $PrivilegedStatePath -Force
 }
 # Pass all paths explicitly to NSSM, and record the same defaults for the CLI.
-# Neither LocalService nor LocalSystem shares the enrolling user's APPDATA.
+# LocalService does not share the enrolling user's APPDATA.
 $KomariArgs += @("--runtime-state-file", $RuntimeStatePath, "--credentials-file", $CredentialsPath,
     "--privileged-state-file", $PrivilegedStatePath, "--replay-state-file", $ReplayStatePath)
 $ServiceConfig = @{
     service_name = $ServiceName
-    service_user = $(if ($RuntimeIdentity -eq "service-account") { $ServiceAccount } else { "LocalSystem" })
+    service_user = $ServiceAccount
     init_system = "windows"
     credentials_file = $CredentialsPath
     runtime_state_file = $RuntimeStatePath
@@ -387,17 +369,13 @@ Assert-NativeCommand "Configuring stdout logging for $ServiceName"
 Assert-NativeCommand "Configuring stderr logging for $ServiceName"
 & $Nssm set $ServiceName AppRotateFiles 1 | Out-Null
 Assert-NativeCommand "Configuring log rotation for $ServiceName"
-if ($RuntimeIdentity -eq "service-account") {
-    Set-ServiceAccount $ServiceName "LocalService" $Nssm
-    Log-Success "Ordinary Agent installed as the non-login $ServiceAccount service account."
-}
-else {
-    Set-ServiceAccount $ServiceName "LocalSystem" $Nssm
-    Log-Success "Ordinary Agent installed as a LocalSystem service."
-}
-# Retain LocalService access through later promotion/demotion, and prevent
-# ordinary users from inheriting read access to the enrollment private key.
-foreach ($Directory in @($InstallDir, $RuntimeStateDir)) {
+Set-ServiceAccount $ServiceName "LocalService" $Nssm
+Log-Success "Monitoring Agent installed as the non-login $ServiceAccount service account."
+# LocalService can execute the Agent but cannot replace its executable or NSSM.
+& icacls.exe $InstallDir /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "${ServiceAccountSid}:(OI)(CI)RX" | Out-Null
+Assert-NativeCommand "Protecting executables in $InstallDir"
+# State, locks and logs must remain writable for the daemon and CLI to agree.
+foreach ($Directory in @($RuntimeStateDir, $LogDir)) {
     & icacls.exe $Directory /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "${ServiceAccountSid}:(OI)(CI)M" | Out-Null
     Assert-NativeCommand "Restricting access to $Directory"
 }
@@ -426,47 +404,8 @@ else {
     Log-Info "Agent service configured for automatic startup; waiting for enrollment before starting."
 }
 
-if ($InstallRescue) {
-    $Nssm = Ensure-Nssm
-    $RescueDir = Join-Path $env:ProgramData "Komari\Rescue\$RescueServiceName"
-    New-Item -ItemType Directory -Path $RescueDir -Force | Out-Null
-    $RescuePath = Join-Path $RescueDir "komari-agent-rescue.exe"
-    $RescueConfigPath = Join-Path $RescueDir "rescue-helper.json"
-    $RescueFile = "komari-agent-rescue-windows-$Arch.exe"
-    Invoke-WebRequest -Uri (Get-ReleaseUrl $Version $RescueFile) -OutFile $RescuePath -UseBasicParsing
-    $RescueConfig = @{
-        Endpoint = $AgentEndpoint
-        Token = $AgentToken
-        IgnoreUnsafeCert = $IgnoreUnsafeCert
-        InstanceIDPath = (Join-Path $RescueDir "rescue-instance")
-        Action = @{
-            AgentPath = $AgentPath
-            RuntimeStatePath = $RuntimeStatePath
-            ServiceName = $ServiceName
-            RuntimeIdentity = $RuntimeIdentity
-            RuntimeUser = $(if ($RuntimeIdentity -eq "service-account") { $ServiceAccount } else { "LocalSystem" })
-            ControlPlaneURL = $AgentEndpoint
-            IsolationStatePath = (Join-Path $RescueDir "network-isolation.json")
-        }
-    }
-    [IO.File]::WriteAllText($RescueConfigPath, ($RescueConfig | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding($false)))
-    & icacls.exe $RescueDir /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" | Out-Null
-    Assert-NativeCommand "Restricting access to $RescueDir"
-    $RescueArguments = Join-Arguments @("--config", $RescueConfigPath)
-    & $Nssm install $RescueServiceName $RescuePath | Out-Null
-    Assert-NativeCommand "Installing service $RescueServiceName"
-    & $Nssm set $RescueServiceName AppParameters $RescueArguments | Out-Null
-    Assert-NativeCommand "Configuring rescue helper arguments"
-    Set-ServiceAccount $RescueServiceName "LocalSystem" $Nssm
-    & $Nssm set $RescueServiceName Start SERVICE_AUTO_START | Out-Null
-    Assert-NativeCommand "Configuring automatic startup for $RescueServiceName"
-    & $Nssm set $RescueServiceName AppExit Default Restart | Out-Null
-    Assert-NativeCommand "Configuring restart behavior for $RescueServiceName"
-    Start-ServiceAndWait $RescueServiceName
-    Log-Success "Independent rescue helper installed as a LocalSystem service."
-}
-
 Log-Success "Komari Agent $Version installation completed."
+Log-Info "Monitoring only: remote control, WebSSH, remote execution and rescue are disabled. Windows privileged configuration is not supported."
 Log-Info "Runtime identity: $RuntimeIdentity"
 Log-Info "Install directory: $InstallDir"
 Log-Info "Credentials file: $CredentialsPath"
