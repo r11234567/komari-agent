@@ -14,7 +14,7 @@ The important design split is:
 
 | Workflow | Trigger | Main output | Prerelease handling |
 | --- | --- | --- | --- |
-| `build.yml` | Push to `main` | CI build artifacts for the pushed commit | Not a release workflow |
+| `build.yml` | Pull request, push to `main`, manual dispatch | CI build artifacts for the checked commit | Not a release workflow |
 | `snapshot.yml` | Push to `main`, manual dispatch | One snapshot prerelease plus `ghcr.io/...:snapshot` | Creates prereleases only |
 | `release.yml` | Published GitHub release | Release binary assets | Skips prereleases |
 | `release-docker.yml` | Published GitHub release, manual dispatch | Stable Docker image tags | Skips prerelease release events |
@@ -47,22 +47,31 @@ the Go version declared by the project.
 
 ## `build.yml`
 
-Purpose: quick build validation on `main`.
+Purpose: validate pull requests and the merged commit on `main`.
 
 Trigger:
 
 - Runs on every push to `main`.
+- Runs on pull requests too, using the same protocol check and platform matrix.
+- Can be dispatched manually for diagnosis. A manual run cannot substitute for
+  the main-push checks required by the stable release gate.
 - A single `git push` containing multiple commits creates one workflow run for
   the pushed ref tip. Multiple separate pushes can create multiple runs.
 
 Jobs:
 
+- Verifies the protocol dependency against `go.mod` (the single source for its
+  reviewed version), requires matching `go.sum` entries and rejects replacements.
+  No workflow contains a second copy of the protocol version.
+- Tests the release gate against missing, failed, skipped, pending, rerunning,
+  wrong-commit and pull-request-only CI results.
 - Builds a matrix of Windows, Linux, macOS, and FreeBSD targets.
 - Excludes unsupported combinations:
   - `windows/arm`
   - `darwin/386`
   - `darwin/arm`
 - Uploads build artifacts to the workflow run.
+- Retains protocol, build, test and capability logs, including failures, for 30 days.
 
 This workflow does not publish GitHub releases or Docker images.
 
@@ -173,6 +182,12 @@ for a snapshot.
 
 Jobs:
 
+- Before accessing the signing key, requires successful `build.yml`,
+  `privileged-audit.yml` and `codeql.yml` main-push runs for the exact checked-out
+  release SHA. Missing or unfinished checks fail closed; the latest run/attempt
+  must succeed. PR checks and checks for an older SHA do not qualify. The same
+  gate runs before stable Docker publishing, including manual dispatches.
+- Revalidates the protocol dependency against `go.mod` and `go.sum`.
 - Checks `KOMARI_RELEASE_SIGNING_KEY` (Actions Secret) and
   `KOMARI_RELEASE_SIGNING_KEY_ID` (Actions Variable) against the reviewed
   `docs/release-signing-key.json` before starting the build matrix. The private
@@ -202,7 +217,7 @@ if: ${{ github.event_name == 'workflow_dispatch' || !github.event.release.prerel
 ```
 
 This means prerelease release events do not publish stable Docker tags. Manual
-runs are still allowed.
+runs are still allowed, subject to the same exact-commit main CI gate.
 
 Jobs:
 
@@ -231,6 +246,20 @@ if: ${{ github.event_name == 'workflow_dispatch' || !github.event.release.prerel
 
 Snapshot prereleases intentionally keep their simple automated snapshot notes and
 do not trigger normal stable-release note generation.
+
+Existing non-empty release notes are preserved, including on republish and manual
+dispatch. Notes are generated only for an empty release body.
+
+## Stable release procedure
+
+Wait for the actual main-push Build on Main, Privileged delivery audit and CodeQL
+runs to succeed before publishing a stable GitHub release. The release event is
+already public when these workflows start: the gate prevents asset and stable
+Docker publication, but cannot undo a manually published release record. Keep
+the release in draft while waiting for CI. Use a tag pointing at that exact tested
+commit. Mark it latest only after Release Binaries and Publish Docker Image also
+succeed. Editing a release does not necessarily trigger a new `published` event;
+to rebuild a corrected tag, return the release to draft and publish it again.
 
 ## Auto-Update Interaction
 
