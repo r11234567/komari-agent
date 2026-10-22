@@ -10,6 +10,8 @@ mkdir -p "$log_dir"
 exec > >(tee "$log_dir/recovery.log") 2>&1
 service="komari-installer-${GITHUB_RUN_ID}"
 pristine="$service-pristine"
+legacy="$service-legacy"
+legacy_dir="/var/lib/$legacy"
 fixture="/usr/lib/komari/installer-fixture-${GITHUB_RUN_ID}"
 saved_parent="/var/lib/komari-installer-parent-${GITHUB_RUN_ID}"
 cleanup() {
@@ -25,9 +27,11 @@ cleanup() {
         sudo unlink /var/lib/komari
         sudo mv "$saved_parent" /var/lib/komari
     fi
-    for unit in "$service" "$pristine"; do
+    for unit in "$service" "$pristine" "$legacy"; do
         sudo systemctl show "$unit" --property=ActiveState,SubState,Result > "$log_dir/$unit-status.log" 2>&1 || true
         sudo journalctl -u "$unit" --no-pager > "$log_dir/$unit-journal.log" 2>&1 || true
+        sudo namei -l "/usr/lib/komari/$unit/komari-agent" > "$log_dir/$unit-executable-permissions.log" 2>&1 || true
+        sudo namei -l "/etc/komari/services/$unit.json" > "$log_dir/$unit-registry-permissions.log" 2>&1 || true
         sudo systemctl disable --now "$unit" >/dev/null 2>&1 || true
     done
     sudo namei -l /var/lib/komari > "$log_dir/state-parent.log" 2>&1 || true
@@ -114,6 +118,12 @@ done
 sudo test -x /usr/bin/pamtester
 sudo -u komari test -w "/var/lib/komari/$pristine"
 sudo -u komari test ! -w "/usr/lib/komari/$pristine/komari-host"
+for path in /etc/komari /etc/komari/services "/usr/lib/komari/$pristine"; do
+    test "$(sudo stat -c '%u:%g:%a' "$path")" = 0:0:755
+done
+# Execute the real ELF and read registry/bootstrap metadata as the daemon user.
+# A root-only Host diagnose cannot detect mode-0700 public directories.
+sudo -u komari "/usr/lib/komari/$pristine/komari-agent" config show --json > "$log_dir/pristine-config.json"
 
 # Updating a registered node replaces reviewed binaries while preserving its
 # identity, service account, policy and systemd definition.
@@ -221,6 +231,71 @@ sudo sha256sum "/var/lib/komari/$pristine/credentials.json" \
     "/etc/komari/services/$pristine.json" "/etc/komari/services/$pristine.policy.json" \
     "/etc/systemd/system/$pristine.service" > "$log_dir/registered-before.sha256"
 echo 'PASS: promoted root service updated, credentials retained and full host prerequisites ready'
+
+# Reproduce migration of an active non-root legacy service under the
+# installer's umask 077, without precreating its destination binary directory.
+sudo install -d -o komari -g komari -m 700 "$legacy_dir"
+sudo install -m 755 "$fixture/komari-agent-live" "$legacy_dir/agent"
+printf '{"agent_id":"00000000-0000-4000-8000-000000000002","endpoint":"https://panel.invalid"}\n' \
+    | sudo -u komari tee "$legacy_dir/credentials.json" >/dev/null
+printf '{"current":{"revision":4,"report_interval":3000000000}}\n' \
+    | sudo -u komari tee "$legacy_dir/runtime-config.json" >/dev/null
+printf '{"applied_revision":0}\n' | sudo -u komari tee "$legacy_dir/privileged.json" >/dev/null
+printf '{}\n' | sudo -u komari tee "$legacy_dir/nonces.json" >/dev/null
+legacy_state_paths=("$legacy_dir/credentials.json" "$legacy_dir/runtime-config.json" "$legacy_dir/privileged.json" "$legacy_dir/nonces.json")
+sudo chmod 600 "${legacy_state_paths[@]}"
+sudo sha256sum "${legacy_state_paths[@]}" > "$log_dir/legacy-state-before.sha256"
+sudo tee "/etc/systemd/system/$legacy.service" >/dev/null <<UNIT
+[Service]
+User=komari
+WorkingDirectory=$legacy_dir
+ExecStart=$legacy_dir/agent --endpoint https://panel.invalid --credentials-file $legacy_dir/credentials.json --runtime-state-file $legacy_dir/runtime-config.json --privileged-state-file $legacy_dir/privileged.json --replay-state-file $legacy_dir/nonces.json --disable-remote-control --interval 12
+Restart=on-failure
+RestartSec=5
+UNIT
+sudo systemctl daemon-reload
+sudo systemctl start "$legacy.service"
+sudo test ! -e "/usr/lib/komari/$legacy"
+run_installer "$legacy"
+sudo -u komari "/usr/lib/komari/$legacy/komari-agent" config show --json > "$log_dir/legacy-config.json"
+python3 - "$log_dir/legacy-config.json" <<'CHECK'
+import json, sys
+with open(sys.argv[1]) as f:
+    config = json.load(f)
+assert config['runtime']['revision'] == 4
+assert config['local_config']['disable_remote_control'] is True
+CHECK
+sudo sha256sum -c "$log_dir/legacy-state-before.sha256"
+sudo sha256sum "/etc/komari/services/$legacy"*.json \
+    "/etc/systemd/system/$legacy.service" \
+    "/etc/systemd/system/$legacy.service.d/90-komari-trusted-layout.conf" \
+    > "$log_dir/legacy-registration-before.sha256"
+echo 'PASS: non-root legacy migration executes real Agent CLI and preserves revision and local restrictions'
+
+# A rerun must repair directories left at 0700 by the old installer without
+# changing private file modes, trust, service identity, or node state. Restart
+# a real ELF fixture as komari so systemd would expose the reported 203/EXEC.
+sudo chmod 700 /usr/lib/komari "/usr/lib/komari/$legacy" /etc/komari /etc/komari/services
+if sudo -u komari test -x "/usr/lib/komari/$legacy/komari-agent"; then
+    echo 'FAIL: inaccessible migration fixture is executable' >&2; exit 1
+fi
+live_binary=true
+KOMARI_INSTALLER_REGISTER_ONLY=false run_installer "$legacy" --install-metrics-only
+unset live_binary
+sudo sha256sum -c "$log_dir/legacy-state-before.sha256"
+sudo sha256sum -c "$log_dir/legacy-registration-before.sha256"
+test "$(sudo systemctl show "$legacy" --property=User --value)" = komari
+sudo systemctl is-active --quiet "$legacy.service"
+legacy_pid=$(sudo systemctl show "$legacy" --property=MainPID --value)
+test "$(sudo readlink "/proc/$legacy_pid/exe")" = "/usr/lib/komari/$legacy/komari-agent"
+for path in /usr/lib/komari "/usr/lib/komari/$legacy" /etc/komari /etc/komari/services; do
+    test "$(sudo stat -c '%u:%g:%a' "$path")" = 0:0:755
+done
+test "$(sudo stat -c '%a' "$legacy_dir")" = 700
+for path in "${legacy_state_paths[@]}"; do test "$(sudo stat -c '%a' "$path")" = 600; done
+test "$(sudo stat -c '%a' "/etc/komari/services/$legacy.migration-bootstrap.json")" = 640
+sudo systemctl stop "$legacy.service"
+echo 'PASS: prior mode-0700 migration repaired and systemd executes Agent as non-root with private state retained'
 
 # Reproduce the reported host: mode-0700 komari home at the shared state
 # parent, plus trusted binaries left behind by the failed original installer.
