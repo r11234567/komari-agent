@@ -24,6 +24,7 @@ import (
 	"github.com/komari-monitor/komari-agent/core/credentials"
 	"github.com/komari-monitor/komari-agent/core/enrollment"
 	"github.com/komari-monitor/komari-agent/core/hostops"
+	"github.com/komari-monitor/komari-agent/core/installation"
 	"github.com/komari-monitor/komari-agent/core/privileged"
 	"github.com/komari-monitor/komari-agent/core/runtimeconfig"
 	"github.com/komari-monitor/komari-agent/core/signing"
@@ -1360,7 +1361,9 @@ func logTransientRejection(what string, err error) {
 func (c *Client) SubmitReport(parent context.Context) error {
 	ctx, cancel := context.WithTimeout(parent, requestDeadline)
 	defer cancel()
-	req := connect.NewRequest(&reportv1.SubmitReportRequest{Report: monitoring.CollectReport().Proto(c.agentIDValue(), c.sequence.Add(1))})
+	report := monitoring.CollectReport().Proto(c.agentIDValue(), c.sequence.Add(1))
+	report.Metadata.Installation = installation.Observe(c.cfg, c.startupID, report.Metadata.GetCapabilities().GetPrivilegeMode())
+	req := connect.NewRequest(&reportv1.SubmitReportRequest{Report: report})
 	c.authorize(req.Header())
 	_, err := c.report.SubmitReport(ctx, req)
 	return err

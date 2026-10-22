@@ -119,7 +119,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force ci-artifacts | Out-Null
           $env:GOMAXPROCS = '2'
-          go test -p=2 -json -count=1 -timeout=5m ./core/statelock ./core/privileged ./core/runtimeconfig ./core/hostops ./clientcore 2> ci-artifacts/windows-build.log | Tee-Object -FilePath ci-artifacts/windows-tests.jsonl
+          go test -p=2 -json -count=1 -timeout=5m ./core/statelock ./core/privileged ./core/runtimeconfig ./core/hostops ./core/installation ./clientcore 2> ci-artifacts/windows-build.log | Tee-Object -FilePath ci-artifacts/windows-tests.jsonl
           $testExit = $LASTEXITCODE
           $testExit | Out-File ci-artifacts/windows-exit.txt
           exit $testExit
