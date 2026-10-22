@@ -4,14 +4,95 @@ package hostcmd
 
 import (
 	"bytes"
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/komari-monitor/komari-agent/core/credentials"
 	"github.com/komari-monitor/komari-agent/core/hostops"
 	hostv1 "github.com/r11234567/komari-proto/gen/go/komari/host/v1"
+	hostconnect "github.com/r11234567/komari-proto/gen/go/komari/host/v1/hostv1connect"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+func TestRecoveryReconcilesAlreadyAcceptedRestorationWithoutAnotherReceipt(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		pending    bool
+		wrongGrant bool
+	}{
+		{name: "legacy cleared receipt"},
+		{name: "new receipt rejected by terminal operation", pending: true},
+		{name: "signed result for a different grant is rejected", pending: true, wrongGrant: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pub, key, err := ed25519.GenerateKey(rand.Reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixture := &hostTestPanel{key: key, receipts: map[string][]byte{}}
+			fixture.set("unit-service", 2, false)
+			// Restoration can be reconciled after the execution grant has expired.
+			fixture.current.Authorization.ExpiresAt = timestamppb.New(time.Now().Add(-time.Minute))
+			original := fixture.revision()
+			grant := proto.Clone(original.Authorization).(*hostv1.HostAuthorization)
+			if tc.wrongGrant {
+				grant.Nonce = "different-grant"
+			}
+			fixture.op = &hostv1.HostOperation{OperationId: "old-operation", Authorization: grant, Phase: hostv1.HostOperationPhase_HOST_OPERATION_PHASE_RESTORED, LeaseExpiresAt: grant.ExpiresAt}
+			mux := http.NewServeMux()
+			path, handler := hostconnect.NewHostServiceHandler(fixture)
+			mux.Handle(path, handler)
+			server := httptest.NewServer(mux)
+			defer server.Close()
+			p := &panel{trust: &hostops.Trust{AgentID: "stage6-node", PanelKeys: []credentials.PinnedKey{{Algorithm: 1, KeyID: "stage6", Value: base64.StdEncoding.EncodeToString(pub)}}}, host: hostconnect.NewHostServiceClient(server.Client(), server.URL)}
+			j := &hostJournal{Version: hostJournalVersion, ID: "old-operation", Phase: "restored", dir: filepath.Join(t.TempDir(), "service")}
+			if err = os.Mkdir(j.dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			j.Revision, err = proto.Marshal(original)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.pending {
+				j.Receipt, err = proto.Marshal(&hostv1.ReportHostOperationRequest{AgentId: "stage6-node", OperationId: j.ID, ReceiptId: "new-receipt", Phase: hostv1.HostOperationPhase_HOST_OPERATION_PHASE_RESTORED})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			err = j.reportRestoration(context.Background(), p, "restore retry")
+			if tc.wrongGrant {
+				if err == nil || len(j.Receipt) == 0 {
+					t.Fatal("mismatched signed operation cleared pending recovery")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(j.Receipt) != 0 || len(fixture.receipts) != 0 {
+				t.Fatal("confirmed terminal restoration was reported again")
+			}
+			if tc.pending && len(j.SupersededReceipts) != 1 {
+				t.Fatal("rejected recovery receipt was discarded instead of retained for audit")
+			}
+			if err = archiveJournal(j); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = os.Stat(filepath.Join(j.dir+"-"+j.ID, "transaction.json")); err != nil {
+				t.Fatal("recovered transaction history missing:", err)
+			}
+		})
+	}
+}
 
 func TestRecoveryReceiptKeepsIdentityAcrossRestartAndExplicitRestore(t *testing.T) {
 	request := &hostv1.ReportHostOperationRequest{OperationId: "operation", ReceiptId: "durable-restoration", Phase: hostv1.HostOperationPhase_HOST_OPERATION_PHASE_RESTORED, Operator: "original-operator", Error: "original-detail"}

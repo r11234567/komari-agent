@@ -126,6 +126,9 @@ func (s *hostTestPanel) NegotiateHostProtocol(_ context.Context, r *connect.Requ
 	s.negotiatedActions = append([]hostv1.HostAction(nil), r.Msg.SupportedActions...)
 	defer s.mu.Unlock()
 	s.startup = r.Msg.StartupId
+	// Restored daemons negotiate their real identity even when the preceding
+	// target's final ACK was accepted. Do not keep that target's stale mode.
+	s.mode = r.Msg.PrivilegeMode
 	return connect.NewResponse(&hostv1.NegotiateHostProtocolResponse{ProtocolVersion: 2}), nil
 }
 func (s *hostTestPanel) GetPrivilegedDelivery(context.Context, *connect.Request[configv1.GetPrivilegedDeliveryRequest]) (*connect.Response[configv1.GetPrivilegedDeliveryResponse], error) {
@@ -210,6 +213,10 @@ func (s *hostTestPanel) ReportHostOperation(_ context.Context, r *connect.Reques
 	}
 	if s.failLocalACK && r.Msg.Phase == 3 {
 		return nil, connect.NewError(connect.CodeUnavailable, errors.New("fixture network outage"))
+	}
+	// Match production: only an identical receipt may retry a terminal phase.
+	if s.op.Phase >= 4 {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errors.New("illegal host operation transition"))
 	}
 	if r.Msg.Phase < s.op.Phase || r.Msg.LocalAuthentication == "" || r.Msg.Operator == "" {
 		return nil, errors.New("phase/auth missing")
@@ -381,6 +388,7 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 		t.Fatal(err)
 	}
 	var interrupt <-chan struct{}
+	var lastRunOutput string
 	run := func(passwordInput string, args ...string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
 		defer cancel()
@@ -422,7 +430,8 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 		}()
 		err = c.Wait()
 		<-done
-		t.Log(strings.ReplaceAll(output.String(), password, "[redacted]"))
+		lastRunOutput = strings.ReplaceAll(output.String(), password, "[redacted]")
+		t.Log(lastRunOutput)
 		return err
 	}
 	if err = run("deliberately-wrong", "apply", "--manifest", m.ManifestPath, "--revision", "2"); err == nil {
@@ -513,6 +522,35 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	if err = hostops.AtomicWrite(cache, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// Legacy migration and a reboot both leave /run without this directory.
+	// A fresh-install-only fixture previously hid the missing-heartbeat failure.
+	heartbeatDir := filepath.Dir(hostops.HelperStatusPath(m))
+	if err = os.Remove(heartbeatDir); err != nil {
+		t.Fatal("remove empty heartbeat directory on disposable runner:", err)
+	}
+	// The root helper must reject existing unsafe directories, not take them over.
+	if err = os.Symlink(dir, heartbeatDir); err != nil {
+		t.Fatal(err)
+	}
+	if err = hostops.PrepareHelperStatus(m); err == nil {
+		t.Fatal("symlink heartbeat directory accepted")
+	}
+	if err = os.Remove(heartbeatDir); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Mkdir(heartbeatDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Chown(heartbeatDir, uid, gid); err != nil {
+		t.Fatal(err)
+	}
+	if err = hostops.PrepareHelperStatus(m); err == nil {
+		t.Fatal("Agent-owned heartbeat directory accepted")
+	}
+	if err = os.Remove(heartbeatDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Log("first rescue installation starts without /run/komari")
 	// No --allow-rescue-helper, fetch-helper or offline artifact flags are needed.
 	if err = run(password, "apply", "--manifest", m.ManifestPath, "--revision", "4"); err != nil {
 		t.Fatal(err)
@@ -528,6 +566,33 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	if err != nil || !status.LeaseReady || !status.Authorized {
 		t.Fatalf("helper not independently ready: %v", err)
 	}
+	if err = hostops.TrustedPath(heartbeatDir); err != nil {
+		t.Fatal(err)
+	}
+	if info, e := os.Stat(heartbeatDir); e != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("heartbeat directory must be public and protected: info=%v error=%v", info, e)
+	}
+	// Reproduce volatile /run after reboot without another host apply or a new
+	// approval. The installed helper must recreate its evidence on every startup.
+	if _, err = systemctl("stop", helperUnit(m)); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Remove(hostops.HelperStatusPath(m)); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err = os.Remove(heartbeatDir); err != nil {
+		t.Fatal(err)
+	}
+	if err = restartReviewedService(helperUnit(m)); err != nil {
+		t.Fatal(err)
+	}
+	if err = waitHelper(m); err != nil {
+		t.Fatal("helper did not recover after volatile runtime directory loss:", err)
+	}
+	if err = verifyService(service, uid, 2); err != nil {
+		t.Fatal("helper restart changed ordinary Agent identity:", err)
+	}
+	t.Log("helper restart recreated /run/komari and published a verified root heartbeat")
 	// Signed withdrawal denies new rescue work before any administrator removes it.
 	panel.set(service, 2, false)
 	deadline := time.Now().Add(8 * time.Second)
@@ -715,10 +780,50 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	}
 	panel.mu.Lock()
 	restoredAfterOutage := panel.op.Phase == hostv1.HostOperationPhase_HOST_OPERATION_PHASE_RESTORED && panel.current.State == configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_FAILED
+	panel.loseDaemonACK = false
 	panel.mu.Unlock()
 	if !restoredAfterOutage {
 		t.Fatal("restoration after lost final ACK did not close the operation")
 	}
+	// A failed target startup with a successful automatic restoration must
+	// archive immediately, so the next approved revision needs no manual restore.
+	rootOnly := filepath.Join(dir, "ci-root-only-start")
+	if err = hostops.AtomicWrite(rootOnly, []byte("#!/bin/sh\n[ \"$(id -u)\" = 0 ]\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err = hostops.AtomicWrite(failing, []byte("[Service]\nExecStartPre="+unitQuote(rootOnly)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	panel.set(service, 2, false)
+	if err = run(password, "apply", "--manifest", m.ManifestPath, "--revision", "11"); err == nil || !strings.Contains(lastRunOutput, "transaction archived") {
+		t.Fatal("automatic restoration did not report confirmed archive:", err)
+	}
+	if err = verifyService(service, 0, 1); err != nil {
+		t.Fatal("failed demotion did not restore original root service:", err)
+	}
+	if _, err = os.Stat(filepath.Join(journalDir(m), "transaction.json")); !os.IsNotExist(err) {
+		t.Fatal("confirmed automatic restoration left an active journal:", err)
+	}
+	panel.mu.Lock()
+	archivedOperationID := panel.op.OperationId
+	panel.mu.Unlock()
+	if _, err = os.Stat(journalDir(m) + "-" + archivedOperationID); err != nil {
+		t.Fatal("automatic restoration discarded transaction history:", err)
+	}
+	if err = os.Remove(failing); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = systemctl("daemon-reload"); err != nil {
+		t.Fatal(err)
+	}
+	panel.set(service, 2, false)
+	if err = run(password, "apply", "--manifest", m.ManifestPath, "--revision", "12"); err != nil {
+		t.Fatal("new approved task blocked after confirmed rollback:", err)
+	}
+	if err = verifyService(service, uid, 2); err != nil {
+		t.Fatal(err)
+	}
+	t.Log("confirmed rollback archived automatically; next signed revision applied without manual journal cleanup")
 	legacyFile, err = os.Open(legacyArtifact)
 	if err != nil {
 		t.Fatal(err)

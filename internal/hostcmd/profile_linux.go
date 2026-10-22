@@ -181,12 +181,18 @@ func verifyService(service string, wantUID int, mode int32) error {
 	return fmt.Errorf("service %s did not reach verified UID=%d capability/NoNewPrivileges profile", service, wantUID)
 }
 func waitHelper(m *hostops.Manifest) error {
+	var lastErr error
 	for i := 0; i < 60; i++ {
 		status, err := hostops.ReadHelperStatus(m)
 		if err == nil && status.Authorized && status.LeaseReady {
 			return nil
 		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = fmt.Errorf("heartbeat authorized=%t lease_ready=%t", status.Authorized, status.LeaseReady)
+		}
 		time.Sleep(250 * time.Millisecond)
 	}
-	return errors.New("helper is installed but not authorized/connected; startup has not reached lease-ready")
+	return fmt.Errorf("helper is installed but not authorized/connected; startup has not reached lease-ready: %w", lastErr)
 }

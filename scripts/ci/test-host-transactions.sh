@@ -12,6 +12,9 @@ collect() {
   sudo systemctl show "$service" "$service-rescue" --property=User,Group,MainPID,NoNewPrivileges,CapabilityBoundingSet,ActiveState,SubState > ci-artifacts/host-services.log 2>&1 || true
   sudo journalctl -u "$service" -u "$service-rescue" --no-pager -o short-precise > ci-artifacts/host-journald.log 2>&1 || true
   sudo journalctl -k --no-pager -n 150 > ci-artifacts/host-kernel.log 2>&1 || true
+  sudo stat -c '%n uid=%u gid=%g mode=%a' /run/komari "/run/komari/$service.helper.json" > ci-artifacts/host-heartbeat-paths.log 2>&1 || true
+  # This heartbeat is public process evidence, never enrollment credentials.
+  sudo cat "/run/komari/$service.helper.json" > ci-artifacts/host-heartbeat.json 2>&1 || true
   # Root journals contain state backups/credentials. Export only phase and
   # ownership metadata, never raw backup or bootstrap contents.
   sudo python3 - "$service" <<'PY' > ci-artifacts/host-journals.json

@@ -4,6 +4,10 @@ package hostops
 
 import "errors"
 
+func PrepareHelperStatus(*Manifest) error {
+	return errors.New("helper host heartbeat requires accepted Linux systemd adapter")
+}
+
 func ReadHelperStatus(*Manifest) (*HelperStatus, error) {
 	return nil, errors.New("helper host observation requires accepted Linux systemd adapter")
 }
