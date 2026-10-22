@@ -10,6 +10,7 @@ mkdir -p "$log_dir"
 exec > >(tee "$log_dir/lifecycle.log") 2>&1
 service="komari-installer-${GITHUB_RUN_ID}"
 legacy="komari-installer-legacy-${GITHUB_RUN_ID}"
+pristine="komari-installer-pristine-${GITHUB_RUN_ID}"
 fixture="/usr/lib/komari/installer-fixture-${GITHUB_RUN_ID}"
 saved_parent="/var/lib/komari-installer-parent-${GITHUB_RUN_ID}"
 cleanup() {
@@ -19,7 +20,7 @@ cleanup() {
         sudo unlink /var/lib/komari
         sudo mv "$saved_parent" /var/lib/komari
     fi
-    for unit in "$service" "$legacy"; do
+    for unit in "$service" "$legacy" "$pristine"; do
         sudo systemctl show "$unit" --property=ActiveState,SubState,MainPID,Result > "$log_dir/$unit-status.log" 2>&1 || true
         sudo journalctl -u "$unit" --no-pager > "$log_dir/$unit-journal.log" 2>&1 || true
         sudo systemctl disable --now "$unit" >/dev/null 2>&1 || true
@@ -68,14 +69,19 @@ run_installer() {
         KOMARI_INSTALLER_FIXTURE_HOST="$fixture/komari-host" \
         KOMARI_INSTALLER_FIXTURE_BAD_HASH="${fixture_bad_hash:-}" \
         bash "$root/install.sh" --install-service-name "$unit" \
-        --install-dir "/usr/lib/komari/$unit" --install-version "fixture-$agent" "$@"
+        --install-version "fixture-$agent" "$@"
 }
+
+# A pristine entry point must create no account-owned shared parent, and a
+# custom service name must get its own default binary directory.
+run_installer "$pristine" v1 --endpoint https://panel.invalid
+test "$(getent passwd komari | cut -d: -f6)" = /nonexistent
+test "$(sudo stat -c '%u:%g:%a' /var/lib/komari)" = 0:0:755
+sudo cmp "$fixture/agent-v1" "/usr/lib/komari/$pristine/komari-agent"
 
 # Reproduce the reported failure: an old installer made the shared state parent
 # the service account's mode-0700 home and left two binaries after a failed try.
-if ! id -u komari >/dev/null 2>&1; then
-    sudo useradd --system --no-create-home --home-dir /var/lib/komari --shell /usr/sbin/nologin komari
-fi
+sudo usermod --home /var/lib/komari komari
 test "$(getent passwd komari | cut -d: -f6)" = /var/lib/komari
 sudo chown "$(id -u komari):$(id -g komari)" /var/lib/komari
 sudo chmod 700 /var/lib/komari

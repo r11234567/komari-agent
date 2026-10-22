@@ -38,6 +38,7 @@ log_config() {
 # Default values
 service_name="komari-agent"
 target_dir="/usr/lib/komari/komari-agent"
+target_dir_explicit=false
 github_proxy=""
 release_repository="r11234567/komari-agent"
 install_version="" # New parameter for specifying version
@@ -92,6 +93,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --install-dir)
             target_dir="$2"
+            target_dir_explicit=true
             shift 2
             ;;
         --install-service-name)
@@ -189,6 +191,9 @@ done
 if [[ ! "$service_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || [[ "$service_name" = *.service ]]; then
     log_error "Invalid service name: $service_name"
     exit 64
+fi
+if [ "$os_name" = linux ] && [ "$target_dir_explicit" = false ]; then
+    target_dir="/usr/lib/komari/$service_name"
 fi
 install_mode=fresh
 installed_manifest="/etc/komari/services/${service_name}.json"
@@ -382,6 +387,9 @@ if [ "$uninstall_only" != true ]; then
     fi
     service_was_active=false
     if systemctl is-active --quiet "${service_name}.service"; then service_was_active=true; fi
+    # Custom service instances do not create global commands. Validate the
+    # default instance's command directory before changing installed binaries.
+    if [ "$service_name" = komari-agent ]; then ensure_root_dir /usr/local/bin; fi
     case "$(uname -m)" in
         x86_64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; i?86) arch=386 ;;
         armv7*|armv6*) arch=arm ;; loongarch64) arch=loong64 ;;
@@ -469,7 +477,6 @@ INSTALLED_PATHS
             mv -fT -- "$host_stage" "$host_path" || { rm -f -- "$host_stage"; exit 1; }
             ;;
     esac
-    ensure_root_dir /usr/local/bin
     if [ "$service_name" = komari-agent ]; then
         for component in komari-agent komari-host; do
             link_path="/usr/local/bin/$component"
