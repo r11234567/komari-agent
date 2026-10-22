@@ -36,13 +36,15 @@ jobs:
         uses: actions/github-script@v9
         with:
           script: |
-            const { discoverRuns } = require('./scripts/ci/release-gate.cjs');
+            const { discoverRuns, REQUIRED } = require('./scripts/ci/release-gate.cjs');
             const sha = context.payload.pull_request?.base.sha ?? context.sha;
             const observations = [];
             try {
-              const runs = await discoverRuns(github, context.repo, sha, 'build.yml', observations);
-              if (!runs.length) throw new Error(`Cannot discover the main push build for ${sha}`);
-              core.info(`Discovered ${runs.length} exact main push build(s) for ${sha}`);
+              for (const workflow of REQUIRED) {
+                const runs = await discoverRuns(github, context.repo, sha, workflow, observations);
+                if (!runs.length) throw new Error(`Cannot discover ${workflow} main push for ${sha}`);
+                core.info(`Discovered ${runs.length} exact main push run(s) of ${workflow} for ${sha}`);
+              }
             } finally {
               require('node:fs').writeFileSync('ci-artifacts/release-discovery.json', JSON.stringify({ sha, observations }, null, 2));
             }

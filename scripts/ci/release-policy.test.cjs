@@ -37,8 +37,8 @@ test('release checks all required workflows and retains API failures as evidence
     github: { rest: { actions: {
       async listWorkflowRuns(query) {
         assert.equal(query.head_sha, undefined);
-        assert.equal(query.event, 'push');
-        assert.equal(query.branch, 'main');
+        assert.equal(query.event, undefined);
+        assert.equal(query.branch, undefined);
         requests.push(query.workflow_id);
         return { data: { workflow_runs: [{ ...success, head_sha: sha }] } };
       },
@@ -60,7 +60,7 @@ test('release checks all required workflows and retains API failures as evidence
   }
 });
 
-test('release discovery pages main history without the unreliable SHA search filter', async () => {
+test('release discovery pages workflow history without API search filters', async () => {
   const sha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
   const artifactDir = mkdtempSync(join(tmpdir(), 'komari-release-discovery-'));
   const summary = { addHeading() { return this; }, addRaw() { return this; }, async write() {} };
@@ -71,6 +71,8 @@ test('release discovery pages main history without the unreliable SHA search fil
     core: { info() {}, summary },
     github: { rest: { actions: { async listWorkflowRuns(query) {
       assert.equal(query.head_sha, undefined, 'must not use the empty SHA-filtered search');
+      assert.equal(query.event, undefined, 'must not use the empty event-filtered search');
+      assert.equal(query.branch, undefined, 'branch must be verified locally');
       requests.push({ workflow: query.workflow_id, page: query.page });
       if (query.page === 1) return { data: { workflow_runs: Array.from({ length: 100 }, (_, id) => ({ ...success, id: id + 10, head_sha: 'newer-sha' })) } };
       return { data: { workflow_runs: results } };
@@ -95,4 +97,26 @@ test('release discovery pages main history without the unreliable SHA search fil
   } finally {
     rmSync(artifactDir, { recursive: true, force: true });
   }
+});
+
+test('CodeQL discovery survives the empty event-filtered API and rejects unrelated runs', async () => {
+  const { discoverRuns } = require('./release-gate.cjs');
+  const github = { rest: { actions: { async listWorkflowRuns(query) {
+    assert.equal(query.workflow_id, 'codeql.yml');
+    // Reproduce the real API: event=push returned zero CodeQL runs while
+    // unfiltered history contained the successful main push for the same SHA.
+    return { data: { workflow_runs: query.event ? [] : [
+      { ...success, id: 10, event: 'pull_request' },
+      { ...success, id: 11, event: 'workflow_dispatch' },
+      { ...success, id: 12, event: 'schedule' },
+      { ...success, id: 13, head_branch: 'feature' },
+      { ...success, id: 14, head_sha: 'other-sha' },
+      success,
+    ] } };
+  } } } };
+  const observations = [];
+  const runs = await discoverRuns(github, { owner: 'example', repo: 'agent' }, 'exact-sha', 'codeql.yml', observations);
+  assert.deepEqual(runs, [success]);
+  assert.equal(requireSuccessfulRun(runs, 'exact-sha', 'codeql.yml'), success);
+  assert.equal(observations[0].count, 6);
 });

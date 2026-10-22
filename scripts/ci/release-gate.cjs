@@ -1,16 +1,16 @@
 const { execFileSync } = require('node:child_process');
 const { mkdirSync, writeFileSync } = require('node:fs');
 const { join } = require('node:path');
-const REQUIRED = ['build.yml', 'privileged-audit.yml', 'codeql.yml'];
+const REQUIRED = Object.freeze(['build.yml', 'privileged-audit.yml', 'codeql.yml']);
 const MAX_PAGES = 10;
 
 async function discoverRuns(github, repo, sha, workflow, observations) {
-  // Do not rely on GitHub's head_sha search index. Release events have
-  // returned an empty filtered list even while the same main run exists.
-  // Read main's workflow history and enforce the exact SHA locally instead.
+  // GitHub's head_sha and event filters have returned empty lists even when
+  // the exact successful main push exists (including CodeQL with event=push).
+  // Read unfiltered workflow history and verify SHA, branch and event locally.
   for (let page = 1; page <= MAX_PAGES; page++) {
     const response = await github.rest.actions.listWorkflowRuns({
-      ...repo, workflow_id: workflow, branch: 'main', event: 'push',
+      ...repo, workflow_id: workflow,
       per_page: 100, page,
     });
     const runs = response.data?.workflow_runs;
@@ -22,7 +22,7 @@ async function discoverRuns(github, repo, sha, workflow, observations) {
     const matches = runs.filter(run => run.head_sha === sha && run.head_branch === 'main' && run.event === 'push');
     if (matches.length || runs.length < 100) return matches;
   }
-  throw new Error(`${workflow} has no matching main push in the latest ${MAX_PAGES * 100} runs`);
+  throw new Error(`${workflow} has no matching main push in the latest ${MAX_PAGES * 100} workflow runs`);
 }
 
 function requireSuccessfulRun(runs, sha, workflow) {
@@ -61,3 +61,4 @@ async function releaseGate({ github, context, core, artifactDir = 'ci-artifacts'
 module.exports = releaseGate;
 module.exports.requireSuccessfulRun = requireSuccessfulRun;
 module.exports.discoverRuns = discoverRuns;
+module.exports.REQUIRED = REQUIRED;
