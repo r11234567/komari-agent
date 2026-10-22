@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,6 +23,22 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+func TestRecoveryRejectsIncompleteOrUnsupportedJournalIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		journal hostJournal
+		want    string
+	}{
+		{journal: hostJournal{Version: hostJournalVersion - 1, ID: "operation", Manifest: "/unused"}, want: "unsupported transaction journal version"},
+		{journal: hostJournal{Version: hostJournalVersion, Manifest: "/unused"}, want: "missing its operation ID or manifest"},
+		{journal: hostJournal{Version: hostJournalVersion, ID: "operation"}, want: "missing its operation ID or manifest"},
+	} {
+		_, err := resolveJournalManifest(&hostops.Manifest{}, &tc.journal)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("invalid journal identity was not rejected precisely: %v", err)
+		}
+	}
+}
 
 func TestRecoveryReconcilesAlreadyAcceptedRestorationWithoutAnotherReceipt(t *testing.T) {
 	for _, tc := range []struct {

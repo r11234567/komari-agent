@@ -700,8 +700,27 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	panel.mu.Lock()
 	panel.failLocalACK = false
 	panel.mu.Unlock()
-	if err = run(password, "resume", "--manifest", m.ManifestPath); err != nil {
+	// The normal no-argument command discovers the adjacent manifest, while
+	// apply above bound the journal to the registry copy. A genuinely different
+	// installation must still fail before authentication or OS mutation.
+	adjacentManifest := filepath.Join(filepath.Dir(m.HostTool), "service-config.json")
+	different := *m
+	different.CredentialsFile += ".different-installation"
+	if err = hostops.WriteJSON(adjacentManifest, &different, 0o644); err != nil {
 		t.Fatal(err)
+	}
+	if err = run(password, "resume"); err == nil || !strings.Contains(lastRunOutput, "journal installation differs") {
+		t.Fatal("different installation accepted by no-argument recovery:", lastRunOutput)
+	}
+	if err = hostops.WriteJSON(adjacentManifest, m, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err = run(password, "resume"); err != nil {
+		t.Fatal(err)
+	}
+	store, err = privileged.Open(m.PrivilegedStateFile)
+	if err != nil || store.State().AppliedRevision != 8 {
+		t.Fatal("no-argument recovery did not reconcile the real daemon ACK:", err)
 	}
 	// Kill the actual host process after it stopped the daemon and fenced
 	// state inodes, while the online lease recheck is in progress.
@@ -711,7 +730,8 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	panel.interruptProfile = gate
 	panel.mu.Unlock()
 	interrupt = gate
-	if err = run(password, "apply", "--manifest", m.ManifestPath, "--revision", "9"); err == nil {
+	// Also exercise the reverse alias: default apply, explicit recovery.
+	if err = run(password, "apply", "--revision", "9"); err == nil {
 		t.Fatal("host process was not interrupted")
 	}
 	interrupt = nil

@@ -420,7 +420,7 @@ func apply(args []string, out io.Writer) error {
 	}
 	journalPath := filepath.Join(dir, "transaction.json")
 	if _, err = os.Lstat(journalPath); !os.IsNotExist(err) {
-		return errors.New("transaction journal exists; use resume/restore before starting another operation")
+		return fmt.Errorf("transaction journal exists; reconcile with %s or recover with %s before starting another operation", hostRecoveryCommand(m, "resume"), hostRecoveryCommand(m, "restore"))
 	}
 	panel, err := newPanel(m, t)
 	if err != nil {
@@ -564,10 +564,10 @@ func apply(args []string, out io.Writer) error {
 		recoveryCtx, recoveryCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer recoveryCancel()
 		if reportErr := j.reportRestoration(recoveryCtx, panel, err.Error()); reportErr != nil {
-			return fmt.Errorf("apply failed: %v; original service restored; recovery receipt pending: %w; run komari-host restore --manifest %s", err, reportErr, m.ManifestPath)
+			return fmt.Errorf("apply failed: %v; original service restored; recovery receipt pending: %w; run %s", err, reportErr, hostRecoveryCommand(m, "restore"))
 		}
 		if archiveErr := archiveJournal(j); archiveErr != nil {
-			return fmt.Errorf("apply failed: %v; original service restored and panel confirmed recovery; archive pending: %w; run komari-host restore --manifest %s", err, archiveErr, m.ManifestPath)
+			return fmt.Errorf("apply failed: %v; original service restored and panel confirmed recovery; archive pending: %w; run %s", err, archiveErr, hostRecoveryCommand(m, "restore"))
 		}
 		return fmt.Errorf("apply failed; original service restored, recovery receipt accepted and transaction archived; save and confirm a new revision: %w", err)
 	}
@@ -576,7 +576,7 @@ func apply(args []string, out io.Writer) error {
 		return err
 	}
 	if err = j.report(ctx, panel, hostv1.HostOperationPhase_HOST_OPERATION_PHASE_LOCAL_APPLIED, ""); err != nil {
-		fmt.Fprintf(out, "Local OS changes verified; control-plane acknowledgement pending. Retry komari-host resume --manifest %s before the execution lease expires.\n", m.ManifestPath)
+		fmt.Fprintf(out, "Local OS changes verified; control-plane acknowledgement pending. Retry %s before the execution lease expires.\n", hostRecoveryCommand(m, "resume"))
 		return err
 	}
 	return finishHost(ctx, m, panel, j, out)
@@ -964,7 +964,7 @@ func finishHost(ctx context.Context, m *hostops.Manifest, p *panel, j *hostJourn
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
-			fmt.Fprintln(out, "Local changes complete; daemon acknowledgement pending. Run komari-host resume to reconcile. The panel applied revision has not been fabricated.")
+			fmt.Fprintf(out, "Local changes complete; daemon acknowledgement pending. Run %s to reconcile. The panel applied revision has not been fabricated.\n", hostRecoveryCommand(m, "resume"))
 			return nil
 		case <-ticker.C:
 			// Get current using the daemon API; the approval may now be expired,
@@ -982,7 +982,7 @@ func finishHost(ctx context.Context, m *hostops.Manifest, p *panel, j *hostJourn
 				return err
 			}
 			if r.GetRevision() != old.Revision || r.GetApprovalGeneration() != old.ApprovalGeneration {
-				return errors.New("host result belongs to a superseded target; inspect the journal and restore before another grant")
+				return fmt.Errorf("host result belongs to a superseded target; run %s before saving and confirming another revision", hostRecoveryCommand(m, "restore"))
 			}
 			if r.GetState() == configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_DELIVERED {
 				j.Phase = "completed"
@@ -1007,6 +1007,33 @@ func archiveJournal(j *hostJournal) error {
 	}
 	defer d.Close()
 	return d.Sync()
+}
+
+func hostRecoveryCommand(m *hostops.Manifest, action string) string {
+	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
+	return "sudo " + quote(m.HostTool) + " " + action + " --manifest " + quote(m.ManifestPath)
+}
+
+func resolveJournalManifest(m *hostops.Manifest, j *hostJournal) (*hostops.Manifest, error) {
+	if j.Version != hostJournalVersion {
+		return nil, fmt.Errorf("unsupported transaction journal version %d", j.Version)
+	}
+	if j.ID == "" || j.Manifest == "" {
+		return nil, errors.New("transaction journal is missing its operation ID or manifest")
+	}
+	// Installation writes a registry manifest and a separate adjacent copy.
+	// Resume may discover either one. Revalidate the original trusted manifest
+	// and compare every resolved field before accepting an alternate path.
+	original, err := resolveManifest(j.Manifest)
+	if err != nil {
+		return nil, fmt.Errorf("cannot validate journal manifest %s: %w", j.Manifest, err)
+	}
+	comparison := *original
+	comparison.ManifestPath = m.ManifestPath
+	if comparison != *m {
+		return nil, fmt.Errorf("journal installation differs from selected manifest; use the original installation: %s", hostRecoveryCommand(original, "resume"))
+	}
+	return original, nil
 }
 
 func resume(args []string, out io.Writer, restore bool) error {
@@ -1036,8 +1063,9 @@ func resume(args []string, out io.Writer, restore bool) error {
 	if err = hostops.ReadJSON(filepath.Join(j.dir, "transaction.json"), &j, true); err != nil {
 		return err
 	}
-	if j.Version != hostJournalVersion || j.Manifest != m.ManifestPath || j.ID == "" {
-		return errors.New("journal identity mismatch")
+	m, err = resolveJournalManifest(m, &j)
+	if err != nil {
+		return err
 	}
 	if j.Phase == "completed" || j.Phase == "unclaimed" {
 		return archiveJournal(&j)
@@ -1125,7 +1153,7 @@ func resume(args []string, out io.Writer, restore bool) error {
 		return err
 	}
 	if err = hostops.VerifyOperation(t, op, original.Authorization, j.ID); err != nil {
-		return fmt.Errorf("lease expired or invalid; restore required: %w", err)
+		return fmt.Errorf("lease expired or invalid; run %s: %w", hostRecoveryCommand(m, "restore"), err)
 	}
 	if op.Phase == 3 {
 		j.Receipt = nil
@@ -1136,10 +1164,10 @@ func resume(args []string, out io.Writer, restore bool) error {
 	}
 	current, err := p.current(ctx)
 	if err != nil {
-		return fmt.Errorf("cannot establish current unexpired authority; use restore to recover: %w", err)
+		return fmt.Errorf("cannot establish current unexpired authority; run %s to recover: %w", hostRecoveryCommand(m, "restore"), err)
 	}
 	if !proto.Equal(current.Authorization, original.Authorization) {
-		return errors.New("approval superseded; restore before another grant")
+		return fmt.Errorf("approval superseded; run %s before another grant", hostRecoveryCommand(m, "restore"))
 	}
 	policy, err := hostops.ReadPolicy(m)
 	if err != nil {
