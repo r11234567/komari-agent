@@ -38,12 +38,10 @@ log_config() {
 # Default values
 service_name="komari-agent"
 target_dir="/usr/lib/komari/komari-agent"
-target_dir_explicit=false
 github_proxy=""
 release_repository="r11234567/komari-agent"
 install_version="" # New parameter for specifying version
 runtime_identity="service-account"
-runtime_identity_explicit=false
 uninstall_only=false
 rescue_enabled=false
 rescue_endpoint=""
@@ -93,7 +91,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --install-dir)
             target_dir="$2"
-            target_dir_explicit=true
             shift 2
             ;;
         --install-service-name)
@@ -110,7 +107,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --install-runtime-identity)
             runtime_identity="$2"
-            runtime_identity_explicit=true
             shift 2
             ;;
         --uninstall)
@@ -188,25 +184,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ ! "$service_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || [[ "$service_name" = *.service ]]; then
-    log_error "Invalid service name: $service_name"
-    exit 64
-fi
-if [ "$os_name" = linux ] && [ "$target_dir_explicit" = false ]; then
-    target_dir="/usr/lib/komari/$service_name"
-fi
-install_mode=fresh
-installed_manifest="/etc/komari/services/${service_name}.json"
-if [ -e "$installed_manifest" ] || [ -L "$installed_manifest" ]; then
-    install_mode=update
-elif [ "$os_name" = linux ] && systemctl cat -- "${service_name}.service" >/dev/null 2>&1; then
-    install_mode=migrate
-fi
-if [ "$uninstall_only" != true ] && [ "$install_mode" != fresh ] && { [ "${#komari_argv[@]}" -ne 0 ] || [ "$runtime_identity_explicit" = true ]; }; then
-    log_error "Existing installation detected. Rerun without daemon options to preserve its identity and configuration; change local settings separately."
-    exit 64
-fi
-
 if { [ -n "$cf_access_client_id" ] && [ -z "$cf_access_client_secret" ]; } || { [ -z "$cf_access_client_id" ] && [ -n "$cf_access_client_secret" ]; }; then
     log_error "--cf-access-client-id and --cf-access-client-secret must be provided together"
     exit 1
@@ -241,7 +218,7 @@ if [ "$runtime_identity" = "service-account" ] && [ "$EUID" -ne 0 ]; then
     log_error "service-account runtime requires running the installer as root"
     exit 1
 fi
-if [ "$uninstall_only" != true ] && [ "$install_mode" = fresh ] && [ "$runtime_identity" = "service-account" ] && [ "$os_name" = "linux" ]; then
+if [ "$uninstall_only" != true ] && [ "$runtime_identity" = "service-account" ] && [ "$os_name" = "linux" ]; then
     if ! id -u "$service_user" >/dev/null 2>&1; then
         log_info "Creating the unprivileged ${service_user} service user..."
         if command -v useradd >/dev/null 2>&1; then
@@ -301,23 +278,24 @@ elif [ "$uninstall_only" != true ] && [ "$runtime_identity" = "service-account" 
     fi
 fi
 
-# Installation, identity-preserving migration and binary updates use the same
-# reviewed host tool. Re-running this script never uninstalls an existing node.
+# Trusted v2 fresh installs. Existing services must use the explicit migration
+# preview; this path never re-enrolls or replaces their identity/state.
 if [ "$uninstall_only" != true ]; then
     if [ "$os_name" != linux ] || [ ! -d /run/systemd/system ]; then
         log_error "Trusted v2 installation currently supports Linux systemd only"
         exit 1
     fi
-    if [ "$EUID" -ne 0 ]; then
-        log_error "Run this installer as root"
-        exit 1
-    fi
     if [ "$rescue_enabled" = true ]; then
-        log_error "Install the rescue helper through an approved host action after configuring komari-host trust"
+        log_error "First install includes komari-host, not the rescue helper; helper installation is not available in this version"
         exit 1
     fi
     if [ -n "$runtime_state_override$credentials_override$privileged_state_override$replay_state_override" ]; then
         log_error "Custom state paths require an explicit reviewed host migration"
+        exit 1
+    fi
+    if [[ ! "$service_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then exit 1; fi
+    if [ -e "/etc/komari/services/${service_name}.json" ] || systemctl cat "${service_name}.service" >/dev/null 2>&1; then
+        log_error "Service already exists. Preview komari-host migrate --service ${service_name} --legacy-disable preserve instead"
         exit 1
     fi
     [[ "$target_dir" = /* ]] || target_dir="$PWD/$target_dir"
@@ -337,7 +315,6 @@ if [ "$uninstall_only" != true ]; then
     }
     ensure_root_file() {
         local path="$1" owner mode
-        ensure_root_dir "$(dirname "$path")"
         if [ -L "$path" ] || [ ! -f "$path" ]; then
             log_error "Trusted regular file required: $path"; exit 1
         fi
@@ -347,49 +324,41 @@ if [ "$uninstall_only" != true ]; then
             log_error "Untrusted owner or permissions at $path"; exit 1
         fi
     }
-    prepare_state_parent() {
-        local path=/var/lib/komari owner mode legacy_uid legacy_home
-        ensure_root_dir /var/lib
-        if [ -L "$path" ] || { [ -e "$path" ] && [ ! -d "$path" ]; }; then
-            log_error "State parent must be a real directory: $path"; exit 1
-        fi
-        if [ -d "$path" ]; then
-            owner=$(stat -c '%u' "$path") || exit 1
-            mode=$(stat -c '%a' "$path") || exit 1
-            if [ "$owner" != 0 ]; then
-                legacy_uid=$(id -u komari 2>/dev/null) || { log_error "Unknown state parent owner"; exit 1; }
-                legacy_home=$(getent passwd komari | cut -d: -f6) || exit 1
-                if [ "$owner" != "$legacy_uid" ] || [ "$legacy_home" != "$path" ] || (( (8#$mode & 0022) != 0 )); then
-                    log_error "Refusing to adopt an unknown or writable state parent: $path"; exit 1
-                fi
-                # /var/lib is already trusted, so the account cannot rename this
-                # entry. Remove its ownership before chmod; never recurse into
-                # state or credentials, follow a link, or reset node identity.
-                chown --no-dereference root:root "$path" || exit 1
-                chmod 755 "$path" || exit 1
-                log_info "Repaired the legacy service-home/state-parent collision; existing contents retained."
-            fi
-        fi
-        ensure_root_dir "$path"
-        chmod 755 "$path" || exit 1
-    }
-    if [ "$install_mode" = fresh ]; then
-        prepare_state_parent
-        if [ -e "/var/lib/komari/$service_name" ] || [ -L "/var/lib/komari/$service_name" ]; then
-            log_error "Existing node state has no service registration: /var/lib/komari/$service_name. Preserve it and recover its registration before reinstalling."
-            exit 1
-        fi
-        ensure_root_dir "$target_dir"
-    fi
-    if [ "$install_mode" = update ] && ! command -v python3 >/dev/null 2>&1; then
-        log_error "python3 is required to read the installed service manifest safely during an update"
+    # Do not overwrite an existing node whose registration is missing. This
+    # recovery path is only for failed attempts that left binaries, not state.
+    if [ -e "/var/lib/komari/$service_name" ] || [ -L "/var/lib/komari/$service_name" ]; then
+        log_error "Existing node state has no service registration; preserve /var/lib/komari/$service_name and recover its registration before reinstalling."
         exit 1
     fi
-    service_was_active=false
-    if systemctl is-active --quiet "${service_name}.service"; then service_was_active=true; fi
-    # Custom service instances do not create global commands. Validate the
-    # default instance's command directory before changing installed binaries.
-    if [ "$service_name" = komari-agent ]; then ensure_root_dir /usr/local/bin; fi
+    ensure_root_dir /var/lib
+    state_parent=/var/lib/komari
+    if [ -L "$state_parent" ] || { [ -e "$state_parent" ] && [ ! -d "$state_parent" ]; }; then
+        log_error "State parent must be a real directory: $state_parent"; exit 1
+    fi
+    if [ -d "$state_parent" ]; then
+        owner=$(stat -c '%u' "$state_parent") || exit 1
+        mode=$(stat -c '%a' "$state_parent") || exit 1
+        if [ "$owner" != 0 ]; then
+            legacy_uid=$(id -u komari 2>/dev/null) || { log_error "Unknown state parent owner"; exit 1; }
+            legacy_home=$(getent passwd komari | cut -d: -f6)
+            if [ "$owner" != "$legacy_uid" ] || [ "$legacy_home" != "$state_parent" ] || (( (8#$mode & 0022) != 0 )); then
+                log_error "Refusing to adopt an unknown or writable state parent: $state_parent"; exit 1
+            fi
+            # Repair only the home-directory collision created by old scripts.
+            # The trusted /var/lib parent prevents replacement of this entry.
+            # Never recurse into state, credentials or other existing contents.
+            chown --no-dereference root:root "$state_parent" || exit 1
+            log_info "Repaired the legacy service-home/state-parent collision; existing contents retained."
+        fi
+    fi
+    ensure_root_dir "$state_parent"
+    chmod 755 "$state_parent" || exit 1
+    ensure_root_dir "$target_dir"
+    ensure_root_dir /usr/local/bin
+    for component in komari-agent komari-host; do
+        binary_path="${target_dir}/${component}"
+        if [ -e "$binary_path" ] || [ -L "$binary_path" ]; then ensure_root_file "$binary_path"; fi
+    done
     case "$(uname -m)" in
         x86_64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; i?86) arch=386 ;;
         armv7*|armv6*) arch=arm ;; loongarch64) arch=loong64 ;;
@@ -406,10 +375,9 @@ if [ "$uninstall_only" != true ]; then
         release_path="download/${install_version}"
     fi
     [ -z "$github_proxy" ] || release_base="${github_proxy%/}/${release_base}"
-    ensure_root_dir /var/cache/komari-installer
-    staging=$(mktemp -d /var/cache/komari-installer/download.XXXXXXXX) || exit 1
+    # Verify both downloads before replacing any trusted leftover binary.
+    staging=$(mktemp -d "$target_dir/.install.XXXXXXXX") || exit 1
     trap 'rm -rf -- "$staging"' EXIT
-    agent_digest=""
     for component in komari-agent komari-host; do
         asset="${component}-linux-${arch}"
         binary_path="${staging}/${component}"
@@ -420,105 +388,13 @@ if [ "$uninstall_only" != true ]; then
         actual=$(sha256sum "$binary_path") || exit 1
         [ "${actual%% *}" = "$expected" ] || { log_error "Checksum mismatch for $asset"; exit 1; }
         chmod 755 "$binary_path" || exit 1
-        [ "$component" != komari-agent ] || agent_digest="$expected"
     done
-    case "$install_mode" in
-        fresh)
-            # Failed attempts may have left trusted binaries but no node. Both
-            # downloads are complete and verified before either is published.
-            for component in komari-agent komari-host; do
-                destination="${target_dir}/${component}"
-                if [ -e "$destination" ] || [ -L "$destination" ]; then ensure_root_file "$destination"; fi
-                mv -fT -- "$staging/$component" "$destination" || exit 1
-            done
-            "${target_dir}/komari-host" install --service "$service_name" --user "$service_user" --binary-dir "$target_dir" -- "${komari_argv[@]}" || exit 1
-            agent_path="${target_dir}/komari-agent"
-            host_path="${target_dir}/komari-host"
-            ;;
-        migrate)
-            log_info "Migrating the existing service; preserving node files, service identity and local remote-control restrictions."
-            "$staging/komari-host" migrate --service "$service_name" --legacy-disable preserve || exit 1
-            "$staging/komari-host" migrate --service "$service_name" --legacy-disable preserve --agent-artifact "$staging/komari-agent" --sha256 "$agent_digest" --commit || exit 1
-            agent_path="/usr/lib/komari/$service_name/komari-agent"
-            host_path="/usr/lib/komari/$service_name/komari-host"
-            ;;
-        update)
-            ensure_root_file "$installed_manifest"
-            "$staging/komari-host" diagnose --manifest "$installed_manifest" || exit 1
-            python3 - "$installed_manifest" "$service_name" > "$staging/installed-paths" <<'INSTALLED_PATHS'
-import json, os, sys
-with open(sys.argv[1]) as f:
-    m = json.load(f)
-if m.get('version') != 2 or m.get('service_name') != sys.argv[2]:
-    raise SystemExit('Installed manifest version or service does not match')
-for field in ('executable', 'host_tool'):
-    path = m.get(field)
-    if not isinstance(path, str) or not os.path.isabs(path) or any(c in path for c in '\x00\r\n'):
-        raise SystemExit('Invalid installed binary path')
-    sys.stdout.write(path + '\n')
-INSTALLED_PATHS
-            [ "$?" -eq 0 ] || exit 1
-            mapfile -t installed_paths < "$staging/installed-paths"
-            agent_path="${installed_paths[0]}"
-            host_path="${installed_paths[1]}"
-            ensure_root_file "$agent_path"
-            ensure_root_file "$host_path"
-            "$staging/komari-host" update --manifest "$installed_manifest" --artifact "$staging/komari-agent" --sha256 "$agent_digest" || exit 1
-            # The host binary is never resident. Replace it without touching the
-            # manifest, policy, bootstrap, credentials or daemon state files.
-            host_stage=$(mktemp "$(dirname "$host_path")/.komari-host-update.XXXXXXXX") || exit 1
-            if ! install -m 700 "$host_path" "$staging/host.previous" || ! cp "$staging/komari-host" "$host_stage" || ! chmod 755 "$host_stage"; then
-                rm -f -- "$host_stage"; exit 1
-            fi
-            # Preserve a recovery copy outside the temporary download directory.
-            host_backup="/var/lib/komari-host/$service_name/host.previous"
-            if [ -e "$host_backup" ] || [ -L "$host_backup" ]; then ensure_root_file "$host_backup"; fi
-            install -m 700 "$staging/host.previous" "$host_backup" || { rm -f -- "$host_stage"; exit 1; }
-            mv -fT -- "$host_stage" "$host_path" || { rm -f -- "$host_stage"; exit 1; }
-            ;;
-    esac
-    if [ "$service_name" = komari-agent ]; then
-        for component in komari-agent komari-host; do
-            link_path="/usr/local/bin/$component"
-            if [ -e "$link_path" ] && [ ! -L "$link_path" ]; then
-                log_warning "Existing regular command retained: $link_path"
-                continue
-            fi
-            if [ "$component" = komari-agent ]; then link_target="$agent_path"; else link_target="$host_path"; fi
-            ln -sfnT -- "$link_target" "$link_path" || exit 1
-        done
-    fi
-    if [ "$service_was_active" = true ]; then
-        restart_failed=false
-        if ! systemctl restart "${service_name}.service"; then restart_failed=true; fi
-        for observation in 1 2 3; do
-            [ "$restart_failed" = false ] || break
-            sleep 1
-            if ! systemctl is-active --quiet "${service_name}.service"; then restart_failed=true; fi
-        done
-        if [ "$restart_failed" = true ]; then
-            log_error "The updated service did not stay active. Previous binaries are retained in /var/lib/komari-host/$service_name/."
-            if [ "$install_mode" = update ]; then
-                previous_agent="/var/lib/komari-host/$service_name/agent.previous"
-                previous_host="/var/lib/komari-host/$service_name/host.previous"
-                ensure_root_file "$previous_agent"
-                ensure_root_file "$previous_host"
-                previous_digest=$(sha256sum "$previous_agent") || exit 1
-                if "$staging/komari-host" update --manifest "$installed_manifest" --artifact "$previous_agent" --sha256 "${previous_digest%% *}"; then
-                    host_stage=$(mktemp "$(dirname "$host_path")/.komari-host-restore.XXXXXXXX") || exit 1
-                    if cp "$previous_host" "$host_stage" && chmod 755 "$host_stage" && mv -fT -- "$host_stage" "$host_path" && systemctl restart "${service_name}.service"; then
-                        log_warning "Restored previous agent and host binaries and restarted the original service. The update failed."
-                    else
-                        rm -f -- "$host_stage"
-                        log_error "Automatic binary recovery could not restart the service; inspect the retained update journal."
-                    fi
-                fi
-            fi
-            systemctl show "${service_name}.service" --property=ActiveState,SubState,Result
-            exit 1
-        fi
-    fi
-    log_success "${install_mode}: installed ${install_version}; existing node identity and configuration retained."
+    for component in komari-agent komari-host; do
+        mv -fT -- "$staging/$component" "$target_dir/$component" || exit 1
+    done
+    "${target_dir}/komari-host" install --service "$service_name" --user "$service_user" --binary-dir "$target_dir" -- "${komari_argv[@]}" || exit 1
+    ln -s "${target_dir}/komari-agent" /usr/local/bin/komari-agent 2>/dev/null || true
+    ln -s "${target_dir}/komari-host" /usr/local/bin/komari-host 2>/dev/null || true
     exit 0
 fi
 
