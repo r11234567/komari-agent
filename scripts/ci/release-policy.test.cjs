@@ -34,17 +34,15 @@ test('release checks all required workflows and retains API failures as evidence
   const options = {
     artifactDir, context: { sha, repo: { owner: 'example', repo: 'agent' } },
     core: { info() {}, summary },
-    github: {
-      rest: { actions: { listWorkflowRuns: 'workflow-api' } },
-      async paginate(route, query) {
-        assert.equal(route, 'workflow-api');
-        assert.equal(query.head_sha, sha);
+    github: { rest: { actions: {
+      async listWorkflowRuns(query) {
+        assert.equal(query.head_sha, undefined);
         assert.equal(query.event, 'push');
         assert.equal(query.branch, 'main');
         requests.push(query.workflow_id);
-        return [{ ...success, head_sha: sha }];
+        return { data: { workflow_runs: [{ ...success, head_sha: sha }] } };
       },
-    },
+    } } },
   };
   const evidence = () => JSON.parse(readFileSync(join(artifactDir, 'release-gate.json'), 'utf8'));
   try {
@@ -52,11 +50,48 @@ test('release checks all required workflows and retains API failures as evidence
     assert.deepEqual(requests, ['build.yml', 'privileged-audit.yml', 'codeql.yml']);
     assert.equal(evidence().result, 'success');
     assert.equal(evidence().evidence.length, 3);
-    options.github.paginate = async () => { throw new Error('API unavailable'); };
+    options.github.rest.actions.listWorkflowRuns = async () => { throw new Error('API unavailable'); };
     await assert.rejects(releaseGate(options), /API unavailable/);
     assert.equal(evidence().result, 'failure');
     assert.equal(evidence().error, 'API unavailable');
     await assert.rejects(releaseGate({ ...options, context: { ...options.context, sha: 'wrong-sha' } }), /differs from event/);
+  } finally {
+    rmSync(artifactDir, { recursive: true, force: true });
+  }
+});
+
+test('release discovery pages main history without the unreliable SHA search filter', async () => {
+  const sha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  const artifactDir = mkdtempSync(join(tmpdir(), 'komari-release-discovery-'));
+  const summary = { addHeading() { return this; }, addRaw() { return this; }, async write() {} };
+  const requests = [];
+  let results = [{ ...success, head_sha: sha }];
+  const options = {
+    artifactDir, context: { sha, repo: { owner: 'example', repo: 'agent' } },
+    core: { info() {}, summary },
+    github: { rest: { actions: { async listWorkflowRuns(query) {
+      assert.equal(query.head_sha, undefined, 'must not use the empty SHA-filtered search');
+      requests.push({ workflow: query.workflow_id, page: query.page });
+      if (query.page === 1) return { data: { workflow_runs: Array.from({ length: 100 }, (_, id) => ({ ...success, id: id + 10, head_sha: 'newer-sha' })) } };
+      return { data: { workflow_runs: results } };
+    } } } },
+  };
+  const evidence = () => JSON.parse(readFileSync(join(artifactDir, 'release-gate.json'), 'utf8'));
+  try {
+    await releaseGate(options);
+    assert.deepEqual(requests.map(r => r.page), [1, 2, 1, 2, 1, 2]);
+    assert.equal(evidence().observations.length, 6);
+    for (const invalid of [
+      { head_sha: 'another-sha' }, { event: 'pull_request' }, { head_branch: 'feature' },
+      { conclusion: 'failure' }, { status: 'in_progress', conclusion: null },
+    ]) {
+      results = [{ ...success, head_sha: sha, ...invalid }];
+      await assert.rejects(releaseGate(options), /must succeed/);
+      assert.equal(evidence().result, 'failure');
+      assert.equal(evidence().observations.at(-1).runs[0].head_sha, results[0].head_sha);
+    }
+    options.github.rest.actions.listWorkflowRuns = async () => ({ data: {} });
+    await assert.rejects(releaseGate(options), /invalid workflow_runs response/);
   } finally {
     rmSync(artifactDir, { recursive: true, force: true });
   }

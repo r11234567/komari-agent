@@ -13,6 +13,9 @@ permissions:
 jobs:
   protocol-and-release-policy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v7
         with:
@@ -29,6 +32,20 @@ jobs:
           trap 'echo "$?" > ci-artifacts/policy-exit.txt' EXIT
           node --test scripts/ci/release-policy.test.cjs scripts/ci/protocol-submodule.test.cjs
           node scripts/ci/check-protocol.cjs --resolve-go
+      - name: Exercise release discovery with the actual Actions token and SDK
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const { discoverRuns } = require('./scripts/ci/release-gate.cjs');
+            const sha = context.payload.pull_request?.base.sha ?? context.sha;
+            const observations = [];
+            try {
+              const runs = await discoverRuns(github, context.repo, sha, 'build.yml', observations);
+              if (!runs.length) throw new Error(`Cannot discover the main push build for ${sha}`);
+              core.info(`Discovered ${runs.length} exact main push build(s) for ${sha}`);
+            } finally {
+              require('node:fs').writeFileSync('ci-artifacts/release-discovery.json', JSON.stringify({ sha, observations }, null, 2));
+            }
       - uses: actions/upload-artifact@v4
         if: always()
         with:

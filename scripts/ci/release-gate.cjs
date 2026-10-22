@@ -2,6 +2,28 @@ const { execFileSync } = require('node:child_process');
 const { mkdirSync, writeFileSync } = require('node:fs');
 const { join } = require('node:path');
 const REQUIRED = ['build.yml', 'privileged-audit.yml', 'codeql.yml'];
+const MAX_PAGES = 10;
+
+async function discoverRuns(github, repo, sha, workflow, observations) {
+  // Do not rely on GitHub's head_sha search index. Release events have
+  // returned an empty filtered list even while the same main run exists.
+  // Read main's workflow history and enforce the exact SHA locally instead.
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const response = await github.rest.actions.listWorkflowRuns({
+      ...repo, workflow_id: workflow, branch: 'main', event: 'push',
+      per_page: 100, page,
+    });
+    const runs = response.data?.workflow_runs;
+    if (!Array.isArray(runs)) throw new Error(`${workflow} returned an invalid workflow_runs response`);
+    observations.push({ workflow, page, count: runs.length, runs: runs.slice(0, 10).map(run => ({
+      id: run.id, head_sha: run.head_sha, head_branch: run.head_branch,
+      event: run.event, status: run.status, conclusion: run.conclusion,
+    })) });
+    const matches = runs.filter(run => run.head_sha === sha && run.head_branch === 'main' && run.event === 'push');
+    if (matches.length || runs.length < 100) return matches;
+  }
+  throw new Error(`${workflow} has no matching main push in the latest ${MAX_PAGES * 100} runs`);
+}
 
 function requireSuccessfulRun(runs, sha, workflow) {
   // Only a main push validates the actual released commit. PR merge refs and
@@ -18,25 +40,24 @@ function requireSuccessfulRun(runs, sha, workflow) {
 async function releaseGate({ github, context, core, artifactDir = 'ci-artifacts' }) {
   let sha;
   const evidence = [];
+  const observations = [];
   mkdirSync(artifactDir, { recursive: true });
   try {
     sha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
     if (sha !== context.sha) throw new Error(`checkout ${sha} differs from event ${context.sha}`);
     for (const workflow of REQUIRED) {
-      const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
-        ...context.repo, workflow_id: workflow, head_sha: sha,
-        branch: 'main', event: 'push', per_page: 100,
-      });
+      const runs = await discoverRuns(github, context.repo, sha, workflow, observations);
       const run = requireSuccessfulRun(runs, sha, workflow);
       evidence.push(`- ${workflow}: ${run.html_url} (attempt ${run.run_attempt})`);
     }
     core.info(`Release gate passed for ${sha}\n${evidence.join('\n')}`);
     await core.summary.addHeading('Release CI gate').addRaw(`Commit: ${sha}\n\n${evidence.join('\n')}`).write();
-    writeFileSync(join(artifactDir, 'release-gate.json'), JSON.stringify({ sha, evidence, result: 'success' }, null, 2));
+    writeFileSync(join(artifactDir, 'release-gate.json'), JSON.stringify({ sha, evidence, observations, result: 'success' }, null, 2));
   } catch (error) {
-    writeFileSync(join(artifactDir, 'release-gate.json'), JSON.stringify({ sha, evidence, result: 'failure', error: error.message }, null, 2));
+    writeFileSync(join(artifactDir, 'release-gate.json'), JSON.stringify({ sha, evidence, observations, result: 'failure', error: error.message }, null, 2));
     throw error;
   }
 }
 module.exports = releaseGate;
 module.exports.requireSuccessfulRun = requireSuccessfulRun;
+module.exports.discoverRuns = discoverRuns;
