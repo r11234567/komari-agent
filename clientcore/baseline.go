@@ -115,6 +115,22 @@ func (c *Client) initializeHost(parent context.Context) error {
 		if stateErr == nil && state.Msg.Desired != nil {
 			return c.flushReceipts(ctx)
 		}
+		if stateErr == nil && state.Msg.AppliedRevision == 0 && !proposal.PreserveRuntime && (c.store.Current().Revision != 0 || strings.HasPrefix(c.hostPolicy.DisableSource, "legacy-") || response.Msg.SkippedReason == "ordinary configuration history must be preserved") {
+			// Older agents may have saved a fresh-install proposal, received
+			// initialized=false, and then loaded an existing runtime revision.
+			// No baseline was accepted: a current state read must confirm no
+			// privileged history before upgrading that unaccepted proposal.
+			proposal.PreserveRuntime = true
+			proposal.Privileged = (privileged.Settings{RequiredPrivilegeMode: actual}).Proto()
+			data, err := proto.MarshalOptions{Deterministic: true}.Marshal(&proposal)
+			if err != nil {
+				return err
+			}
+			if err = hostops.AtomicWrite(path, data, 0o600); err != nil {
+				return err
+			}
+			return errors.New("unaccepted initialization request upgraded to deny-only migration; retry pending")
+		}
 		return fmt.Errorf("configuration baseline not initialized: %s", response.Msg.SkippedReason)
 	}
 	if response.Msg.Privileged == nil || !proposal.PreserveRuntime && response.Msg.Runtime == nil {

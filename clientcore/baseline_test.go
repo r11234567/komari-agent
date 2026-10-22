@@ -32,12 +32,13 @@ type baselineTestService struct {
 	configv1connect.UnimplementedConfigServiceHandler
 	configv1connect.UnimplementedPrivilegedDeliveryServiceHandler
 	hostv1connect.UnimplementedHostServiceHandler
-	key      ed25519.PrivateKey
-	fail     atomic.Bool
-	requests atomic.Int32
-	receipts atomic.Int32
-	first    *configv1.InitializeNodeConfigRequest
-	t        *testing.T
+	requirePreserve bool
+	key             ed25519.PrivateKey
+	fail            atomic.Bool
+	requests        atomic.Int32
+	receipts        atomic.Int32
+	first           *configv1.InitializeNodeConfigRequest
+	t               *testing.T
 }
 
 func (s *baselineTestService) NegotiateHostProtocol(context.Context, *connect.Request[hostv1.NegotiateHostProtocolRequest]) (*connect.Response[hostv1.NegotiateHostProtocolResponse], error) {
@@ -45,6 +46,9 @@ func (s *baselineTestService) NegotiateHostProtocol(context.Context, *connect.Re
 }
 func (s *baselineTestService) InitializeNodeConfig(_ context.Context, req *connect.Request[configv1.InitializeNodeConfigRequest]) (*connect.Response[configv1.InitializeNodeConfigResponse], error) {
 	s.requests.Add(1)
+	if s.requirePreserve && !req.Msg.PreserveRuntime {
+		return connect.NewResponse(&configv1.InitializeNodeConfigResponse{SkippedReason: "ordinary configuration history must be preserved"}), nil
+	}
 	if s.first == nil {
 		s.first = proto.Clone(req.Msg).(*configv1.InitializeNodeConfigRequest)
 	} else if !proto.Equal(s.first, req.Msg) {
@@ -61,6 +65,9 @@ func (s *baselineTestService) InitializeNodeConfig(_ context.Context, req *conne
 		response.Runtime = &configv1.DesiredConfig{AgentId: r.AgentId, Revision: 1, Runtime: req.Msg.Runtime}
 	}
 	return connect.NewResponse(response), nil
+}
+func (s *baselineTestService) GetNodeConfigState(context.Context, *connect.Request[configv1.GetNodeConfigStateRequest]) (*connect.Response[configv1.GetNodeConfigStateResponse], error) {
+	return connect.NewResponse(&configv1.GetNodeConfigStateResponse{ProtocolVersion: 2}), nil
 }
 func (s *baselineTestService) AcknowledgeConfig(context.Context, *connect.Request[configv1.AcknowledgeConfigRequest]) (*connect.Response[configv1.AcknowledgeConfigResponse], error) {
 	if s.fail.Load() {
@@ -87,12 +94,16 @@ func TestBaselineACKRetriesAfterLocalLoadAndReconnect(t *testing.T) {
 		t.Run(name, func(t *testing.T) { testBaselineReconnect(t, migrated) })
 	}
 }
-func testBaselineReconnect(t *testing.T, migrated bool) {
+func TestUnacceptedOldBaselineRequestMigratesWithoutDeletingState(t *testing.T) {
+	testBaselineReconnect(t, true, true)
+}
+func testBaselineReconnect(t *testing.T, migrated bool, oldProposal ...bool) {
+	oldRequest := len(oldProposal) > 0 && oldProposal[0]
 	pub, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := &baselineTestService{key: key, t: t}
+	service := &baselineTestService{key: key, t: t, requirePreserve: oldRequest}
 	service.fail.Store(true)
 	mux := http.NewServeMux()
 	p, h := configv1connect.NewConfigServiceHandler(service)
@@ -136,6 +147,22 @@ func testBaselineReconnect(t *testing.T, migrated bool) {
 		t.Fatal(err)
 	}
 	c := &Client{agentID: "new-node", startupID: "boot-1", store: store, privilegedStore: priv, credentialStore: identity, hostPolicy: policy, hostManifest: &hostops.Manifest{ServiceName: "custom", HostPolicyFile: policyPath}, config: configv1connect.NewConfigServiceClient(server.Client(), server.URL), privileged: configv1connect.NewPrivilegedDeliveryServiceClient(server.Client(), server.URL), host: hostv1connect.NewHostServiceClient(server.Client(), server.URL)}
+	if oldRequest {
+		saved := &configv1.InitializeNodeConfigRequest{AgentId: "new-node", ServiceId: "custom", PolicyHash: "old-unaccepted-request", Runtime: &configv1.RuntimeConfig{}, Privileged: c.localBaseline().Proto()}
+		encoded, e := proto.Marshal(saved)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if e = os.WriteFile(filepath.Join(dir, "bootstrap-request.pb"), encoded, 0o600); e != nil {
+			t.Fatal(e)
+		}
+		if e = c.initializeHost(context.Background()); e == nil {
+			t.Fatal("migration conversion must remain pending until retried")
+		}
+		if priv.State().AppliedRevision != 0 || store.Current().Revision != 4 {
+			t.Fatal("converting unaccepted proposal changed snapshots")
+		}
+	}
 	if err = c.initializeHost(context.Background()); err == nil {
 		t.Fatal("fixture must lose ACK transport")
 	}
@@ -164,7 +191,11 @@ func testBaselineReconnect(t *testing.T, migrated bool) {
 	if err = c.initializeHost(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if service.requests.Load() != 2 || service.receipts.Load() != 1 || len(c.privilegedStore.State().Outbox) != 0 {
+	wantRequests := int32(2)
+	if oldRequest {
+		wantRequests = 3
+	}
+	if service.requests.Load() != wantRequests || service.receipts.Load() != 1 || len(c.privilegedStore.State().Outbox) != 0 {
 		t.Fatal("baseline retry duplicated revisions or lost pending receipt")
 	}
 }
