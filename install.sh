@@ -407,8 +407,10 @@ if [ "$uninstall_only" != true ]; then
         ensure_root_dir "$path"
         chmod 755 "$path" || exit 1
     }
-    ensure_root_dir /var/log/komari-installer
-    log_directory=$(mktemp -d /var/log/komari-installer/run.XXXXXXXX) || exit 1
+    # Ubuntu may grant syslog group write access to /var/log. Keep recovery
+    # binaries and private diagnostics under the protected host state tree.
+    ensure_root_dir /var/lib/komari-host/installer-logs
+    log_directory=$(mktemp -d /var/lib/komari-host/installer-logs/run.XXXXXXXX) || exit 1
     chmod 700 "$log_directory" || exit 1
     install_log="$log_directory/install.log"
     (umask 077; touch "$install_log") || exit 1

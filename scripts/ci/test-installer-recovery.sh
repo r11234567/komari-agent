@@ -15,8 +15,8 @@ cleanup() {
     local status=$?
     trap - EXIT
     mkdir -p "$log_dir/installer-logs"
-    if sudo test -d /var/log/komari-installer; then
-        sudo cp -a /var/log/komari-installer/. "$log_dir/installer-logs/" || true
+    if sudo test -d /var/lib/komari-host/installer-logs; then
+        sudo cp -a /var/lib/komari-host/installer-logs/. "$log_dir/installer-logs/" || true
         sudo chown -R "$(id -u):$(id -g)" "$log_dir/installer-logs" || true
     fi
     if sudo test -L /var/lib/komari && sudo test -d "$saved_parent"; then

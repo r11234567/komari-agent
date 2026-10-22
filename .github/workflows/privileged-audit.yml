@@ -56,12 +56,14 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Check installer syntax and service definition regressions
+        shell: bash
         run: |
           mkdir -p ci-artifacts
           bash -n install.sh
           bash -n scripts/ci/test-installer-recovery.sh
           python3 scripts/test_installers.py 2>&1 | tee ci-artifacts/installer-unit-tests.log
       - name: Build installer fixtures with retained build logs
+        shell: bash
         env:
           GOMAXPROCS: '2'
         run: |
