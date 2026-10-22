@@ -223,11 +223,9 @@ if [ "$uninstall_only" != true ] && [ "$runtime_identity" = "service-account" ] 
         log_info "Creating the unprivileged ${service_user} service user..."
         if command -v useradd >/dev/null 2>&1; then
             nologin_shell=$(command -v nologin || printf '/usr/sbin/nologin')
-            useradd --system --create-home --home-dir "/var/lib/${service_user}" --shell "$nologin_shell" "$service_user"
+            useradd --system --no-create-home --home-dir /nonexistent --shell "$nologin_shell" "$service_user" || exit 1
         elif command -v adduser >/dev/null 2>&1; then
-            adduser -S -D -H -h "/var/lib/${service_user}" -s /sbin/nologin "$service_user"
-            mkdir -p "/var/lib/${service_user}"
-            chown "$service_user" "/var/lib/${service_user}"
+            adduser -S -D -H -h /nonexistent -s /sbin/nologin "$service_user" || exit 1
         else
             log_error "Cannot create the unprivileged komari user: useradd/adduser is unavailable"
             exit 1
@@ -315,7 +313,52 @@ if [ "$uninstall_only" != true ]; then
         fi
         [ "$path" = / ] || ensure_root_dir "$(dirname "$path")"
     }
+    ensure_root_file() {
+        local path="$1" owner mode
+        if [ -L "$path" ] || [ ! -f "$path" ]; then
+            log_error "Trusted regular file required: $path"; exit 1
+        fi
+        owner=$(stat -c '%u' "$path") || exit 1
+        mode=$(stat -c '%a' "$path") || exit 1
+        if [ "$owner" != 0 ] || (( (8#$mode & 0022) != 0 )); then
+            log_error "Untrusted owner or permissions at $path"; exit 1
+        fi
+    }
+    # Do not overwrite an existing node whose registration is missing. This
+    # recovery path is only for failed attempts that left binaries, not state.
+    if [ -e "/var/lib/komari/$service_name" ] || [ -L "/var/lib/komari/$service_name" ]; then
+        log_error "Existing node state has no service registration; preserve /var/lib/komari/$service_name and recover its registration before reinstalling."
+        exit 1
+    fi
+    ensure_root_dir /var/lib
+    state_parent=/var/lib/komari
+    if [ -L "$state_parent" ] || { [ -e "$state_parent" ] && [ ! -d "$state_parent" ]; }; then
+        log_error "State parent must be a real directory: $state_parent"; exit 1
+    fi
+    if [ -d "$state_parent" ]; then
+        owner=$(stat -c '%u' "$state_parent") || exit 1
+        mode=$(stat -c '%a' "$state_parent") || exit 1
+        if [ "$owner" != 0 ]; then
+            legacy_uid=$(id -u komari 2>/dev/null) || { log_error "Unknown state parent owner"; exit 1; }
+            legacy_home=$(getent passwd komari | cut -d: -f6)
+            if [ "$owner" != "$legacy_uid" ] || [ "$legacy_home" != "$state_parent" ] || (( (8#$mode & 0022) != 0 )); then
+                log_error "Refusing to adopt an unknown or writable state parent: $state_parent"; exit 1
+            fi
+            # Repair only the home-directory collision created by old scripts.
+            # The trusted /var/lib parent prevents replacement of this entry.
+            # Never recurse into state, credentials or other existing contents.
+            chown --no-dereference root:root "$state_parent" || exit 1
+            log_info "Repaired the legacy service-home/state-parent collision; existing contents retained."
+        fi
+    fi
+    ensure_root_dir "$state_parent"
+    chmod 755 "$state_parent" || exit 1
     ensure_root_dir "$target_dir"
+    ensure_root_dir /usr/local/bin
+    for component in komari-agent komari-host; do
+        binary_path="${target_dir}/${component}"
+        if [ -e "$binary_path" ] || [ -L "$binary_path" ]; then ensure_root_file "$binary_path"; fi
+    done
     case "$(uname -m)" in
         x86_64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; i?86) arch=386 ;;
         armv7*|armv6*) arch=arm ;; loongarch64) arch=loong64 ;;
@@ -332,12 +375,12 @@ if [ "$uninstall_only" != true ]; then
         release_path="download/${install_version}"
     fi
     [ -z "$github_proxy" ] || release_base="${github_proxy%/}/${release_base}"
+    # Verify both downloads before replacing any trusted leftover binary.
+    staging=$(mktemp -d "$target_dir/.install.XXXXXXXX") || exit 1
+    trap 'rm -rf -- "$staging"' EXIT
     for component in komari-agent komari-host; do
         asset="${component}-linux-${arch}"
-        binary_path="${target_dir}/${component}"
-        if [ -e "$binary_path" ] || [ -L "$binary_path" ]; then
-            log_error "Refusing to overwrite existing binary: $binary_path"; exit 1
-        fi
+        binary_path="${staging}/${component}"
         checksum=$(curl -fsSL "${release_base}/${release_path}/${asset}.sha256") || exit 1
         expected="${checksum%% *}"
         [[ "$expected" =~ ^[a-fA-F0-9]{64}$ ]] || { log_error "Invalid release checksum"; exit 1; }
@@ -346,8 +389,10 @@ if [ "$uninstall_only" != true ]; then
         [ "${actual%% *}" = "$expected" ] || { log_error "Checksum mismatch for $asset"; exit 1; }
         chmod 755 "$binary_path" || exit 1
     done
+    for component in komari-agent komari-host; do
+        mv -fT -- "$staging/$component" "$target_dir/$component" || exit 1
+    done
     "${target_dir}/komari-host" install --service "$service_name" --user "$service_user" --binary-dir "$target_dir" -- "${komari_argv[@]}" || exit 1
-    ensure_root_dir /usr/local/bin
     ln -s "${target_dir}/komari-agent" /usr/local/bin/komari-agent 2>/dev/null || true
     ln -s "${target_dir}/komari-host" /usr/local/bin/komari-host 2>/dev/null || true
     exit 0
