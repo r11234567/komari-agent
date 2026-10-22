@@ -336,6 +336,25 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	}
 	uid, _ := strconv.Atoi(agent.Uid)
 	gid, _ := strconv.Atoi(agent.Gid)
+	// Legacy migration keeps the original state paths. Reproduce SJC's old
+	// executable sharing that directory, rather than testing only JSON files.
+	legacyArtifact := filepath.Join(filepath.Dir(m.CredentialsFile), "agent")
+	legacyFile, err := os.OpenFile(legacyArtifact, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o755)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const legacySize = int64(19550635)
+	legacyMarker := []byte("preserved retired Agent ELF")
+	if err = legacyFile.Truncate(legacySize); err == nil {
+		_, err = legacyFile.WriteAt(legacyMarker, legacySize-int64(len(legacyMarker)))
+	}
+	legacyFile.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Chown(legacyArtifact, uid, gid); err != nil {
+		t.Fatal(err)
+	}
 	for _, path := range []string{m.CredentialsFile, m.RuntimeStateFile} {
 		if err = os.Chown(path, uid, gid); err != nil {
 			t.Fatal(err)
@@ -663,5 +682,14 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	if !restoredAfterOutage {
 		t.Fatal("restoration after lost final ACK did not close the operation")
 	}
-	t.Log("Verified real PAM, identity promotion/demotion, daemon ACK, UUID/r4 preservation, replay/expiry rejection, helper lifecycle/revocation, startup failure, lost host receipt, process-kill recovery, and restoration after a lost final daemon ACK")
+	legacyFile, err = os.Open(legacyArtifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer legacyFile.Close()
+	marker := make([]byte, len(legacyMarker))
+	if _, err = legacyFile.ReadAt(marker, legacySize-int64(len(legacyMarker))); err != nil || string(marker) != string(legacyMarker) {
+		t.Fatalf("host transactions changed the retired legacy executable: %q %v", marker, err)
+	}
+	t.Log("Verified real PAM, identity promotion/demotion, daemon ACK, UUID/r4 preservation, legacy 19.6 MB mixed state directory, replay/expiry rejection, helper lifecycle/revocation, startup failure, lost host receipt, process-kill recovery, and restoration after a lost final daemon ACK")
 }
