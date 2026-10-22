@@ -836,13 +836,15 @@ CHECK_TRUST
                 "$host_path" fetch-helper --manifest "$installed_manifest" --version "$install_version"
                 policy_path="${service_fields[4]}"
                 ensure_root_file "$policy_path"
-                # Only this explicit administrator option grants helper eligibility.
+                # Compatibility prefetch; a later PAM-authorized apply can grant consent.
                 # Publish atomically; preserve every other policy field.
                 python3 - "$policy_path" <<'ALLOW_HELPER'
 import json, os, sys, tempfile
 path = sys.argv[1]
 with open(path) as f:
     policy = json.load(f)
+if policy.get('force_deny_rescue_helper'):
+    raise SystemExit('Rescue is prohibited by protected local policy; explicit local policy review required')
 if policy.get('allow_rescue_helper') is not True:
     policy['allow_rescue_helper'] = True
     fd, temporary = tempfile.mkstemp(prefix='.helper-policy-', dir=os.path.dirname(path))

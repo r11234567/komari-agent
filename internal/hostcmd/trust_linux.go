@@ -50,12 +50,16 @@ func trust(args []string, out io.Writer) error {
 	rkid := fs.String("release-key-id", "", "verified release signing key ID")
 	account := fs.String("service-user", "", "original non-root service account for demotion")
 	helper := fs.Bool("allow-rescue-helper", false, "allow separately approved helper installation")
+	denyHelper := fs.Bool("deny-rescue-helper", false, "prohibit rescue installation, including locally approved tasks")
 	access := fs.String("access-config", "", "absolute root-owned JSON file with paired Cloudflare Access credentials")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
 		return errors.New("unexpected arguments")
+	}
+	if *helper && *denyHelper {
+		return errors.New("--allow-rescue-helper and --deny-rescue-helper are mutually exclusive")
 	}
 	if err := requireRoot(); err != nil {
 		return err
@@ -101,6 +105,7 @@ func trust(args []string, out io.Writer) error {
 		return err
 	}
 	p.AllowRescueHelper = *helper
+	p.ForceDenyRescueHelper = *denyHelper
 	if err = hostops.WriteJSON(m.HostPolicyFile, p, 0o644); err != nil {
 		return err
 	}

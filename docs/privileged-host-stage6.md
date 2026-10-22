@@ -12,8 +12,7 @@ A local administrator must independently verify and pin panel signing keys and t
 sudo komari-host trust --manifest /etc/komari/services/SERVICE.json \
   --endpoint https://PANEL --agent-id UUID \
   --panel-key-id VERIFIED_ID --panel-public-key VERIFIED_BASE64_KEY \
-  --release-key-id PUBLISHER_ID --release-public-key PUBLISHER_BASE64_KEY \
-  --allow-rescue-helper
+  --release-key-id PUBLISHER_ID --release-public-key PUBLISHER_BASE64_KEY
 ```
 
 A service initially installed as root must also specify `--service-user ORIGINAL_NON_ROOT_ACCOUNT`; this account is the demotion target. Pinning trust never changes service identity. Restart the daemon explicitly after preparation so it negotiates the installed host actions; this development work does not restart production services automatically.
@@ -44,14 +43,17 @@ If an administrator restores after the panel already received the daemon ACK but
 
 ## On-demand rescue helper
 
-The helper is a separate root service, never a setuid daemon or a local arbitrary-command socket. Installing it does not elevate the ordinary daemon. Before applying an approved installation action:
+The helper is a separate root service, never a setuid daemon or a local arbitrary-command socket. Installing it does not elevate the ordinary daemon: a non-root Agent remains non-root unless the administrator separately selects a different Agent target identity. Save rescue-enabled settings with normal remote control disabled, confirm the revision with panel 2FA, then run the single command shown by the panel:
 
 ```sh
-sudo komari-host fetch-helper --manifest /etc/komari/services/SERVICE.json --version EXACT_RELEASE_TAG
 sudo komari-host apply --manifest /etc/komari/services/SERVICE.json --revision N
 ```
 
-Fetch uses a fixed repository/platform asset, verifies a separately pinned publisher Ed25519 signature and exact version/SHA256, then caches the artifact under `/var/cache/komari/SERVICE/`. Apply verifies it again. Offline artifacts can be used with `--helper-artifact` and `--release-manifest`; starting a grant still requires an online currentness/lease check. No fetched shell script is executed.
+Apply explains the separate root rescue service before local PAM authentication. After authentication, it automatically downloads the exact version embedded in the root-owned Host binary from the fixed publisher repository, verifies the pinned publisher signature, platform and SHA-256, and only then claims a transaction and stops the original service. Download/signature failures leave the original service running and do not consume the approval. A matching verified cache avoids downloading again. A valid older cache is refreshed; a corrupt cache fails with a diagnostic. The panel/Agent cannot supply a download URL or choose the release version.
+
+No prior `--install-rescue`, `fetch-helper`, or `allow_rescue_helper=true` is required. `allow_rescue_helper` records local consent and is granted inside the backed-up transaction after fresh PAM authentication for the signed install action. Explicit protected `force_deny_rescue_helper=true` prevents capability advertisement and installation; fresh trust setup can set it with `--deny-rescue-helper`. The daemon and rescue authorization gates enforce this deny too. Root-owned release keys and PAM setup remain prerequisites.
+
+`fetch-helper --version EXACT_RELEASE_TAG` remains optional prefetch. Offline artifacts require both `--helper-artifact` and `--release-manifest`; they are independently verified, and starting an operation still requires an online currentness/lease check. Locally built Host binaries without an embedded release require these explicit artifacts. No fetched shell script is executed.
 
 The helper independently checks current signed authorization and signed rescue tasks. It withdraws authorization and cancels managed actions when the signed target revokes it or validation/connectivity fails. Root-owned fresh heartbeat, PID start ticks, kernel UID and systemd cgroup are checked separately for installed/running/authorized/lease-ready status. A non-root daemon is not required to readlink a root process's `/proc/PID/exe`. Uninstallation is a separately approved host action.
 
@@ -61,6 +63,6 @@ The publisher key proves who produced a helper artifact. It is independent of ea
 
 ## Acceptance
 
-`scripts/ci/test-host-transactions.sh` runs only on disposable GitHub runners. It uses actual PAM, real daemon/host/helper binaries, actual systemd services, `/proc` observations and explicit network/process/startup faults. Only the panel is a fixture; its metrics and host-operation contracts must agree with the production API. Backend recovery and error-mapping tests separately exercise the real service/database implementation.
+`scripts/ci/test-host-transactions.sh` runs only on disposable GitHub runners. It covers first installation without prior rescue consent, corrupt-cache preparation failure with the non-root Agent still running, independent root helper readiness, and ordinary Agent identity preservation. It uses actual PAM, real daemon/host/helper binaries, actual systemd services, `/proc` observations and explicit network/process/startup faults. Only the panel is a fixture; its metrics and host-operation contracts must agree with the production API. Backend recovery and error-mapping tests separately exercise the real service/database implementation.
 
 Failure artifacts include build errors, test output, journald/kernel logs and sanitized journal metadata, retained for 30 days. Raw credentials, state backups, signed authorization bundles and passwords are not exported. See the backend's `docs/privileged-stage6-failure-review.md` for the failure analysis. Stage 6 at source `9fe5463` passed complete acceptance in [run 39625269490](https://github.com/r11234567/komari-agent/actions/runs/39625269490), including actual PAM/systemd, promotion/demotion, helper lifecycle, lost receipts, process kills and restoration after a lost final daemon ACK. Subsequent CLI changes have their own regression checks; see [CLI migration](privileged-cli-migration-inventory.md).

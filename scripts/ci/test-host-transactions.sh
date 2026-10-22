@@ -32,11 +32,11 @@ sudo useradd --system --no-create-home --shell /usr/sbin/nologin komari-stage6-a
 sudo useradd --no-create-home --shell /bin/bash komari-stage6-admin
 sudo install -d -m 755 "$rootdir"
 export GOMAXPROCS=2
-go build -p=2 -o ci-artifacts/komari-host ./cmd/komari-host
+go build -p=2 -ldflags="-X github.com/komari-monitor/komari-agent/internal/hostcmd.ReleaseVersion=ci-stage6" -o ci-artifacts/komari-host ./cmd/komari-host
 go build -p=2 -o ci-artifacts/komari-agent .
 go build -p=2 -o ci-artifacts/komari-agent-rescue ./cmd/komari-agent-rescue
 sudo install -m 755 ci-artifacts/komari-host "$rootdir/komari-host"
 sudo install -m 755 ci-artifacts/komari-agent "$rootdir/komari-agent"
 sudo install -m 755 ci-artifacts/komari-agent-rescue "$rootdir/helper-release"
 go test -p=2 -c -o ci-artifacts/host-acceptance.test ./internal/hostcmd
-sudo env GITHUB_ACTIONS=true KOMARI_STAGE6_ACCEPTANCE=true KOMARI_STAGE6_SERVICE="$service" ci-artifacts/host-acceptance.test -test.v -test.run '^TestHost(StateFence|SystemdTransactionAcceptance)' -test.timeout=10m | tee ci-artifacts/host-transactions-tests.log
+sudo env GITHUB_ACTIONS=true KOMARI_STAGE6_ACCEPTANCE=true KOMARI_STAGE6_SERVICE="$service" ci-artifacts/host-acceptance.test -test.v -test.run '^TestHost(StateFence|RescuePrepare|SystemdTransactionAcceptance)' -test.timeout=10m | tee ci-artifacts/host-transactions-tests.log

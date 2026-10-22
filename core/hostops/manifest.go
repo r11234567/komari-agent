@@ -36,24 +36,27 @@ type Manifest struct {
 // Policy is never writable by the daemon. Baseline describes existing local
 // authorization; Allow limits future panel approvals without changing OS identity.
 type Policy struct {
-	Version                int                  `json:"version"`
-	ServiceID              string               `json:"service_id"`
-	PrivilegeMode          int32                `json:"privilege_mode"`
-	AllowRemoteControl     bool                 `json:"allow_remote_control"`
-	AllowWebSSH            bool                 `json:"allow_webssh"`
-	AllowExecution         bool                 `json:"allow_execution"`
-	AllowGPU               bool                 `json:"allow_gpu"`
-	ForceDenyRemoteControl bool                 `json:"force_deny_remote_control"`
-	BaselineRemoteControl  bool                 `json:"baseline_remote_control"`
-	BaselineWebSSH         bool                 `json:"baseline_webssh"`
-	BaselineExecution      bool                 `json:"baseline_execution"`
-	BaselineGPU            bool                 `json:"baseline_gpu"`
-	AllowRescueHelper      bool                 `json:"allow_rescue_helper"`
-	HelperAuthorized       bool                 `json:"helper_authorized"`
-	HelperInstalled        bool                 `json:"helper_installed"`
-	DisableSource          string               `json:"disable_source"`
-	HostRevision           uint64               `json:"host_revision,omitempty"`
-	HostSettings           *privileged.Settings `json:"host_settings,omitempty"`
+	Version                int    `json:"version"`
+	ServiceID              string `json:"service_id"`
+	PrivilegeMode          int32  `json:"privilege_mode"`
+	AllowRemoteControl     bool   `json:"allow_remote_control"`
+	AllowWebSSH            bool   `json:"allow_webssh"`
+	AllowExecution         bool   `json:"allow_execution"`
+	AllowGPU               bool   `json:"allow_gpu"`
+	ForceDenyRemoteControl bool   `json:"force_deny_remote_control"`
+	BaselineRemoteControl  bool   `json:"baseline_remote_control"`
+	BaselineWebSSH         bool   `json:"baseline_webssh"`
+	BaselineExecution      bool   `json:"baseline_execution"`
+	BaselineGPU            bool   `json:"baseline_gpu"`
+	// AllowRescueHelper records local consent. A fresh PAM-authorized install
+	// transaction can grant it; ForceDenyRescueHelper is the independent ceiling.
+	AllowRescueHelper     bool                 `json:"allow_rescue_helper"`
+	ForceDenyRescueHelper bool                 `json:"force_deny_rescue_helper,omitempty"`
+	HelperAuthorized      bool                 `json:"helper_authorized"`
+	HelperInstalled       bool                 `json:"helper_installed"`
+	DisableSource         string               `json:"disable_source"`
+	HostRevision          uint64               `json:"host_revision,omitempty"`
+	HostSettings          *privileged.Settings `json:"host_settings,omitempty"`
 }
 
 func ReadJSON(path string, target any, trusted bool) error {
