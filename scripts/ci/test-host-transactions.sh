@@ -19,7 +19,7 @@ import glob,json,sys
 rows=[]
 for path in glob.glob('/var/lib/komari-host/'+sys.argv[1]+'*/transaction.json'):
  try:
-  j=json.load(open(path)); row={k:j.get(k) for k in ['version','operation_id','phase','operator','error','previous_mode','previous_uid','previous_helper','ownership','recovery_ownership']}; row['pending_receipt']=bool(j.get('receipt')); row['superseded_receipt_count']=len(j.get('superseded_receipts',[])); rows.append(row)
+  j=json.load(open(path)); row={k:j.get(k) for k in ['version','operation_id','phase','fence_stage','operator','error','previous_mode','previous_uid','previous_helper','ownership','recovery_ownership']}; row['pending_receipt']=bool(j.get('receipt')); row['superseded_receipt_count']=len(j.get('superseded_receipts',[])); rows.append(row)
  except Exception as e: rows.append({'path':path,'error':str(e)})
 print(json.dumps(rows,indent=2))
 PY
@@ -39,4 +39,4 @@ sudo install -m 755 ci-artifacts/komari-host "$rootdir/komari-host"
 sudo install -m 755 ci-artifacts/komari-agent "$rootdir/komari-agent"
 sudo install -m 755 ci-artifacts/komari-agent-rescue "$rootdir/helper-release"
 go test -p=2 -c -o ci-artifacts/host-acceptance.test ./internal/hostcmd
-sudo env GITHUB_ACTIONS=true KOMARI_STAGE6_ACCEPTANCE=true KOMARI_STAGE6_SERVICE="$service" ci-artifacts/host-acceptance.test -test.v -test.run '^TestHostSystemdTransactionAcceptance$' -test.timeout=10m | tee ci-artifacts/host-transactions-tests.log
+sudo env GITHUB_ACTIONS=true KOMARI_STAGE6_ACCEPTANCE=true KOMARI_STAGE6_SERVICE="$service" ci-artifacts/host-acceptance.test -test.v -test.run '^TestHost(StateFence|SystemdTransactionAcceptance)' -test.timeout=10m | tee ci-artifacts/host-transactions-tests.log

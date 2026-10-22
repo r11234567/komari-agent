@@ -21,6 +21,7 @@ import (
 	flags "github.com/komari-monitor/komari-agent/cmd/flags"
 	"github.com/komari-monitor/komari-agent/core/hostops"
 	"github.com/komari-monitor/komari-agent/core/privileged"
+	"github.com/komari-monitor/komari-agent/core/statelock"
 	"github.com/komari-monitor/komari-agent/rescue"
 	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
 	hostv1 "github.com/r11234567/komari-proto/gen/go/komari/host/v1"
@@ -59,12 +60,26 @@ type hostJournal struct {
 	PreviousMode       int32        `json:"previous_mode"`
 	PreviousUID        int          `json:"previous_uid"`
 	PreviousHelper     bool         `json:"previous_helper"`
+	FenceStage         string       `json:"fence_stage,omitempty"`
 	dir                string
 }
 
 // This journal schema is independent from the wire/installation protocol. Older
 // development journals lack ownership metadata and must never be guessed at.
 const hostJournalVersion = 3
+
+// Legacy installations can keep a retired Agent ELF beside their state. Copy
+// bounded files as streams rather than treating every file as a small JSON blob.
+const (
+	maxStateFileBytes = int64(256 << 20)
+	maxStateTreeBytes = int64(512 << 20)
+	maxStateEntries   = 512
+)
+
+type stateFenceBudget struct {
+	entries int
+	bytes   int64
+}
 
 func (j *hostJournal) prepareRestorationReceipt() error {
 	if len(j.Receipt) != 0 {
@@ -158,9 +173,9 @@ func (j *hostJournal) backup(path string) error {
 // A stopped daemon's files are copied to fresh root inodes before a root
 // daemon uses them. Merely chowning leaves pre-existing writable FDs usable.
 // Directory traversal is bounded and never follows a link or crosses a mount.
-func (j *hostJournal) seal(path string, owner int, device uint64, depth int, recovery bool) error {
+func (j *hostJournal) seal(path string, owner int, device uint64, depth int, recovery bool, budget *stateFenceBudget) error {
 	if depth > 8 {
-		return errors.New("state tree exceeds reviewed migration limit")
+		return fmt.Errorf("state tree exceeds depth limit at %q", path)
 	}
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
 	if err != nil {
@@ -174,7 +189,17 @@ func (j *hostJournal) seal(path string, owner int, device uint64, depth int, rec
 	}
 	sys := st.Sys().(*syscall.Stat_t)
 	if uint64(sys.Dev) != device || (int(sys.Uid) != owner && sys.Uid != 0) || (!st.IsDir() && (!st.Mode().IsRegular() || sys.Nlink != 1)) {
-		return errors.New("state tree contains an unexpected owner, mount, link or special file")
+		return fmt.Errorf("state tree contains an unexpected owner, mount, link or special file at %q", path)
+	}
+	budget.entries++
+	if budget.entries > maxStateEntries {
+		return fmt.Errorf("state tree exceeds entry limit at %q", path)
+	}
+	remaining := min(maxStateFileBytes, maxStateTreeBytes-budget.bytes)
+	// Reject an unsupported file before changing its ownership or mode. A
+	// partially fenced tree can still restore metadata without recopying it.
+	if !st.IsDir() && st.Size() > remaining {
+		return fmt.Errorf("state file %q is %d bytes; remaining migration limit is %d bytes", path, st.Size(), remaining)
 	}
 	entries := &j.Ownership
 	if recovery {
@@ -185,7 +210,7 @@ func (j *hostJournal) seal(path string, owner int, device uint64, depth int, rec
 		known = known || e.Path == path
 	}
 	if !known {
-		if len(*entries) >= 512 {
+		if len(*entries) >= maxStateEntries {
 			return errors.New("state tree exceeds reviewed migration limit")
 		}
 		*entries = append(*entries, ownership{Path: path, UID: int(sys.Uid), GID: int(sys.Gid), Mode: uint32(st.Mode().Perm())})
@@ -204,31 +229,84 @@ func (j *hostJournal) seal(path string, owner int, device uint64, depth int, rec
 		return err
 	}
 	if st.IsDir() {
-		entries, err := f.ReadDir(-1)
-		if err != nil {
+		entries, err := f.ReadDir(maxStateEntries + 1)
+		if err != nil && !errors.Is(err, io.EOF) {
 			return err
 		}
-		if len(entries) > 512 {
-			return errors.New("state directory has too many entries")
+		if len(entries) > maxStateEntries {
+			return fmt.Errorf("state directory %q has too many entries", path)
 		}
 		for _, entry := range entries {
-			if err = j.seal(filepath.Join(path, entry.Name()), owner, device, depth+1, recovery); err != nil {
+			if err = j.seal(filepath.Join(path, entry.Name()), owner, device, depth+1, recovery, budget); err != nil {
 				return err
 			}
 		}
 		return f.Sync()
 	}
-	if st.Size() > 16<<20 {
-		return errors.New("state file exceeds 16 MiB migration limit")
-	}
-	data, err := io.ReadAll(io.LimitReader(f, (16<<20)+1))
+	n, err := copySealedStateFile(path, f, remaining)
 	if err != nil {
 		return err
 	}
-	if len(data) > 16<<20 {
-		return errors.New("state file grew beyond limit")
+	budget.bytes += n
+	return nil
+}
+
+func copySealedStateFile(path string, input io.Reader, limit int64) (int64, error) {
+	output, err := os.CreateTemp(filepath.Dir(path), ".komari-state-*")
+	if err != nil {
+		return 0, err
 	}
-	return hostops.AtomicWrite(path, data, mode)
+	defer os.Remove(output.Name())
+	defer output.Close()
+	if err = output.Chmod(0o600); err != nil {
+		return 0, err
+	}
+	n, err := io.Copy(output, io.LimitReader(input, limit+1))
+	if err != nil {
+		return n, err
+	}
+	if n > limit {
+		return n, fmt.Errorf("state file %q grew beyond migration limit of %d bytes", path, limit)
+	}
+	if err = output.Sync(); err != nil {
+		return n, err
+	}
+	if err = output.Close(); err != nil {
+		return n, err
+	}
+	if err = os.Rename(output.Name(), path); err != nil {
+		return n, err
+	}
+	return n, statelock.SyncDirectory(filepath.Dir(path))
+}
+
+func (j *hostJournal) fenceStateDirectories(dirs []string, owner int, recovery bool) error {
+	if recovery && j.FenceStage == "sealing" {
+		// The original daemon was stopped and no target profile was published.
+		// Restore the recorded metadata directly: repeating a failed copy can
+		// fail on the same size/disk limit and strand the original service.
+		return nil
+	}
+	if !recovery {
+		j.FenceStage = "sealing"
+		if err := j.save(); err != nil {
+			return err
+		}
+	}
+	budget := &stateFenceBudget{}
+	for _, dir := range dirs {
+		st, err := os.Lstat(dir)
+		if err != nil {
+			return err
+		}
+		if !st.IsDir() {
+			return fmt.Errorf("state root %q is not a directory", dir)
+		}
+		if err = j.seal(dir, owner, uint64(st.Sys().(*syscall.Stat_t).Dev), 0, recovery, budget); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 func stateDirectories(m *hostops.Manifest) ([]string, error) {
 	var dirs []string
@@ -528,17 +606,8 @@ func executeTransaction(ctx context.Context, m *hostops.Manifest, p *hostops.Pol
 	if err != nil {
 		return err
 	}
-	for _, dir := range dirs {
-		st, err := os.Lstat(dir)
-		if err != nil {
-			return err
-		}
-		if !st.IsDir() {
-			return errors.New("state root is not a directory")
-		}
-		if err = j.seal(dir, uid, uint64(st.Sys().(*syscall.Stat_t).Dev), 0, false); err != nil {
-			return err
-		}
+	if err = j.fenceStateDirectories(dirs, uid, false); err != nil {
+		return err
 	}
 	// Check the live lease after stopping/fencing the old daemon, immediately
 	// before writing a profile that can increase host authority.
@@ -564,6 +633,12 @@ func executeTransaction(ctx context.Context, m *hostops.Manifest, p *hostops.Pol
 		return errors.New("host operation is not applying")
 	}
 	settings := privileged.SettingsFromProto(r.Privileged)
+	// Persist this boundary before changing any protected profile or starting
+	// a target daemon. Old journals without the marker always fence on restore.
+	j.FenceStage = "profile"
+	if err = j.save(); err != nil {
+		return err
+	}
 	// Local ceilings remain independent of panel targets, so a later approved
 	// same-identity change can re-enable a capability. Daemon startup verifies
 	// historical snapshots against the root-pinned signature before using them.
@@ -734,17 +809,8 @@ func restoreTransaction(m *hostops.Manifest, j *hostJournal) error {
 	if err != nil {
 		return err
 	}
-	for _, dir := range dirs {
-		st, e := os.Lstat(dir)
-		if e != nil {
-			return e
-		}
-		if !st.IsDir() {
-			return errors.New("state root is not a directory during recovery")
-		}
-		if err = j.seal(dir, owner, uint64(st.Sys().(*syscall.Stat_t).Dev), 0, true); err != nil {
-			return err
-		}
+	if err = j.fenceStateDirectories(dirs, owner, true); err != nil {
+		return err
 	}
 	for i := len(j.Backups) - 1; i >= 0; i-- {
 		b := j.Backups[i]
@@ -1009,7 +1075,11 @@ func resume(args []string, out io.Writer, restore bool) error {
 		if err = j.report(ctx, p, hostv1.HostOperationPhase_HOST_OPERATION_PHASE_RESTORED, "interrupted operation restored by local administrator"); err != nil {
 			return fmt.Errorf("local restoration complete; recovery receipt pending: %w", err)
 		}
-		return archiveJournal(&j)
+		if err = archiveJournal(&j); err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(out, "Original service restored and verified; recovery receipt accepted and transaction archived. Save a new revision before applying another change.")
+		return err
 	}
 	t, err := hostops.ReadTrust(m)
 	if err != nil {
