@@ -36,7 +36,7 @@ func (c *Client) recordPrivilegedRevision(ctx context.Context, r *configv1.Privi
 		return c.flushReceipts(ctx)
 	}
 	if r.UpdateSequence < state.LastSequence {
-		return errors.New("stale signed update sequence")
+		return fmt.Errorf("stale signed update sequence: revision=%d received=%d last=%d", r.Revision, r.UpdateSequence, state.LastSequence)
 	}
 	if err := c.privilegedStore.RecordPending(r); err != nil {
 		return err
@@ -72,7 +72,7 @@ func (c *Client) recordPrivilegedRevision(ctx context.Context, r *configv1.Privi
 		return err
 	}
 	if current.Revision != r.Revision || current.ConfigHash != r.ConfigHash || current.ApprovalGeneration != r.ApprovalGeneration || current.State != r.State || current.UpdateSequence < r.UpdateSequence || !proto.Equal(current.Authorization, r.Authorization) {
-		return errors.New("approval changed before daemon apply")
+		return fmt.Errorf("approval changed before daemon apply: candidate revision=%d generation=%d state=%s sequence=%d; current revision=%d generation=%d state=%s sequence=%d", r.Revision, r.ApprovalGeneration, r.State, r.UpdateSequence, current.Revision, current.ApprovalGeneration, current.State, current.UpdateSequence)
 	}
 	r = current
 	if c.hostManifest == nil {
