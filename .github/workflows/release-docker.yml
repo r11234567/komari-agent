@@ -20,15 +20,33 @@ jobs:
     permissions:
       contents: read
       packages: write
+      actions: read
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
+      - name: Require successful main CI for the exact image commit
+        uses: actions/github-script@v9
+        with:
+          script: |
+            await require('./scripts/ci/release-gate.cjs')({ github, context, core });
+
+      - name: Retain CI gate evidence including failures
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: docker-release-gate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+
+      - name: Verify the reviewed protocol pin
+        run: node scripts/ci/check-protocol.cjs
 
       - name: Build static binaries for multi-arch
         env:
@@ -66,7 +84,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=${{ github.event.release.tag_name }}
+            type=raw,value=${{ github.event.release.tag_name || github.sha }}
             type=raw,value=latest
 
       - name: Build and push Docker image

@@ -1,6 +1,8 @@
 name: Build on Main
 
 on:
+  pull_request:
+  workflow_dispatch:
   push:
     branches:
       - main
@@ -9,7 +11,31 @@ permissions:
   contents: read
 
 jobs:
+  protocol-and-release-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Verify protocol pin and release gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ci-artifacts
+          exec > >(tee ci-artifacts/protocol-and-release-policy.log) 2>&1
+          trap 'echo "$?" > ci-artifacts/policy-exit.txt' EXIT
+          node --test scripts/ci/release-policy.test.cjs
+          node scripts/ci/check-protocol.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: protocol-and-release-policy-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+
   build:
+    needs: protocol-and-release-policy
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -41,15 +67,9 @@ jobs:
         shell: pwsh
         run: '[scriptblock]::Create((Get-Content ./install.ps1 -Raw)) | Out-Null'
 
-      # Pinned so an automated dependency update cannot change the protocol
-      # version silently: a generated-client change alters wire compatibility
-      # with the panel, so it has to be a deliberate edit here as well.
-      - name: Verify pinned protocol dependency
-        run: go list -m github.com/r11234567/komari-proto | grep -Fx 'github.com/r11234567/komari-proto v0.1.38-0.20261021140444-e575defe1942'
-
       - name: Run transport and runtime contract tests
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
-        run: go test ./core/... ./clientcore ./server ./monitoring/unit ./terminal ./cmd
+        run: bash scripts/ci/run-go-tests.sh ./core/... ./clientcore ./server ./monitoring/unit ./terminal ./cmd
 
       - name: Build binary
         env:
@@ -58,6 +78,10 @@ jobs:
           CGO_ENABLED: 0
           VERSION: ${{ github.sha }}
         run: |
+          set -euo pipefail
+          mkdir -p ci-artifacts
+          exec > >(tee ci-artifacts/build.log) 2>&1
+          trap 'echo "$?" > ci-artifacts/build-exit.txt' EXIT
           BINARY_NAME=komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}
           if [ "${{ matrix.goos }}" = "windows" ]; then
             BINARY_NAME=${BINARY_NAME}.exe
@@ -86,7 +110,16 @@ jobs:
             komari-agent-rescue-${{ matrix.goos }}-${{ matrix.goarch }}*
             komari-host-${{ matrix.goos }}-${{ matrix.goarch }}*
 
+      - name: Retain build and test logs including failures
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: main-build-logs-${{ matrix.goos }}-${{ matrix.goarch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+
   capability-fixtures:
+    needs: protocol-and-release-policy
     strategy:
       matrix:
         include:
@@ -103,9 +136,19 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Build capability packages
-        run: go test ./core/capability -run TestPrivilegeFixturesDeclareLimitedCapabilities && go test ./core/runtimeconfig ./clientcore
+        shell: bash
+        run: bash scripts/ci/run-go-tests.sh ./core/capability ./core/runtimeconfig ./clientcore
       - name: Validate recovery entrypoint
         shell: bash
         run: |
+          set -euo pipefail
+          mkdir -p ci-artifacts
+          exec > >(tee ci-artifacts/recovery-entrypoint.log) 2>&1
           go build -o komari-agent${{ runner.os == 'Windows' && '.exe' || '' }} .
           ./komari-agent${{ runner.os == 'Windows' && '.exe' || '' }} recover diagnostics
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: capability-logs-${{ matrix.fixture }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30

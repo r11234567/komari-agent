@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   signing-preflight:
@@ -13,9 +14,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Require successful main CI for the exact release commit
+        uses: actions/github-script@v9
+        with:
+          script: |
+            await require('./scripts/ci/release-gate.cjs')({ github, context, core });
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Verify the reviewed protocol pin
+        run: |
+          set -euo pipefail
+          mkdir -p ci-artifacts
+          node scripts/ci/check-protocol.cjs 2>&1 | tee ci-artifacts/protocol-pin.log
       - name: Validate provisioned publisher key before building any target
         env:
           KOMARI_RELEASE_SIGNING_KEY: ${{ secrets.KOMARI_RELEASE_SIGNING_KEY }}
