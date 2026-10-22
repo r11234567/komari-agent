@@ -10,13 +10,17 @@ import (
 	"io"
 )
 
+// ReleaseVersion is set by release builds. Never resolve "latest" during a
+// privileged install, or infer executable authority from daemon-writable data.
+var ReleaseVersion string
+
 func Run(args []string, out io.Writer) error {
 	if len(args) == 0 {
 		return errors.New("usage: komari-host diagnose|migrate|update|trust|apply|resume|restore")
 	}
 	switch args[0] {
 	case "version":
-		_, err := fmt.Fprintln(out, "komari-host protocol=2; host actions require Linux systemd, protected trust and fresh PAM authentication")
+		_, err := fmt.Fprintf(out, "komari-host release=%s protocol=2; host actions require Linux systemd, protected trust and fresh PAM authentication\n", ReleaseVersion)
 		return err
 	case "apply":
 		return apply(args[1:], out)

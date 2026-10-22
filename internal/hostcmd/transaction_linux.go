@@ -357,8 +357,11 @@ func validateActions(m *hostops.Manifest, p *hostops.Policy, t *hostops.Trust, r
 		return errors.New("identity action does not match actual source/target diff")
 	}
 	settings := privileged.SettingsFromProto(r.Privileged)
-	if settings.RemoteControlEnabled && (p.ForceDenyRemoteControl || !p.AllowRemoteControl) || settings.WebSSHEnabled && !p.AllowWebSSH || settings.ExecutionEnabled && !p.AllowExecution || settings.EnableGPU && !p.AllowGPU || settings.RescueHelperEnabled && !p.AllowRescueHelper {
+	if settings.RemoteControlEnabled && (p.ForceDenyRemoteControl || !p.AllowRemoteControl) || settings.WebSSHEnabled && !p.AllowWebSSH || settings.ExecutionEnabled && !p.AllowExecution || settings.EnableGPU && !p.AllowGPU || settings.RescueHelperEnabled && (p.ForceDenyRescueHelper || !p.AllowRescueHelper && !seen[2]) {
 		return errors.New("approved configuration exceeds protected local ceilings")
+	}
+	if seen[2] && len(t.ReleaseKeys) == 0 {
+		return errors.New("pin an independently verified release signing key before installing rescue")
 	}
 	if settings.RescueHelperEnabled && settings.RemoteControlEnabled {
 		return errors.New("rescue and ordinary remote control must remain mutually exclusive")
@@ -474,52 +477,32 @@ func apply(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	var helper []byte
-	var helperVersion string
-	for _, a := range r.Authorization.Actions {
-		if a == 2 {
-			if *artifact == "" {
-				*artifact = filepath.Join("/var/cache/komari", m.ServiceName, "komari-agent-rescue")
-			}
-			if *release == "" {
-				*release = *artifact + ".release.json"
-			}
-			var signed hostops.ReleaseManifest
-			if err = hostops.ReadJSON(*release, &signed, true); err != nil {
-				return err
-			}
-			// The digest is authenticated by VerifyRelease, not by the daemon.
-			if err = hostops.TrustedPath(*artifact); err != nil {
-				return err
-			}
-			st, e := os.Stat(*artifact)
-			if e != nil {
-				return e
-			}
-			if st.Size() > 256<<20 || !st.Mode().IsRegular() {
-				return errors.New("invalid helper artifact")
-			}
-			helper, err = os.ReadFile(*artifact)
-			if err != nil {
-				return err
-			}
-			payload, e := hostops.VerifyRelease(t, signed, helper)
-			if e != nil {
-				return e
-			}
-			helperVersion = payload.Version
-			if len(helper) < 4 || string(helper[:4]) != "\x7fELF" {
-				return errors.New("Linux helper must be ELF")
-			}
-		}
+	installRescue := false
+	for _, action := range r.Authorization.Actions {
+		installRescue = installRescue || action == hostv1.HostAction_HOST_ACTION_INSTALL_RESCUE_HELPER
+	}
+	if (*artifact == "") != (*release == "") || !installRescue && (*artifact != "" || *release != "") {
+		return errors.New("--helper-artifact and --release-manifest must be supplied together for a rescue install")
 	}
 	fmt.Fprintf(out, "service=%s actual_user=%s main_pid=%s policy_mode=%d target_mode=%d actions=%v\n", m.ServiceName, o.User, o.MainPID, p.PrivilegeMode, r.Authorization.TargetPrivilegeMode, r.Authorization.Actions)
-	if helperVersion != "" {
-		fmt.Fprintf(out, "verified_helper_release=%s\n", helperVersion)
+	if installRescue {
+		fmt.Fprintln(out, "This task will install and authorize a separate root rescue service. Local PAM authentication authorizes this installation; the Agent identity follows the approved target.")
+		if *artifact == "" {
+			fmt.Fprintf(out, "After authentication, Host will fetch and verify publisher-signed rescue release %s if it is not already cached.\n", ReleaseVersion)
+		}
 	}
 	operator, err := authenticate()
 	if err != nil {
 		return err
+	}
+	var helper []byte
+	var helperVersion string
+	if installRescue {
+		helper, helperVersion, err = prepareHelper(ctx, m, t, *artifact, *release, ReleaseVersion, newReleaseClient(), out)
+		if err != nil {
+			return fmt.Errorf("rescue preparation failed; original service was not stopped: %w", err)
+		}
+		fmt.Fprintf(out, "verified_helper_release=%s\n", helperVersion)
 	}
 	// Authentication may have taken minutes. Re-read and compare the full
 	// authorization before claiming a lease or modifying any OS state.
@@ -645,6 +628,12 @@ func executeTransaction(ctx context.Context, m *hostops.Manifest, p *hostops.Pol
 	p.PrivilegeMode = int32(settings.RequiredPrivilegeMode)
 	p.HostRevision = r.Revision
 	p.HostSettings = &settings
+	// Only this signed action, after fresh PAM, can grant first-install consent.
+	for _, action := range r.Authorization.Actions {
+		if action == hostv1.HostAction_HOST_ACTION_INSTALL_RESCUE_HELPER {
+			p.AllowRescueHelper = true
+		}
+	}
 	p.HelperInstalled = settings.RescueHelperEnabled
 	p.HelperAuthorized = settings.RescueHelperEnabled
 	if err = hostops.WriteJSON(m.HostPolicyFile, p, 0o644); err != nil {

@@ -31,7 +31,7 @@ func PolicyAllows(settings privileged.Settings, p *hostops.Policy) bool {
 	return p != nil && int32(settings.RequiredPrivilegeMode) == p.PrivilegeMode &&
 		(!settings.RemoteControlEnabled || p.AllowRemoteControl && !p.ForceDenyRemoteControl) &&
 		(!settings.WebSSHEnabled || p.AllowWebSSH) && (!settings.ExecutionEnabled || p.AllowExecution) &&
-		(!settings.EnableGPU || p.AllowGPU) && (!settings.RescueHelperEnabled || p.AllowRescueHelper && p.HelperInstalled && p.HelperAuthorized)
+		(!settings.EnableGPU || p.AllowGPU) && (!settings.RescueHelperEnabled || p.AllowRescueHelper && !p.ForceDenyRescueHelper && p.HelperInstalled && p.HelperAuthorized)
 }
 func Effective() EffectiveConfig {
 	return Inspect(flags_pkg.GlobalConfig, active.Load(), privileged.ActiveStore())
@@ -71,7 +71,7 @@ func Inspect(config *flags_pkg.Config, runtimeStore *Store, privilegedStore *pri
 			result.BlockedReason = "protected installation policy unavailable: " + err.Error()
 		} else {
 			s := &result.Privileged
-			for field, denied := range map[string]bool{"remote_control_enabled": !p.AllowRemoteControl || p.ForceDenyRemoteControl, "webssh_enabled": !p.AllowWebSSH, "execution_enabled": !p.AllowExecution, "enable_gpu": !p.AllowGPU, "rescue_helper_enabled": !p.AllowRescueHelper || !p.HelperInstalled || !p.HelperAuthorized} {
+			for field, denied := range map[string]bool{"remote_control_enabled": !p.AllowRemoteControl || p.ForceDenyRemoteControl, "webssh_enabled": !p.AllowWebSSH, "execution_enabled": !p.AllowExecution, "enable_gpu": !p.AllowGPU, "rescue_helper_enabled": !p.AllowRescueHelper || p.ForceDenyRescueHelper || !p.HelperInstalled || !p.HelperAuthorized} {
 				if denied {
 					result.Blocked[field] = "protected local policy"
 				}
@@ -85,7 +85,7 @@ func Inspect(config *flags_pkg.Config, runtimeStore *Store, privilegedStore *pri
 			s.WebSSHEnabled = s.WebSSHEnabled && p.AllowWebSSH
 			s.ExecutionEnabled = s.ExecutionEnabled && p.AllowExecution
 			s.EnableGPU = s.EnableGPU && p.AllowGPU
-			s.RescueHelperEnabled = s.RescueHelperEnabled && p.AllowRescueHelper && p.HelperInstalled && p.HelperAuthorized
+			s.RescueHelperEnabled = s.RescueHelperEnabled && p.AllowRescueHelper && !p.ForceDenyRescueHelper && p.HelperInstalled && p.HelperAuthorized
 			// Formerly writable historical state must not revive a capability
 			// during restart, before the current host-approved target loads.
 			if privilegedStore != nil && p.HostSettings != nil && privilegedStore.State().AppliedRevision <= p.HostRevision {

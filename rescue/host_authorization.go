@@ -33,7 +33,7 @@ func (h *Helper) checkAuthorization(parent context.Context) error {
 	if err != nil {
 		return err
 	}
-	if !policy.AllowRescueHelper || !policy.HelperInstalled || !policy.HelperAuthorized {
+	if !policy.AllowRescueHelper || policy.ForceDenyRescueHelper || !policy.HelperInstalled || !policy.HelperAuthorized {
 		return errors.New("root policy denies rescue helper")
 	}
 	id, ok := readHostIdentity(h.manifest, h.hostTrust)

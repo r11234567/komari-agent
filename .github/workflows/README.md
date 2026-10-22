@@ -30,7 +30,7 @@ Dockerfile:
 - The Dockerfile expects prebuilt Linux binaries named
   `komari-agent-${TARGETOS}-${TARGETARCH}` in the Docker build context.
 
-The agent version is embedded with:
+The Agent and rescue version is embedded with:
 
 ```sh
 -ldflags="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}"
@@ -39,6 +39,8 @@ The agent version is embedded with:
 Do not remove this without changing the agent update and reporting logic. The
 agent uses `update.CurrentVersion` for update checks and reports it as part of
 basic info.
+
+All Host build matrices also embed the same exact tag as `internal/hostcmd.ReleaseVersion`. A PAM-authorized on-demand rescue install fetches this fixed tag, never `latest` or an Agent-supplied version.
 
 Prefer `go-version-file: go.mod` for release-producing workflows so Actions uses
 the Go version declared by the project.

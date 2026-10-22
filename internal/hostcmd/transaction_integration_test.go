@@ -56,6 +56,7 @@ type hostTestPanel struct {
 	metricsconnect.UnimplementedMetricsServiceHandler
 	reportconnect.UnimplementedAgentReportServiceHandler
 	rescueconnect.UnimplementedRescueServiceHandler
+	negotiatedActions []hostv1.HostAction
 	mu                sync.Mutex
 	key               ed25519.PrivateKey
 	current           *configv1.PrivilegedRevision
@@ -122,6 +123,7 @@ func (s *hostTestPanel) SubmitMetrics(_ context.Context, r *connect.Request[metr
 }
 func (s *hostTestPanel) NegotiateHostProtocol(_ context.Context, r *connect.Request[hostv1.NegotiateHostProtocolRequest]) (*connect.Response[hostv1.NegotiateHostProtocolResponse], error) {
 	s.mu.Lock()
+	s.negotiatedActions = append([]hostv1.HostAction(nil), r.Msg.SupportedActions...)
 	defer s.mu.Unlock()
 	s.startup = r.Msg.StartupId
 	return connect.NewResponse(&hostv1.NegotiateHostProtocolResponse{ProtocolVersion: 2}), nil
@@ -309,7 +311,7 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	if err = hostops.WriteJSON(accessPath, hostops.AccessConfig{ClientID: "ci-access-id", ClientSecret: "ci-access-value"}, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err = Run([]string{"trust", "--manifest", m.ManifestPath, "--endpoint", server.URL, "--agent-id", "stage6-node", "--panel-key-id", "stage6", "--panel-public-key", base64.StdEncoding.EncodeToString(pub), "--release-key-id", "stage6", "--release-public-key", base64.StdEncoding.EncodeToString(pub), "--allow-rescue-helper", "--access-config", accessPath}, io.Discard); err != nil {
+	if err = Run([]string{"trust", "--manifest", m.ManifestPath, "--endpoint", server.URL, "--agent-id", "stage6-node", "--panel-key-id", "stage6", "--panel-public-key", base64.StdEncoding.EncodeToString(pub), "--release-key-id", "stage6", "--release-public-key", base64.StdEncoding.EncodeToString(pub), "--access-config", accessPath}, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	creds, err := credentials.Open(m.CredentialsFile)
@@ -471,18 +473,53 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	}
 	// Install the real helper while preserving the ordinary daemon identity.
 	panel.set(service, 2, true)
+	panel.mu.Lock()
+	canInstall := false
+	for _, action := range panel.negotiatedActions {
+		canInstall = canInstall || action == 2
+	}
+	panel.mu.Unlock()
+	policy, err := hostops.ReadPolicy(m)
+	if err != nil || policy.AllowRescueHelper || !canInstall {
+		t.Fatalf("uninstalled helper must advertise installation without prior consent: supported=%t policy=%+v error=%v", canInstall, policy, err)
+	}
 	helper := filepath.Join(dir, "helper-release")
 	data, err := os.ReadFile(helper)
 	if err != nil {
 		t.Fatal(err)
 	}
 	signed := testRelease(t, key, data)
-	releasePath := filepath.Join(dir, "helper-release.json")
-	if err = hostops.WriteJSON(releasePath, signed, 0o644); err != nil {
+	cache := helperCache(m)
+	if err = ensureTrustedDir(filepath.Dir(cache)); err != nil {
 		t.Fatal(err)
 	}
-	if err = run(password, "apply", "--manifest", m.ManifestPath, "--revision", "4", "--helper-artifact", helper, "--release-manifest", releasePath); err != nil {
+	if err = hostops.AtomicWrite(cache, []byte("corrupt cached ELF"), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	if err = hostops.WriteJSON(cache+".release.json", signed, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Failed verification after PAM must leave the Agent running, without a lease
+	// or policy grant. Retry the same approval after replacing the bad cache.
+	if err = run(password, "apply", "--manifest", m.ManifestPath, "--revision", "4"); err == nil {
+		t.Fatal("corrupt helper cache accepted")
+	}
+	if err = verifyService(service, uid, 2); err != nil {
+		t.Fatal("preparation failure stopped Agent:", err)
+	}
+	if _, err = os.Stat(filepath.Join(journalDir(m), "transaction.json")); !os.IsNotExist(err) {
+		t.Fatal("preparation failure claimed a transaction")
+	}
+	if err = hostops.AtomicWrite(cache, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// No --allow-rescue-helper, fetch-helper or offline artifact flags are needed.
+	if err = run(password, "apply", "--manifest", m.ManifestPath, "--revision", "4"); err != nil {
+		t.Fatal(err)
+	}
+	policy, err = hostops.ReadPolicy(m)
+	if err != nil || !policy.AllowRescueHelper || !policy.HelperInstalled || policy.PrivilegeMode != 2 {
+		t.Fatalf("PAM install consent/Agent identity: policy=%+v error=%v", policy, err)
 	}
 	if err = verifyService(service, uid, 2); err != nil {
 		t.Fatal("installing helper changed daemon identity:", err)

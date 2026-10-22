@@ -72,7 +72,7 @@ jobs:
 
           HOST_BINARY_NAME=komari-host-${{ matrix.goos }}-${{ matrix.goarch }}
           if [ "${{ matrix.goos }}" = "windows" ]; then HOST_BINARY_NAME=${HOST_BINARY_NAME}.exe; fi
-          go build -trimpath -o "$HOST_BINARY_NAME" ./cmd/komari-host
+          go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/internal/hostcmd.ReleaseVersion=${VERSION}" -o "$HOST_BINARY_NAME" ./cmd/komari-host
           sha256sum "$BINARY_NAME" > "$BINARY_NAME.sha256"
           sha256sum "$HOST_BINARY_NAME" > "$HOST_BINARY_NAME.sha256"
 
