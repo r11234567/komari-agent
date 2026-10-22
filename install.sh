@@ -50,6 +50,14 @@ cf_access_client_id=""
 cf_access_client_secret=""
 ignore_unsafe_cert=false
 service_user="root"
+install_dir_explicit=false
+runtime_identity_explicit=false
+register_only=false
+metrics_only=false
+panel_key_id=""
+panel_public_key=""
+host_service_user=""
+host_access_config=""
  
 
 # Detect OS
@@ -84,6 +92,10 @@ esac
 komari_args=""
 komari_argv=()
 while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --install-dir|--install-service-name|--install-ghproxy|--install-version|--install-runtime-identity|-e|--endpoint|-t|--token|--auto-discovery|--cf-access-client-id|--cf-access-client-secret|--runtime-state-file|--credentials-file|--privileged-state-file|--replay-state-file)
+            if [ "$#" -lt 2 ] || [ -z "$2" ]; then log_error "Missing value for $1"; exit 64; fi ;;
+    esac
     case $1 in
         --interval|--interval=*|-i|-i[0-9]*|--memory-include-cache|--memory-include-cache=*|--include-nics|--include-nics=*|--exclude-nics|--exclude-nics=*|--include-mountpoint|--include-mountpoint=*|--month-rotate|--month-rotate=*|--get-ip-addr-from-nic|--get-ip-addr-from-nic=*|--enable-gpu|--enable-gpu=*|--gpu|--gpu=*|--detailed-gpu|--detailed-gpu=*|--max-retries|--max-retries=*|-r|-r[0-9]*|--disable-compression|--disable-compression=*)
             log_error "Removed agent option: $1; use panel configuration or administrator migration"
@@ -91,6 +103,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --install-dir)
             target_dir="$2"
+            install_dir_explicit=true
             shift 2
             ;;
         --install-service-name)
@@ -107,6 +120,25 @@ while [[ $# -gt 0 ]]; do
             ;;
         --install-runtime-identity)
             runtime_identity="$2"
+            runtime_identity_explicit=true
+            shift 2
+            ;;
+        --install-register-only)
+            register_only=true
+            shift
+            ;;
+        --install-metrics-only)
+            metrics_only=true
+            shift
+            ;;
+        --install-panel-key-id|--install-panel-public-key|--install-host-service-user|--install-host-access-config)
+            if [ "$#" -lt 2 ] || [ -z "$2" ]; then log_error "Missing value for $1"; exit 64; fi
+            case "$1" in
+                --install-panel-key-id) panel_key_id="$2" ;;
+                --install-panel-public-key) panel_public_key="$2" ;;
+                --install-host-service-user) host_service_user="$2" ;;
+                --install-host-access-config) host_access_config="$2" ;;
+            esac
             shift 2
             ;;
         --uninstall)
@@ -115,6 +147,12 @@ while [[ $# -gt 0 ]]; do
             ;;
         --install-rescue)
             rescue_enabled=true
+            shift
+            ;;
+        --endpoint=*)
+            rescue_endpoint="${1#*=}"
+            komari_argv+=(--endpoint "$rescue_endpoint")
+            komari_args="$komari_args --endpoint $rescue_endpoint"
             shift
             ;;
         -e|--endpoint)
@@ -172,8 +210,8 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --install*)
-            log_warning "Unknown install parameter: $1"
-            shift
+            log_error "Unknown install parameter: $1"
+            exit 64
             ;;
         *)
             # Non-install arguments go to komari_args
@@ -187,6 +225,24 @@ done
 if { [ -n "$cf_access_client_id" ] && [ -z "$cf_access_client_secret" ]; } || { [ -z "$cf_access_client_id" ] && [ -n "$cf_access_client_secret" ]; }; then
     log_error "--cf-access-client-id and --cf-access-client-secret must be provided together"
     exit 1
+fi
+
+# Detect before account creation: updates preserve the actual installed identity.
+install_mode=fresh
+installed_manifest="/etc/komari/services/$service_name.json"
+if [ "$uninstall_only" != true ] && [ "$os_name" = linux ]; then
+    if [[ ! "$service_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || [[ "$service_name" = *.service ]]; then
+        log_error "Invalid service name"; exit 64
+    fi
+    if [ -e "$installed_manifest" ] || [ -L "$installed_manifest" ]; then
+        install_mode=update
+    elif systemctl cat "${service_name}.service" >/dev/null 2>&1; then
+        install_mode=migrate
+    fi
+    if [ "$install_mode" != fresh ] && [ "$runtime_identity_explicit" = true ]; then
+        log_error "An update preserves service identity; change it through an approved host action"; exit 64
+    fi
+    if [ "$install_dir_explicit" = false ]; then target_dir="/usr/lib/komari/$service_name"; fi
 fi
 
 case "$runtime_identity" in
@@ -218,7 +274,8 @@ if [ "$runtime_identity" = "service-account" ] && [ "$EUID" -ne 0 ]; then
     log_error "service-account runtime requires running the installer as root"
     exit 1
 fi
-if [ "$uninstall_only" != true ] && [ "$runtime_identity" = "service-account" ] && [ "$os_name" = "linux" ]; then
+if [ "$uninstall_only" != true ] && [ "$install_mode" = fresh ] && [ "$runtime_identity" = "service-account" ] && [ "$os_name" = "linux" ]; then
+    create_linux_service_account() {
     if ! id -u "$service_user" >/dev/null 2>&1; then
         log_info "Creating the unprivileged ${service_user} service user..."
         if command -v useradd >/dev/null 2>&1; then
@@ -240,6 +297,7 @@ if [ "$uninstall_only" != true ] && [ "$runtime_identity" = "service-account" ] 
         log_error "The existing komari account has a login shell; refusing installation"
         exit 1
     fi
+    }
 elif [ "$uninstall_only" != true ] && [ "$runtime_identity" = "service-account" ] && [ "$os_name" = "darwin" ]; then
     if ! id -u "$service_user" >/dev/null 2>&1; then
 		service_group="_komari"
@@ -278,24 +336,22 @@ elif [ "$uninstall_only" != true ] && [ "$runtime_identity" = "service-account" 
     fi
 fi
 
-# Trusted v2 fresh installs. Existing services must use the explicit migration
-# preview; this path never re-enrolls or replaces their identity/state.
+# Installation, identity-preserving migration and binary updates use the same
+# reviewed host tool. Re-running this script never uninstalls an existing node.
 if [ "$uninstall_only" != true ]; then
     if [ "$os_name" != linux ] || [ ! -d /run/systemd/system ]; then
         log_error "Trusted v2 installation currently supports Linux systemd only"
         exit 1
     fi
-    if [ "$rescue_enabled" = true ]; then
-        log_error "First install includes komari-host, not the rescue helper; helper installation is not available in this version"
+    if [ "$EUID" -ne 0 ]; then
+        log_error "Run this installer as root"
         exit 1
+    fi
+    if [ "$rescue_enabled" = true ] && { [ "$register_only" = true ] || [ "$metrics_only" = true ]; }; then
+        log_error "--install-rescue requires enrollment and full host preparation"; exit 64
     fi
     if [ -n "$runtime_state_override$credentials_override$privileged_state_override$replay_state_override" ]; then
         log_error "Custom state paths require an explicit reviewed host migration"
-        exit 1
-    fi
-    if [[ ! "$service_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then exit 1; fi
-    if [ -e "/etc/komari/services/${service_name}.json" ] || systemctl cat "${service_name}.service" >/dev/null 2>&1; then
-        log_error "Service already exists. Preview komari-host migrate --service ${service_name} --legacy-disable preserve instead"
         exit 1
     fi
     [[ "$target_dir" = /* ]] || target_dir="$PWD/$target_dir"
@@ -315,6 +371,7 @@ if [ "$uninstall_only" != true ]; then
     }
     ensure_root_file() {
         local path="$1" owner mode
+        ensure_root_dir "$(dirname "$path")"
         if [ -L "$path" ] || [ ! -f "$path" ]; then
             log_error "Trusted regular file required: $path"; exit 1
         fi
@@ -324,47 +381,201 @@ if [ "$uninstall_only" != true ]; then
             log_error "Untrusted owner or permissions at $path"; exit 1
         fi
     }
-    # Do not overwrite an existing node whose registration is missing. This
-    # recovery path is only for failed attempts that left binaries, not state.
-    if [ -e "/var/lib/komari/$service_name" ] || [ -L "/var/lib/komari/$service_name" ]; then
-        log_error "Existing node state has no service registration; preserve /var/lib/komari/$service_name and recover its registration before reinstalling."
-        exit 1
-    fi
-    ensure_root_dir /var/lib
-    state_parent=/var/lib/komari
-    if [ -L "$state_parent" ] || { [ -e "$state_parent" ] && [ ! -d "$state_parent" ]; }; then
-        log_error "State parent must be a real directory: $state_parent"; exit 1
-    fi
-    if [ -d "$state_parent" ]; then
-        owner=$(stat -c '%u' "$state_parent") || exit 1
-        mode=$(stat -c '%a' "$state_parent") || exit 1
-        if [ "$owner" != 0 ]; then
-            legacy_uid=$(id -u komari 2>/dev/null) || { log_error "Unknown state parent owner"; exit 1; }
-            legacy_home=$(getent passwd komari | cut -d: -f6)
-            if [ "$owner" != "$legacy_uid" ] || [ "$legacy_home" != "$state_parent" ] || (( (8#$mode & 0022) != 0 )); then
-                log_error "Refusing to adopt an unknown or writable state parent: $state_parent"; exit 1
+    prepare_state_parent() {
+        local path=/var/lib/komari owner mode legacy_uid legacy_home
+        ensure_root_dir /var/lib
+        if [ -L "$path" ] || { [ -e "$path" ] && [ ! -d "$path" ]; }; then
+            log_error "State parent must be a real directory: $path"; exit 1
+        fi
+        if [ -d "$path" ]; then
+            owner=$(stat -c '%u' "$path") || exit 1
+            mode=$(stat -c '%a' "$path") || exit 1
+            if [ "$owner" != 0 ]; then
+                legacy_uid=$(id -u komari 2>/dev/null) || { log_error "Unknown state parent owner"; exit 1; }
+                legacy_home=$(getent passwd komari | cut -d: -f6) || exit 1
+                if [ "$owner" != "$legacy_uid" ] || [ "$legacy_home" != "$path" ] || (( (8#$mode & 0022) != 0 )); then
+                    log_error "Refusing to adopt an unknown or writable state parent: $path"; exit 1
+                fi
+                # /var/lib is already trusted, so the account cannot rename this
+                # entry. Remove its ownership before chmod; never recurse into
+                # state or credentials, follow a link, or reset node identity.
+                chown --no-dereference root:root "$path" || exit 1
+                chmod 755 "$path" || exit 1
+                log_info "Repaired the legacy service-home/state-parent collision; existing contents retained."
             fi
-            # Repair only the home-directory collision created by old scripts.
-            # The trusted /var/lib parent prevents replacement of this entry.
-            # Never recurse into state, credentials or other existing contents.
-            chown --no-dereference root:root "$state_parent" || exit 1
-            log_info "Repaired the legacy service-home/state-parent collision; existing contents retained."
+        fi
+        ensure_root_dir "$path"
+        chmod 755 "$path" || exit 1
+    }
+    # Ubuntu may grant syslog group write access to /var/log. Keep recovery
+    # binaries and private diagnostics under the protected host state tree.
+    ensure_root_dir /var/lib/komari-host/installer-logs
+    log_directory=$(mktemp -d /var/lib/komari-host/installer-logs/run.XXXXXXXX) || exit 1
+    chmod 700 "$log_directory" || exit 1
+    install_log="$log_directory/install.log"
+    (umask 077; touch "$install_log") || exit 1
+    exec > >(tee -a "$install_log") 2>&1
+    installer_cleanup() {
+        local status=$?
+        trap - EXIT
+        set +e
+        if [ "$status" -ne 0 ] && [ "${update_started:-false}" = true ]; then
+            log_error "Update did not complete; restoring the previous Agent and Host binaries."
+            rollback_ok=true
+            [ -z "${host_stage:-}" ] || rm -f -- "$host_stage"
+            if [ -n "${agent_rollback:-}" ] && [ -f "$agent_rollback" ]; then
+                rollback_stage=$(mktemp "$(dirname "$agent_path")/.komari-agent-rollback.XXXXXXXX") || {
+                    rollback_ok=false
+                    log_error "Could not stage the previous Agent binary."
+                    rollback_stage=""
+                }
+                if [ -n "$rollback_stage" ]; then
+                    if install -m 755 "$agent_rollback" "$rollback_stage" && mv -fT -- "$rollback_stage" "$agent_path"; then
+                        log_info "Restored previous Agent binary."
+                    else
+                        rm -f -- "$rollback_stage"
+                        rollback_ok=false
+                        log_error "Could not restore the previous Agent binary."
+                    fi
+                fi
+            else
+                rollback_ok=false
+                log_error "Previous Agent binary backup is missing."
+            fi
+            if [ -n "${host_rollback:-}" ] && [ -f "$host_rollback" ]; then
+                rollback_stage=$(mktemp "$(dirname "$host_path")/.komari-host-rollback.XXXXXXXX") || {
+                    rollback_ok=false
+                    log_error "Could not stage the previous Host binary."
+                    rollback_stage=""
+                }
+                if [ -n "$rollback_stage" ]; then
+                    if install -m 755 "$host_rollback" "$rollback_stage" && mv -fT -- "$rollback_stage" "$host_path"; then
+                        log_info "Restored previous Host binary."
+                    else
+                        rm -f -- "$rollback_stage"
+                        rollback_ok=false
+                        log_error "Could not restore the previous Host binary."
+                    fi
+                fi
+            else
+                rollback_ok=false
+                log_error "Previous Host binary backup is missing."
+            fi
+            if [ "${service_was_active:-false}" = true ]; then
+                systemctl reset-failed "${service_name}.service" >/dev/null 2>&1
+                if systemctl restart "${service_name}.service" && systemctl is-active --quiet "${service_name}.service"; then
+                    log_info "Restarted the service with the previous binaries."
+                else
+                    rollback_ok=false
+                    log_error "Service did not recover after binary rollback; inspect the retained journal."
+                fi
+            fi
+            if [ "$rollback_ok" = true ]; then log_info "Binary rollback completed."; else log_error "Binary rollback was incomplete; manual recovery is required."; fi
+        fi
+        if [ "$status" -ne 0 ]; then
+            systemctl show "${service_name}.service" --property=ActiveState,SubState,Result,NRestarts > "$log_directory/service-status.log" 2>&1 || true
+            journalctl -u "${service_name}.service" -n 120 --no-pager > "$log_directory/service-journal.log" 2>&1 || true
+            log_error "Installation failed (exit $status). Logs: $log_directory"
+        else
+            log_info "Installation log: $install_log"
+        fi
+        printf '%s\n' "$status" > "$log_directory/exit-code.txt"
+        [ -z "${staging:-}" ] || rm -rf -- "$staging"
+        exit "$status"
+    }
+    trap installer_cleanup EXIT
+    trap 'log_error "Installer failed at line $LINENO"' ERR
+    set -Ee -o pipefail
+    umask 077
+    log_info "Service: $service_name; operation: $install_mode"
+    # Install every missing dependency in one package-manager transaction,
+    # before account creation, downloads or replacement of installed binaries.
+    missing_packages=()
+    require_command() { command -v "$1" >/dev/null 2>&1 || missing_packages+=("$2"); }
+    require_command python3 python3
+    require_command curl curl
+    require_command flock util-linux
+    require_command runuser util-linux
+    require_command useradd passwd
+    if [ "$metrics_only" != true ]; then
+        [ -x /usr/bin/pamtester ] || missing_packages+=(pamtester)
+    fi
+    has_system_ca_bundle() {
+        [ -s /etc/ssl/certs/ca-certificates.crt ] ||
+            [ -s /etc/pki/tls/certs/ca-bundle.crt ] ||
+            [ -s /etc/ssl/ca-bundle.pem ]
+    }
+    has_system_ca_bundle || missing_packages+=(ca-certificates)
+    if [ "${#missing_packages[@]}" -gt 0 ]; then
+        mapfile -t missing_packages < <(printf '%s\n' "${missing_packages[@]}" | sort -u)
+        log_info "Installing host prerequisites in one package-manager transaction: ${missing_packages[*]}"
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get update
+            apt-get install -y --no-install-recommends "${missing_packages[@]}"
+        elif command -v dnf >/dev/null 2>&1; then
+            for i in "${!missing_packages[@]}"; do
+                case "${missing_packages[$i]}" in
+                    passwd) missing_packages[$i]=shadow-utils ;;
+                esac
+            done
+            dnf install -y "${missing_packages[@]}"
+        elif command -v yum >/dev/null 2>&1; then
+            for i in "${!missing_packages[@]}"; do
+                case "${missing_packages[$i]}" in
+                    passwd) missing_packages[$i]=shadow-utils ;;
+                esac
+            done
+            yum install -y "${missing_packages[@]}"
+        elif command -v pacman >/dev/null 2>&1; then
+            for i in "${!missing_packages[@]}"; do
+                case "${missing_packages[$i]}" in passwd) missing_packages[$i]=shadow ;; esac
+            done
+            pacman -S --noconfirm --needed "${missing_packages[@]}"
+        else
+            log_error "Install these dependencies with your distribution package manager, then retry: ${missing_packages[*]}"; exit 1
         fi
     fi
-    ensure_root_dir "$state_parent"
-    chmod 755 "$state_parent" || exit 1
-    ensure_root_dir "$target_dir"
-    ensure_root_dir /usr/local/bin
-    for component in komari-agent komari-host; do
-        binary_path="${target_dir}/${component}"
-        if [ -e "$binary_path" ] || [ -L "$binary_path" ]; then ensure_root_file "$binary_path"; fi
+    for required_command in python3 curl flock runuser useradd; do
+        command -v "$required_command" >/dev/null 2>&1 || { log_error "Required command remains unavailable after dependency installation: $required_command"; exit 1; }
     done
+    if [ "$metrics_only" != true ] && [ ! -x /usr/bin/pamtester ]; then
+        log_error "pamtester is still unavailable at /usr/bin/pamtester after dependency installation"; exit 1
+    fi
+    has_system_ca_bundle || { log_error "No usable system CA bundle found after dependency installation"; exit 1; }
+    # Serialize installer invocations; host commands retain their own independent lock.
+    # /run/lock is normally shared and writable. Do not chmod it or require
+    # exclusive root ownership of the distribution's shared lock directory.
+    ensure_root_dir /run/komari-installer
+    installer_lock=/run/komari-installer/installer.lock
+    if [ -e "$installer_lock" ] || [ -L "$installer_lock" ]; then ensure_root_file "$installer_lock"; fi
+    exec 9>"$installer_lock"
+    flock -n 9 || { log_error "Another installer is running"; exit 1; }
+    if [ "$install_mode" = fresh ] && [ "$runtime_identity" = service-account ]; then create_linux_service_account; fi
+    if [ "$install_mode" = fresh ]; then
+        prepare_state_parent
+        if [ -e "/var/lib/komari/$service_name" ] || [ -L "/var/lib/komari/$service_name" ]; then
+            log_error "Existing node state has no service registration: /var/lib/komari/$service_name. Preserve it and recover its registration before reinstalling."
+            exit 1
+        fi
+        ensure_root_dir "$target_dir"
+    fi
+    if [ "$install_mode" != fresh ]; then
+        for arg in "${komari_argv[@]}"; do
+            case "$arg" in
+                --endpoint|-e|"$rescue_endpoint") ;;
+                *) log_error "Existing node configuration is preserved. Change local flags in the installed config, not update arguments."; exit 64 ;;
+            esac
+        done
+    fi
+    service_was_active=false
+    if systemctl is-active --quiet "${service_name}.service"; then service_was_active=true; fi
     case "$(uname -m)" in
         x86_64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; i?86) arch=386 ;;
         armv7*|armv6*) arch=arm ;; loongarch64) arch=loong64 ;;
         *) log_error "Unsupported architecture"; exit 1 ;;
     esac
     release_base="https://github.com/${release_repository}/releases"
+    [ -z "$github_proxy" ] || release_base="${github_proxy%/}/${release_base}"
     if [ -n "$install_version" ]; then
         release_path="download/${install_version}"
     else
@@ -374,10 +585,9 @@ if [ "$uninstall_only" != true ]; then
         install_version="${latest_url##*/}"
         release_path="download/${install_version}"
     fi
-    [ -z "$github_proxy" ] || release_base="${github_proxy%/}/${release_base}"
-    # Verify both downloads before replacing any trusted leftover binary.
-    staging=$(mktemp -d "$target_dir/.install.XXXXXXXX") || exit 1
-    trap 'rm -rf -- "$staging"' EXIT
+    ensure_root_dir /var/cache/komari-installer
+    staging=$(mktemp -d /var/cache/komari-installer/download.XXXXXXXX) || exit 1
+    agent_digest=""
     for component in komari-agent komari-host; do
         asset="${component}-linux-${arch}"
         binary_path="${staging}/${component}"
@@ -388,13 +598,272 @@ if [ "$uninstall_only" != true ]; then
         actual=$(sha256sum "$binary_path") || exit 1
         [ "${actual%% *}" = "$expected" ] || { log_error "Checksum mismatch for $asset"; exit 1; }
         chmod 755 "$binary_path" || exit 1
+        [ "$component" != komari-agent ] || agent_digest="$expected"
     done
-    for component in komari-agent komari-host; do
-        mv -fT -- "$staging/$component" "$target_dir/$component" || exit 1
-    done
-    "${target_dir}/komari-host" install --service "$service_name" --user "$service_user" --binary-dir "$target_dir" -- "${komari_argv[@]}" || exit 1
-    ln -s "${target_dir}/komari-agent" /usr/local/bin/komari-agent 2>/dev/null || true
-    ln -s "${target_dir}/komari-host" /usr/local/bin/komari-host 2>/dev/null || true
+    case "$install_mode" in
+        fresh)
+            # Failed attempts may have left trusted binaries but no node. Both
+            # downloads are complete and verified before either is published.
+            for component in komari-agent komari-host; do
+                destination="${target_dir}/${component}"
+                if [ -e "$destination" ] || [ -L "$destination" ]; then ensure_root_file "$destination"; fi
+            done
+            for component in komari-agent komari-host; do
+                destination="${target_dir}/${component}"
+                mv -fT -- "$staging/$component" "$destination" || exit 1
+            done
+            "${target_dir}/komari-host" install --service "$service_name" --user "$service_user" --binary-dir "$target_dir" -- "${komari_argv[@]}" || exit 1
+            agent_path="${target_dir}/komari-agent"
+            host_path="${target_dir}/komari-host"
+            ;;
+        migrate)
+            log_info "Migrating the existing service; preserving node files, service identity and local remote-control restrictions."
+            "$staging/komari-host" migrate --service "$service_name" --legacy-disable preserve > "$log_directory/migration-preview.json" || exit 1
+            "$staging/komari-host" migrate --service "$service_name" --legacy-disable preserve --agent-artifact "$staging/komari-agent" --sha256 "$agent_digest" --commit || exit 1
+            agent_path="/usr/lib/komari/$service_name/komari-agent"
+            host_path="/usr/lib/komari/$service_name/komari-host"
+            ;;
+        update)
+            ensure_root_file "$installed_manifest"
+            python3 - "$installed_manifest" "$service_name" > "$staging/installed-paths" <<'INSTALLED_PATHS'
+import json, os, sys
+with open(sys.argv[1]) as f:
+    m = json.load(f)
+if m.get('version') != 2 or m.get('service_name') != sys.argv[2]:
+    raise SystemExit('Installed manifest version or service does not match')
+for field in ('executable', 'host_tool'):
+    path = m.get(field)
+    if not isinstance(path, str) or not os.path.isabs(path) or any(c in path for c in '\x00\r\n'):
+        raise SystemExit('Invalid installed binary path')
+    sys.stdout.write(path + '\n')
+INSTALLED_PATHS
+            [ "$?" -eq 0 ] || exit 1
+            mapfile -t installed_paths < "$staging/installed-paths"
+            agent_path="${installed_paths[0]}"
+            host_path="${installed_paths[1]}"
+            ensure_root_file "$agent_path"
+            ensure_root_file "$host_path"
+            # Use the currently installed host to authorize the update. A
+            # target downgrade may have an older CLI and must never be trusted
+            # to mutate the current installation before compatibility is known.
+            "$host_path" diagnose --manifest "$installed_manifest" || exit 1
+            "$staging/komari-host" diagnose --manifest "$installed_manifest" > "$log_directory/target-host-readiness.log" || {
+                log_error "Target Host binary cannot read this installed manifest; refusing an incompatible upgrade/downgrade before changing files."
+                exit 1
+            }
+            # Prepare both rollback copies and the replacement Host before the
+            # Agent is touched. Keep recovery copies in the protected log dir.
+            agent_rollback="$log_directory/agent.previous"
+            host_rollback="$log_directory/host.previous"
+            install -m 700 "$agent_path" "$agent_rollback" || exit 1
+            install -m 700 "$host_path" "$host_rollback" || exit 1
+            host_stage=$(mktemp "$(dirname "$host_path")/.komari-host-update.XXXXXXXX") || exit 1
+            if ! cp "$staging/komari-host" "$host_stage" || ! chmod 755 "$host_stage"; then
+                rm -f -- "$host_stage"; exit 1
+            fi
+            ensure_root_dir "/var/lib/komari-host/$service_name"
+            host_backup="/var/lib/komari-host/$service_name/host.previous"
+            if [ -e "$host_backup" ] || [ -L "$host_backup" ]; then ensure_root_file "$host_backup"; fi
+            install -m 700 "$host_rollback" "$host_backup" || { rm -f -- "$host_stage"; exit 1; }
+            update_started=true
+            "$host_path" update --manifest "$installed_manifest" --artifact "$staging/komari-agent" --sha256 "$agent_digest" || exit 1
+            # The host binary is not resident in the daemon. Replace it only
+            # after the installed host has atomically updated the Agent.
+            mv -fT -- "$host_stage" "$host_path" || { rm -f -- "$host_stage"; exit 1; }
+            ;;
+    esac
+    ensure_root_dir /usr/local/bin
+    if [ "$service_name" = komari-agent ]; then
+        for component in komari-agent komari-host; do
+            link_path="/usr/local/bin/$component"
+            if [ -e "$link_path" ] && [ ! -L "$link_path" ]; then
+                log_warning "Existing regular command retained: $link_path"
+                continue
+            fi
+            if [ "$component" = komari-agent ]; then link_target="$agent_path"; else link_target="$host_path"; fi
+            ln -sfnT -- "$link_target" "$link_path" || exit 1
+        done
+    fi
+    # Read only reviewed root-owned metadata. Never source JSON as shell code.
+    ensure_root_file "$installed_manifest"
+    python3 - "$installed_manifest" "$service_name" > "$staging/service-fields" <<'SERVICE_FIELDS'
+import json, os, re, sys
+with open(sys.argv[1]) as f:
+    m = json.load(f)
+if m.get('version') != 2 or m.get('service_name') != sys.argv[2]:
+    raise SystemExit('Installed manifest version or service does not match')
+for field in ('service_user', 'executable', 'host_tool', 'credentials_file', 'host_policy_file'):
+    value = m.get(field)
+    if not isinstance(value, str) or not value or any(c in value for c in '\x00\r\n'):
+        raise SystemExit('Invalid installed service field')
+    if field == 'service_user':
+        if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]*', value):
+            raise SystemExit('Invalid service account')
+    elif not os.path.isabs(value):
+        raise SystemExit('Absolute installed paths required')
+    print(value)
+SERVICE_FIELDS
+    mapfile -t service_fields < "$staging/service-fields"
+    # The manifest keeps the original account for demotion. A host operation
+    # changes the effective systemd User and ownership without rewriting it.
+    service_user=$(systemctl show "${service_name}.service" --property=User --value)
+    service_user="${service_user:-root}"
+    if [[ ! "$service_user" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || ! id -u "$service_user" >/dev/null 2>&1; then
+        log_error "Cannot establish the effective installed service account"; exit 1
+    fi
+    agent_path="${service_fields[1]}"
+    host_path="${service_fields[2]}"
+    credentials_path="${service_fields[3]}"
+    trust_path="$(dirname "${service_fields[4]}")/$service_name.trust.json"
+    ensure_root_file "$agent_path"
+    ensure_root_file "$host_path"
+    enrolled_now=false
+    if [ "$register_only" != true ]; then
+        # Read node metadata as its own account, never log the credentials JSON.
+        read_identity() {
+            runuser -u "$service_user" -- python3 - "$credentials_path" > "$staging/identity-fields" <<'IDENTITY_FIELDS'
+import json, os, sys, uuid
+if not os.path.exists(sys.argv[1]):
+    raise SystemExit(0)
+try:
+    with open(sys.argv[1]) as f:
+        i = json.load(f)
+    agent = str(uuid.UUID(i['agent_id']))
+    endpoint = i['endpoint']
+    if not isinstance(endpoint, str) or not endpoint or any(c in endpoint for c in '\x00\r\n'):
+        raise ValueError()
+except Exception:
+    raise SystemExit('Existing credentials cannot be read; preserve them and use reauth/recovery instead of reinstalling')
+print(agent)
+print(endpoint)
+IDENTITY_FIELDS
+        }
+        read_identity
+        mapfile -t identity_fields < "$staging/identity-fields"
+        if [ "${#identity_fields[@]}" -eq 0 ]; then
+            if [ -z "$rescue_endpoint" ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
+                read -r -p 'Panel HTTPS address: ' rescue_endpoint </dev/tty
+            fi
+            [ -n "$rescue_endpoint" ] || { log_error "Enrollment needs --endpoint https://your-panel; rerun this command with it. Registration is retained."; exit 1; }
+            log_info "Opening browser approval enrollment as $service_user (no system password is requested)."
+            runuser -u "$service_user" -- "$agent_path" login --endpoint "$rescue_endpoint"
+            read_identity
+            mapfile -t identity_fields < "$staging/identity-fields"
+            [ "${#identity_fields[@]}" -eq 2 ] || { log_error "Enrollment did not create a node identity"; exit 1; }
+            enrolled_now=true
+        fi
+        node_id="${identity_fields[0]}"
+        node_endpoint="${identity_fields[1]}"
+        if [ -n "$rescue_endpoint" ] && [ "${rescue_endpoint%/}" != "${node_endpoint%/}" ]; then
+            log_error "Endpoint differs from the enrolled node; existing credentials are preserved"; exit 1
+        fi
+        if [ "$metrics_only" != true ]; then
+            if [ -e "$trust_path" ] || [ -L "$trust_path" ]; then
+                ensure_root_file "$trust_path"
+                # Reuse trust only for this node/endpoint. Never silently rotate keys.
+                python3 - "$trust_path" "$node_id" "$node_endpoint" "$panel_key_id" "$panel_public_key" "$host_service_user" "$host_access_config" <<'CHECK_TRUST'
+import json, sys
+with open(sys.argv[1]) as f:
+    t = json.load(f)
+if t.get('agent_id') != sys.argv[2] or t.get('endpoint', '').rstrip('/') != sys.argv[3].rstrip('/'):
+    raise SystemExit('Host trust belongs to another node or endpoint; explicit reviewed trust rotation required')
+if (sys.argv[4] or sys.argv[5]) and not any(k.get('key_id') == sys.argv[4] and k.get('value') == sys.argv[5] for k in t.get('panel_keys', [])):
+    raise SystemExit('Panel pin differs from installed host trust; explicit reviewed rotation required')
+if sys.argv[6] and t.get('service_user') != sys.argv[6]:
+    raise SystemExit('Demotion account differs from existing trust')
+if sys.argv[7] and t.get('access_config_file') != sys.argv[7]:
+    raise SystemExit('Access configuration differs from existing trust')
+CHECK_TRUST
+            else
+                if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+                    log_info "Copy the panel signing key from your independently verified administrator source. Agent enrollment keys are not promoted to root authority."
+                    [ -n "$panel_key_id" ] || read -r -p 'Panel signing key ID: ' panel_key_id </dev/tty
+                    [ -n "$panel_public_key" ] || read -r -p 'Panel Ed25519 public key (base64): ' panel_public_key </dev/tty
+                fi
+                if [ -z "$panel_key_id" ] || [ -z "$panel_public_key" ]; then
+                    log_error "Host preparation needs --install-panel-key-id and --install-panel-public-key (public data). Use --install-metrics-only only when host actions are intentionally unnecessary."
+                    exit 1
+                fi
+                if [ -z "$host_service_user" ]; then
+                    host_service_user="$service_user"
+                    if [ "$service_user" = root ]; then
+                        if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+                            read -r -p 'Existing non-root account for later demotion: ' host_service_user </dev/tty
+                        else
+                            log_error "Root installs need --install-host-service-user naming the original non-root account"; exit 1
+                        fi
+                    fi
+                fi
+                host_trust_args=(--manifest "$installed_manifest" --endpoint "$node_endpoint" --agent-id "$node_id"
+                    --panel-key-id "$panel_key_id" --panel-public-key "$panel_public_key"
+                    --service-user "$host_service_user"
+                    --release-key-id komari-release-8372cfc532b8f1bf
+                    --release-public-key Bii7plda32t+iJAWXT2zBoy3uOiUuLqZa8dLqwmBQ6o=)
+                [ -z "$host_access_config" ] || host_trust_args+=(--access-config "$host_access_config")
+                [ "$rescue_enabled" != true ] || host_trust_args+=(--allow-rescue-helper)
+                "$host_path" trust "${host_trust_args[@]}"
+            fi
+            if [ "$rescue_enabled" = true ]; then
+                log_info "Verifying and caching the signed rescue release; the rescue service will be installed only by a separately approved host action."
+                "$host_path" fetch-helper --manifest "$installed_manifest" --version "$install_version"
+                policy_path="${service_fields[4]}"
+                ensure_root_file "$policy_path"
+                # Only this explicit administrator option grants helper eligibility.
+                # Publish atomically; preserve every other policy field.
+                python3 - "$policy_path" <<'ALLOW_HELPER'
+import json, os, sys, tempfile
+path = sys.argv[1]
+with open(path) as f:
+    policy = json.load(f)
+if policy.get('allow_rescue_helper') is not True:
+    policy['allow_rescue_helper'] = True
+    fd, temporary = tempfile.mkstemp(prefix='.helper-policy-', dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, 'w') as f:
+            json.dump(policy, f, indent=2)
+            f.write('\n')
+            f.flush()
+            os.fsync(f.fileno())
+            os.fchmod(f.fileno(), 0o644)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary): os.unlink(temporary)
+ALLOW_HELPER
+            fi
+            ensure_root_dir /etc/pam.d
+            if [ -e /etc/pam.d/komari-host ] || [ -L /etc/pam.d/komari-host ]; then
+                ensure_root_file /etc/pam.d/komari-host
+            else
+                pam_stage=$(mktemp /etc/pam.d/.komari-host.XXXXXXXX)
+                printf '# Komari host: fresh local password and account validity\nauth required pam_unix.so\naccount required pam_unix.so\n' > "$pam_stage"
+                chmod 644 "$pam_stage"
+                mv -fT -- "$pam_stage" /etc/pam.d/komari-host
+            fi
+            "$host_path" diagnose --manifest "$installed_manifest" | tee "$log_directory/host-readiness.log"
+            if ! grep -qx 'host_actions_ready=true' "$log_directory/host-readiness.log"; then
+                log_error "Host preparation is incomplete; inspect $log_directory/host-readiness.log"; exit 1
+            fi
+        else
+            log_warning "Metrics-only mode: privileged host action preparation was explicitly skipped."
+        fi
+        if [ "$service_was_active" = true ] || [ "$enrolled_now" = true ] || [ "$install_mode" = fresh ]; then
+            systemctl reset-failed "${service_name}.service"
+            systemctl restart "${service_name}.service"
+            initial_restarts=$(systemctl show "${service_name}.service" --property=NRestarts --value)
+            for observation in 1 2 3 4 5; do
+                sleep 1
+                if ! systemctl is-active --quiet "${service_name}.service" || [ "$(systemctl show "${service_name}.service" --property=NRestarts --value)" != "$initial_restarts" ]; then
+                    log_error "Service failed after restart; the installer will restore the previous binaries. No node state was erased."; exit 1
+                fi
+            done
+        else
+            log_info "Previously stopped service remains stopped. Start with: sudo systemctl start $service_name"
+        fi
+    else
+        log_info "Registration-only mode: enrollment, host setup and service restart were explicitly skipped."
+    fi
+    log_success "$install_mode complete: $install_version. Node identity and existing state retained."
+    log_info "Privileged changes still require panel approval and local PAM authentication via komari-host apply."
     exit 0
 fi
 

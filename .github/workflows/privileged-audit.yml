@@ -29,8 +29,6 @@ jobs:
         run: scripts/ci/test-approved-delivery.sh
       - name: Trusted installation and migration on disposable systemd runner
         run: scripts/ci/test-trusted-install.sh
-      - name: Public installer home collision and failed-attempt recovery
-        run: bash scripts/ci/test-installer-recovery.sh
       - name: Real PAM, systemd identities, helper lifecycle and transaction recovery
         run: bash scripts/ci/test-host-transactions.sh
       - name: Cross-platform host tool compilation
@@ -46,6 +44,37 @@ jobs:
         if: always()
         with:
           name: privileged-agent-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+
+  installer-recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Check installer syntax and service definition regressions
+        shell: bash
+        run: |
+          mkdir -p ci-artifacts
+          bash -n install.sh
+          bash -n scripts/ci/test-installer-recovery.sh
+          python3 scripts/test_installers.py 2>&1 | tee ci-artifacts/installer-unit-tests.log
+      - name: Build installer fixtures with retained build logs
+        shell: bash
+        env:
+          GOMAXPROCS: '2'
+        run: |
+          go build -p=2 -o ci-artifacts/komari-host ./cmd/komari-host 2>&1 | tee ci-artifacts/installer-host-build.log
+          go build -p=2 -o ci-artifacts/komari-agent . 2>&1 | tee ci-artifacts/installer-agent-build.log
+      - name: Install, update, downgrade rejection, rollback and full host preparation
+        run: bash scripts/ci/test-installer-recovery.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: installer-recovery-${{ github.run_id }}-${{ github.run_attempt }}
           path: ci-artifacts/
           retention-days: 30
 
