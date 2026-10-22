@@ -381,6 +381,22 @@ if [ "$uninstall_only" != true ]; then
             log_error "Untrusted owner or permissions at $path"; exit 1
         fi
     }
+    prepare_service_directories() {
+        local binary_dir="$1" path
+        # Host's mkdir(0755) inherits our private umask(077). Prepare the
+        # public program/registry directories explicitly, including repair of
+        # mode-0700 directories left by earlier installs or migrations. Never
+        # recurse into credentials, state, bootstrap files or host journals.
+        ensure_root_dir "$binary_dir"
+        for path in /etc/komari /etc/komari/services; do
+            ensure_root_dir "$path"
+            chmod 755 "$path" || exit 1
+        done
+        if [ "$binary_dir" = "/usr/lib/komari/$service_name" ]; then
+            chmod 755 /usr/lib/komari || exit 1
+        fi
+        chmod 755 "$binary_dir" || exit 1
+    }
     prepare_state_parent() {
         local path=/var/lib/komari owner mode legacy_uid legacy_home
         ensure_root_dir /var/lib
@@ -602,6 +618,7 @@ if [ "$uninstall_only" != true ]; then
     done
     case "$install_mode" in
         fresh)
+            prepare_service_directories "$target_dir"
             # Failed attempts may have left trusted binaries but no node. Both
             # downloads are complete and verified before either is published.
             for component in komari-agent komari-host; do
@@ -619,6 +636,7 @@ if [ "$uninstall_only" != true ]; then
         migrate)
             log_info "Migrating the existing service; preserving node files, service identity and local remote-control restrictions."
             "$staging/komari-host" migrate --service "$service_name" --legacy-disable preserve > "$log_directory/migration-preview.json" || exit 1
+            prepare_service_directories "/usr/lib/komari/$service_name"
             "$staging/komari-host" migrate --service "$service_name" --legacy-disable preserve --agent-artifact "$staging/komari-agent" --sha256 "$agent_digest" --commit || exit 1
             agent_path="/usr/lib/komari/$service_name/komari-agent"
             host_path="/usr/lib/komari/$service_name/komari-host"
@@ -651,6 +669,7 @@ INSTALLED_PATHS
                 log_error "Target Host binary cannot read this installed manifest; refusing an incompatible upgrade/downgrade before changing files."
                 exit 1
             }
+            prepare_service_directories "$(dirname "$agent_path")"
             # Prepare both rollback copies and the replacement Host before the
             # Agent is touched. Keep recovery copies in the protected log dir.
             agent_rollback="$log_directory/agent.previous"
@@ -717,6 +736,15 @@ SERVICE_FIELDS
     trust_path="$(dirname "${service_fields[4]}")/$service_name.trust.json"
     ensure_root_file "$agent_path"
     ensure_root_file "$host_path"
+    # Root can execute through a mode-0700 parent, so root-only diagnostics
+    # missed broken non-root migrations. Check as the actual service account
+    # before enrollment or declaring even a registration-only install ready.
+    if ! runuser -u "$service_user" -- test -x "$agent_path" ||
+       ! runuser -u "$service_user" -- test -r "$installed_manifest" ||
+       ! runuser -u "$service_user" -- test -r "${service_fields[4]}"; then
+        log_error "Service account $service_user cannot access its executable or installation metadata. Inspect parent directory permissions; node state has been preserved."
+        exit 1
+    fi
     enrolled_now=false
     if [ "$register_only" != true ]; then
         # Read node metadata as its own account, never log the credentials JSON.
