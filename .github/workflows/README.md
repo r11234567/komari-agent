@@ -60,9 +60,9 @@ Trigger:
 
 Jobs:
 
-- Verifies the protocol dependency against `go.mod` (the single source for its
-  reviewed version), requires matching `go.sum` entries and rejects replacements.
-  No workflow contains a second copy of the protocol version.
+- Verifies `third_party/komari-proto` against its Git gitlink and the fixed local
+  Go replacement. The gitlink is the single protocol revision; no workflow
+  contains another version or SHA. See [protocol dependency](../../docs/proto-dependency.md).
 - Tests the release gate against missing, failed, skipped, pending, rerunning,
   wrong-commit and pull-request-only CI results.
 - Builds a matrix of Windows, Linux, macOS, and FreeBSD targets.
@@ -187,7 +187,7 @@ Jobs:
   release SHA. Missing or unfinished checks fail closed; the latest run/attempt
   must succeed. PR checks and checks for an older SHA do not qualify. The same
   gate runs before stable Docker publishing, including manual dispatches.
-- Revalidates the protocol dependency against `go.mod` and `go.sum`.
+- Revalidates the protocol submodule and the actual local Go module resolution.
 - Checks `KOMARI_RELEASE_SIGNING_KEY` (Actions Secret) and
   `KOMARI_RELEASE_SIGNING_KEY_ID` (Actions Variable) against the reviewed
   `docs/release-signing-key.json` before starting the build matrix. The private

@@ -15,6 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: recursive
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -25,8 +27,8 @@ jobs:
           mkdir -p ci-artifacts
           exec > >(tee ci-artifacts/protocol-and-release-policy.log) 2>&1
           trap 'echo "$?" > ci-artifacts/policy-exit.txt' EXIT
-          node --test scripts/ci/release-policy.test.cjs
-          node scripts/ci/check-protocol.cjs
+          node --test scripts/ci/release-policy.test.cjs scripts/ci/protocol-submodule.test.cjs
+          node scripts/ci/check-protocol.cjs --resolve-go
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -56,6 +58,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+        with:
+          submodules: recursive
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -132,6 +136,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: recursive
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
