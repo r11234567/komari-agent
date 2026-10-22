@@ -18,7 +18,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.9
 	golang.org/x/net v0.58.0
-	golang.org/x/sys v0.48.0
+	golang.org/x/sys v0.49.0
 	google.golang.org/protobuf v1.36.12
 	gopkg.in/toast.v1 v1.0.0-20180812000517-0a84660828b2
 )
