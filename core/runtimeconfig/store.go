@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -139,16 +140,27 @@ func (s *Store) ApplyWithReceipt(desired *configv1.DesiredConfig, receipt []byte
 	if desired.Revision < current.Revision {
 		return *clone(current), fmt.Errorf("stale config revision %d; applied revision is %d", desired.Revision, current.Revision)
 	}
-	if desired.Revision == current.Revision {
-		return *clone(current), nil
-	}
-	if len(s.receipts) >= 1024 {
+	if len(receipt) > 0 && len(s.receipts) >= 1024 {
 		return *clone(current), errors.New("runtime receipt outbox is full")
 	}
 
 	next, err := fromProto(*current, desired.Revision, desired.Runtime)
 	if err != nil {
 		return *clone(current), err
+	}
+	if desired.Revision == current.Revision {
+		if !reflect.DeepEqual(clone(&next), clone(current)) {
+			return *clone(current), errors.New("same runtime revision has different content")
+		}
+		if len(receipt) == 0 {
+			return *clone(current), nil
+		}
+		receipts := append(clonePayloads(s.receipts), append([]byte(nil), receipt...))
+		if err := s.persist(persistedState{Current: *current, Previous: s.previous, Receipts: receipts}); err != nil {
+			return *clone(current), err
+		}
+		s.receipts = receipts
+		return *clone(current), nil
 	}
 	previous := clone(current)
 	receipts := clonePayloads(s.receipts)

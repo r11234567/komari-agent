@@ -21,6 +21,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -55,7 +56,11 @@ func (s *baselineTestService) InitializeNodeConfig(_ context.Context, req *conne
 	body, _ := proto.MarshalOptions{Deterministic: true}.Marshal(r)
 	payload, _ := proto.Marshal(&securityv1.SignedInstruction{AgentId: r.AgentId, Nonce: "fresh-envelope", InstructionType: "komari.config.v2.PrivilegedRevision", Body: body, IssuedAt: timestamppb.Now(), ExpiresAt: timestamppb.New(time.Now().Add(time.Minute))})
 	r.Signature = &securityv1.SignedEnvelope{Payload: payload, Signatures: []*securityv1.Signature{{KeyId: "panel", Algorithm: securityv1.SignatureAlgorithm_SIGNATURE_ALGORITHM_ED25519, Value: ed25519.Sign(s.key, payload)}}}
-	return connect.NewResponse(&configv1.InitializeNodeConfigResponse{Initialized: true, Runtime: &configv1.DesiredConfig{AgentId: r.AgentId, Revision: 1, Runtime: req.Msg.Runtime}, Privileged: r}), nil
+	response := &configv1.InitializeNodeConfigResponse{Initialized: true, Privileged: r}
+	if !req.Msg.PreserveRuntime {
+		response.Runtime = &configv1.DesiredConfig{AgentId: r.AgentId, Revision: 1, Runtime: req.Msg.Runtime}
+	}
+	return connect.NewResponse(response), nil
 }
 func (s *baselineTestService) AcknowledgeConfig(context.Context, *connect.Request[configv1.AcknowledgeConfigRequest]) (*connect.Response[configv1.AcknowledgeConfigResponse], error) {
 	if s.fail.Load() {
@@ -74,6 +79,15 @@ func (s *baselineTestService) ReportPrivilegedDelivery(_ context.Context, req *c
 	return connect.NewResponse(&configv1.ReportPrivilegedDeliveryResponse{Accepted: true}), nil
 }
 func TestBaselineACKRetriesAfterLocalLoadAndReconnect(t *testing.T) {
+	for _, migrated := range []bool{false, true} {
+		name := "fresh"
+		if migrated {
+			name = "migrated-r4"
+		}
+		t.Run(name, func(t *testing.T) { testBaselineReconnect(t, migrated) })
+	}
+}
+func testBaselineReconnect(t *testing.T, migrated bool) {
 	pub, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -106,6 +120,17 @@ func TestBaselineACKRetriesAfterLocalLoadAndReconnect(t *testing.T) {
 		t.Fatal(err)
 	}
 	policy := &hostops.Policy{Version: 2, ServiceID: "custom", PrivilegeMode: int32(capability.Detect(false).PrivilegeMode)}
+	if migrated {
+		policy.DisableSource = "legacy-unknown-preserve"
+		policy.ForceDenyRemoteControl = true
+		if _, err = store.Apply(&configv1.DesiredConfig{Revision: 4, Runtime: &configv1.RuntimeConfig{}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := os.ReadFile(filepath.Join(dir, "runtime.json"))
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
 	policyPath := filepath.Join(dir, "policy.json")
 	if err = hostops.WriteJSON(policyPath, policy, 0o600); err != nil {
 		t.Fatal(err)
@@ -114,8 +139,21 @@ func TestBaselineACKRetriesAfterLocalLoadAndReconnect(t *testing.T) {
 	if err = c.initializeHost(context.Background()); err == nil {
 		t.Fatal("fixture must lose ACK transport")
 	}
-	if store.Current().Revision != 1 || priv.State().AppliedRevision != 1 || len(priv.State().Outbox) == 0 {
+	wantRuntime := uint64(1)
+	if migrated {
+		wantRuntime = 4
+	}
+	if store.Current().Revision != wantRuntime || priv.State().AppliedRevision != 1 || len(priv.State().Outbox) == 0 {
 		t.Fatal("local snapshot and ACK were not persisted before sending")
+	}
+	if migrated {
+		after, e := os.ReadFile(filepath.Join(dir, "runtime.json"))
+		if e != nil {
+			t.Fatal(e)
+		}
+		if string(before) != string(after) || !service.first.PreserveRuntime {
+			t.Fatal("migration rewrote ordinary r4")
+		}
 	}
 	c.privilegedStore, err = privileged.Open(priv.Path())
 	if err != nil {
