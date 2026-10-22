@@ -190,8 +190,10 @@ function Get-ReleaseVersion {{ 'test' }}
             manifest = "# Pass all paths explicitly" + between(PS, "# Pass all paths explicitly", "$Nssm = Ensure-Nssm")
             output = self.run_ps(setup + functions + layout + manifest + '\nGet-Content $ServiceConfigPath -Raw\n')
             config = json.loads(output)
-            self.assertEqual(config["credentials_file"], str(Path(tmp) / "install space" / "custom credentials.json"))
-            self.assertEqual(config["runtime_state_file"], str(Path(tmp) / "program data" / "Komari" / "komari-test" / "runtime-config.json"))
+            # Windows PowerShell expands 8.3 temp-directory aliases (RUNNER~1)
+            # while Python can retain them. Compare the actual canonical paths.
+            self.assertEqual(Path(config["credentials_file"]).resolve(), (Path(tmp) / "install space" / "custom credentials.json").resolve())
+            self.assertEqual(Path(config["runtime_state_file"]).resolve(), (Path(tmp) / "program data" / "Komari" / "komari-test" / "runtime-config.json").resolve())
             self.assertTrue(config["privileged_state_file"].endswith("privileged.json"))
             self.assertTrue(config["replay_state_file"].endswith("nonces.json"))
 
