@@ -126,6 +126,9 @@ func (s *hostTestPanel) NegotiateHostProtocol(_ context.Context, r *connect.Requ
 	s.negotiatedActions = append([]hostv1.HostAction(nil), r.Msg.SupportedActions...)
 	defer s.mu.Unlock()
 	s.startup = r.Msg.StartupId
+	// Restored daemons negotiate their real identity even when the preceding
+	// target's final ACK was accepted. Do not keep that target's stale mode.
+	s.mode = r.Msg.PrivilegeMode
 	return connect.NewResponse(&hostv1.NegotiateHostProtocolResponse{ProtocolVersion: 2}), nil
 }
 func (s *hostTestPanel) GetPrivilegedDelivery(context.Context, *connect.Request[configv1.GetPrivilegedDeliveryRequest]) (*connect.Response[configv1.GetPrivilegedDeliveryResponse], error) {
@@ -777,6 +780,7 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	}
 	panel.mu.Lock()
 	restoredAfterOutage := panel.op.Phase == hostv1.HostOperationPhase_HOST_OPERATION_PHASE_RESTORED && panel.current.State == configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_FAILED
+	panel.loseDaemonACK = false
 	panel.mu.Unlock()
 	if !restoredAfterOutage {
 		t.Fatal("restoration after lost final ACK did not close the operation")
