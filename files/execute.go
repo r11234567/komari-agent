@@ -14,6 +14,9 @@ import (
 func Execute(operation filev1.FileOperation, args map[string]any) *filev1.AgentFileEvent {
 	event := &filev1.AgentFileEvent{Operation: operation}
 	name := operationName(operation)
+	if override := argString(args, "_op"); override != "" {
+		name = override
+	}
 	if name == "" {
 		event.Error = fmt.Sprintf("unsupported file operation: %s", operation.String())
 		return event
