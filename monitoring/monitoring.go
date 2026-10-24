@@ -122,19 +122,20 @@ func CollectReport() Report {
 
 	data.Process = unit.ProcessCount()
 
-	// GPU监控 - 根据标志决定详细程度
-	if config.EnableGPU && config.DetailedGPU {
-		// 详细GPU监控模式
+	// GPU monitoring: enabling GPU always attempts detailed collection. The
+	// detailed_gpu runtime flag is kept for compatibility but is not a
+	// collection prerequisite; otherwise a GPU without detailed mode reports
+	// no utilization and clients show a permanent 0%.
+	if config.EnableGPU {
 		gpuInfo, err := unit.GetDetailedGPUInfo()
 		if err != nil {
 			message += fmt.Sprintf("failed to get detailed GPU info: %v\n", err)
-			// 降级到基础GPU信息
+			// Fall back to model names when detailed counters are unavailable.
 			gpuNames, nameErr := unit.GetDetailedGPUHost()
 			if nameErr == nil && len(gpuNames) > 0 {
 				data.GPU = gpuModelsReport{Models: gpuNames}
 			}
 		} else if len(gpuInfo) > 0 {
-			// 成功获取详细信息
 			gpuData := make([]GPUDevice, len(gpuInfo))
 			totalGPUUsage := 0.0
 
@@ -152,16 +153,6 @@ func CollectReport() Report {
 			avgGPUUsage := totalGPUUsage / float64(len(gpuInfo))
 			data.GPU = gpuReport{Count: len(gpuInfo), AverageUsage: avgGPUUsage, DetailedInfo: gpuData}
 			data.GPUs = gpuData
-		}
-	} else if config.EnableGPU {
-		if names, err := unit.GetDetailedGPUHost(); err == nil {
-			data.GPU = gpuModelsReport{Models: names}
-			for index, name := range names {
-				data.GPUs = append(data.GPUs, GPUDevice{Name: name, Utilization: -1, Temperature: ^uint64(0), MemoryUsed: ^uint64(0), MemoryTotal: ^uint64(0)})
-				_ = index
-			}
-		} else {
-			message += fmt.Sprintf("failed to get GPU models: %v\n", err)
 		}
 	}
 	// 基础模式下，GPU信息已在basicInfo中处理
