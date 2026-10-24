@@ -40,6 +40,7 @@ import (
 	configv1connect "github.com/r11234567/komari-proto/gen/go/komari/config/v1/configv1connect"
 	execv1 "github.com/r11234567/komari-proto/gen/go/komari/exec/v1"
 	execv1connect "github.com/r11234567/komari-proto/gen/go/komari/exec/v1/execv1connect"
+	filev1connect "github.com/r11234567/komari-proto/gen/go/komari/file/v1/filev1connect"
 	hostv1connect "github.com/r11234567/komari-proto/gen/go/komari/host/v1/hostv1connect"
 	metricsv1 "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1"
 	metricsv1connect "github.com/r11234567/komari-proto/gen/go/komari/metrics/v1/metricsv1connect"
@@ -84,6 +85,7 @@ type Client struct {
 	network    networkv1connect.NetworkProbeServiceClient
 	execution  execv1connect.ExecutionServiceClient
 	webssh     websshv1connect.WebSSHServiceClient
+	files      filev1connect.FileServiceClient
 	endpoint   string
 	tokenMu    sync.RWMutex
 	token      string
@@ -327,6 +329,7 @@ func New(config *flags_pkg.Config, store *runtimeconfig.Store) (*Client, error) 
 	c.network = networkv1connect.NewNetworkProbeServiceClient(wrapWithDPoP(networkHTTPClient, c), baseURL)
 	c.execution = execv1connect.NewExecutionServiceClient(wrapWithDPoP(streamHTTPClient, c), baseURL)
 	c.webssh = websshv1connect.NewWebSSHServiceClient(wrapWithDPoP(streamHTTPClient, c), baseURL)
+	c.files = filev1connect.NewFileServiceClient(wrapWithDPoP(streamHTTPClient, c), baseURL)
 
 	return c, nil
 }
@@ -407,6 +410,7 @@ func (c *Client) Run(ctx context.Context) error {
 	start(c.runPingProbes)
 	start(c.runExecutions)
 	start(c.runRemoteSessions)
+	start(c.runFileOperations)
 	if capabilities.ReturnRouteProbe != nil && capabilities.ReturnRouteProbe.Available {
 		start(c.runReturnRouteProbes)
 	}
