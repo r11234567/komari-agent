@@ -1,0 +1,35 @@
+name: Workspace OS identity checkpoint
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  identity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Race regressions for identity, file workers and terminal
+        run: bash scripts/ci/run-audit-check.sh workspace-identity bash scripts/ci/run-go-tests.sh ./core/osidentity ./files ./terminal ./clientcore
+      - name: Build isolated worker test binary
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh build-worker go test -c -o /tmp/komari-workspace-worker.test ./files
+      - name: Real root-to-nonroot permissions on a disposable hosted runner
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          sudo useradd --create-home --shell /bin/sh komari-workspace-ci
+          chmod 755 /tmp/komari-workspace-worker.test
+          bash scripts/ci/run-audit-check.sh real-uid sudo env KOMARI_IDENTITY_TEST_USER=komari-workspace-ci /tmp/komari-workspace-worker.test -test.v -test.run '^TestWorkerRealOSPermissionsAndScope$'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: workspace-identity-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30

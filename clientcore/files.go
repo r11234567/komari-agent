@@ -18,6 +18,8 @@ const (
 )
 
 func (c *Client) runFileOperations(ctx context.Context) {
+	executor := files.NewExecutor(ctx)
+	defer executor.Close()
 	semaphore := make(chan struct{}, 4)
 	var retry retryPolicy
 	for ctx.Err() == nil {
@@ -26,6 +28,7 @@ func (c *Client) runFileOperations(ctx context.Context) {
 		}
 		req := connect.NewRequest(&filev1.LeaseFileOperationsRequest{AgentId: c.agentIDValue()})
 		c.authorize(req.Header())
+		req.Header().Set("X-Komari-Workspace-Identity", "v1")
 		stream, err := c.files.LeaseFileOperations(ctx, req)
 		if err != nil {
 			if isUnsupported(err) || !retry.Wait(ctx, err) {
@@ -47,7 +50,7 @@ func (c *Client) runFileOperations(ctx context.Context) {
 			case semaphore <- struct{}{}:
 				go func() {
 					defer func() { <-semaphore }()
-					if err := c.attachFileOperation(ctx, assignment); err != nil && ctx.Err() == nil {
+					if err := c.attachFileOperation(ctx, assignment, executor); err != nil && ctx.Err() == nil {
 						log.Printf("File operation failed: %v", err)
 					}
 				}()
@@ -67,7 +70,7 @@ func (c *Client) runFileOperations(ctx context.Context) {
 	}
 }
 
-func (c *Client) attachFileOperation(parent context.Context, assignment *filev1.FileAssignment) error {
+func (c *Client) attachFileOperation(parent context.Context, assignment *filev1.FileAssignment, executor *files.Executor) error {
 	timeout := fileOperationTimeout
 	if assignment.GetTimeoutSeconds() > 0 {
 		timeout = time.Duration(assignment.GetTimeoutSeconds()) * time.Second
@@ -78,9 +81,11 @@ func (c *Client) attachFileOperation(parent context.Context, assignment *filev1.
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
+	go capability.CancelOnRevocation(ctx, cancel, capability.WebSSHAllowed)
 
 	stream := c.files.AttachFileOperations(ctx)
 	c.authorize(stream.RequestHeader())
+	stream.RequestHeader().Set("X-Komari-Workspace-Identity", "v1")
 	if err := stream.Send(&filev1.AttachFileOperationsRequest{
 		Message: &filev1.AttachFileOperationsRequest_Attach{Attach: &filev1.AgentFileAttach{
 			AgentId:      c.agentIDValue(),
@@ -98,6 +103,10 @@ func (c *Client) attachFileOperation(parent context.Context, assignment *filev1.
 	if command == nil {
 		return errors.New("file assignment is missing from the attach response")
 	}
+	// Read the server side concurrently so grant expiry closes active workers,
+	// including a long transfer, instead of waiting for the operation to finish.
+	remoteClosed := make(chan struct{})
+	go func() { defer close(remoteClosed); _, _ = stream.Receive(); cancel() }()
 
 	args := map[string]any{}
 	if command.GetArguments() != nil {
@@ -132,7 +141,7 @@ func (c *Client) attachFileOperation(parent context.Context, assignment *filev1.
 		args["max_results"] = float64(command.GetMaxResults())
 	}
 
-	event := files.Execute(command.GetOperation(), args)
+	event := executor.Execute(ctx, command.GetWorkspaceId(), command.GetSystemUser(), command.GetRequestId(), command.GetOperation(), args)
 	event.RequestId = command.GetRequestId()
 	if event.GetOperation() == filev1.FileOperation_FILE_OPERATION_UNSPECIFIED {
 		event.Operation = command.GetOperation()
@@ -143,6 +152,6 @@ func (c *Client) attachFileOperation(parent context.Context, assignment *filev1.
 		return err
 	}
 	_ = stream.CloseRequest()
-	_, _ = stream.Receive()
+	<-remoteClosed
 	return nil
 }

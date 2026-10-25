@@ -868,6 +868,7 @@ func (c *Client) runRemoteSessions(ctx context.Context) {
 		}
 		req := connect.NewRequest(&websshv1.LeaseSessionsRequest{AgentId: c.agentIDValue()})
 		c.authorize(req.Header())
+		req.Header().Set("X-Komari-Workspace-Identity", "v1")
 		stream, err := c.webssh.LeaseSessions(ctx, req)
 		if err != nil {
 			if isUnsupported(err) || !retry.Wait(ctx, err) {
@@ -914,8 +915,16 @@ func (c *Client) attachRemoteSession(ctx context.Context, assignment *websshv1.S
 	if assignment.Size != nil {
 		cols, rows = int(assignment.Size.Columns), int(assignment.Size.Rows)
 	}
-	pty, err := terminal.OpenSession(cols, rows)
+	pty, err := terminal.OpenSessionAs(cols, rows, assignment.GetSystemUser(), assignment.GetShell(), assignment.GetWorkingDirectory())
 	if err != nil {
+		failed := c.webssh.AttachSession(ctx)
+		c.authorize(failed.RequestHeader())
+		failed.RequestHeader().Set("X-Komari-Workspace-Identity", "v1")
+		if attachErr := failed.Send(&websshv1.AttachSessionRequest{Message: &websshv1.AttachSessionRequest_Attach{Attach: &websshv1.AgentSessionAttach{AgentId: c.agentIDValue(), AssignmentId: assignment.AssignmentId, SessionId: assignment.SessionId}}}); attachErr == nil {
+			_ = failed.Send(&websshv1.AttachSessionRequest{Message: &websshv1.AttachSessionRequest_Event{Event: &websshv1.AgentSessionEvent{Sequence: 1, Event: &websshv1.AgentSessionEvent_Closed{Closed: &websshv1.SessionClosed{SessionId: assignment.SessionId, Reason: websshv1.CloseReason_CLOSE_REASON_FAILED, ClosedAt: timestamppb.Now()}}}}})
+		}
+		_ = failed.CloseRequest()
+		_ = failed.CloseResponse()
 		return err
 	}
 	defer pty.Close()
@@ -924,6 +933,7 @@ func (c *Client) attachRemoteSession(ctx context.Context, assignment *websshv1.S
 	go capability.CancelOnRevocation(sessionCtx, cancel, capability.WebSSHAllowed)
 	stream := c.webssh.AttachSession(sessionCtx)
 	c.authorize(stream.RequestHeader())
+	stream.RequestHeader().Set("X-Komari-Workspace-Identity", "v1")
 	if err := stream.Send(&websshv1.AttachSessionRequest{Message: &websshv1.AttachSessionRequest_Attach{Attach: &websshv1.AgentSessionAttach{
 		AgentId: c.agentIDValue(), AssignmentId: assignment.AssignmentId, SessionId: assignment.SessionId,
 	}}}); err != nil {
@@ -935,15 +945,6 @@ func (c *Client) attachRemoteSession(ctx context.Context, assignment *websshv1.S
 	outboundEvents := make(chan outbound, 32)
 	sendErr := make(chan error, 1)
 	var accepted atomic.Uint64
-	files := terminal.NewFileManager(sessionCtx, func(event *websshv1.FileEvent) error {
-		select {
-		case outboundEvents <- outbound{event: &websshv1.AgentSessionEvent{Event: &websshv1.AgentSessionEvent_File{File: event}}}:
-			return nil
-		case <-sessionCtx.Done():
-			return sessionCtx.Err()
-		}
-	})
-	defer files.Close()
 	go func() {
 		var sequence uint64
 		for {
@@ -1015,7 +1016,7 @@ func (c *Client) attachRemoteSession(ctx context.Context, assignment *websshv1.S
 				err = pty.Resize(int(command.Resize.Columns), int(command.Resize.Rows))
 			}
 		case *websshv1.AttachSessionResponse_File:
-			err = files.Handle(command.File)
+			err = errors.New("terminal file commands are disabled; use the account-isolated FileService")
 		case *websshv1.AttachSessionResponse_CloseReason:
 			return nil
 		default:

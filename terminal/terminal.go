@@ -36,10 +36,19 @@ type Session struct {
 }
 
 func OpenSession(cols, rows int) (*Session, error) {
+	return openSession(cols, rows, newTerminalImpl)
+}
+
+// OpenSessionAs requires the selected identity; failure never falls back to the Agent.
+func OpenSessionAs(cols, rows int, username, shell, directory string) (*Session, error) {
+	return openSession(cols, rows, func() (*terminalImpl, error) { return newTerminalAs(username, shell, directory) })
+}
+
+func openSession(cols, rows int, create func() (*terminalImpl, error)) (*Session, error) {
 	if allowed, reason := capability.WebSSHAllowed(); !allowed {
 		return nil, fmt.Errorf("remote control is unavailable: %s", reason)
 	}
-	impl, err := newTerminalImpl()
+	impl, err := create()
 	if err != nil {
 		return nil, err
 	}
@@ -87,42 +96,8 @@ func (s *Session) Close() error {
 
 // StartTerminal 启动终端并处理 WebSocket 通信
 func StartTerminal(conn *websocket.Conn) {
-	if allowed, reason := capability.WebSSHAllowed(); !allowed {
-		conn.WriteMessage(websocket.TextMessage, []byte("\n\nRemote control is unavailable: "+reason))
-		conn.Close()
-		return
-	}
-	session, err := OpenSession(80, 24)
-	if err != nil {
-		conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("Error: %v\r\n", err)))
-		return
-	}
-
-	errChan := make(chan error, 3) // 增加容量以容纳多个错误源
-	done := make(chan struct{})
-
-	defer func() {
-		session.Close()
-		conn.Close()
-		close(done)
-	}()
-
-	// 从 WebSocket 读取消息并写入终端
-	go handleWebSocketInput(conn, session, errChan, done)
-
-	// 从终端读取输出并写入 WebSocket
-	go handleTerminalOutput(conn, session, errChan, done)
-
-	// 等待终端进程结束或出现错误
-	select {
-	case err := <-errChan:
-		// WebSocket 连接断开或出现错误
-		if err != nil {
-			conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("\r\nConnection error: %v\r\n", err)))
-		}
-	case <-done:
-		// 已经被其他地方关闭
-	}
+	_ = conn.WriteMessage(websocket.TextMessage, []byte("Legacy terminal is disabled. Use the account-isolated Connect workspace."))
+	_ = conn.Close()
 }
 
 // gracefulShutdown 尝试优雅地关闭终端
