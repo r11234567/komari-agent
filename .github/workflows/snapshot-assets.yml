@@ -1,0 +1,117 @@
+name: Linux snapshot installer assets
+on:
+  pull_request:
+    paths:
+      - .github/workflows/snapshot.yml
+      - .github/workflows/snapshot-assets.yml
+      - scripts/ci/snapshot-assets*.cjs
+      - install.sh
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/snapshot.yml
+      - .github/workflows/snapshot-assets.yml
+      - scripts/ci/snapshot-assets*.cjs
+      - install.sh
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing Snapshot tag to repair; leave blank for tests only
+        required: false
+        type: string
+      source_run_id:
+        description: Successful main push of snapshot.yml that built that tag
+        required: false
+        type: string
+permissions:
+  contents: read
+jobs:
+  asset-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Linux install assets, missing Host regressions and checksum integrity
+        run: bash scripts/ci/run-audit-check.sh snapshot-assets node --test scripts/ci/snapshot-assets.test.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-snapshot-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+  repair-linux-assets:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag != '' && inputs.source_run_id != '' }}
+    needs: asset-contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Require the original successful snapshot run and exact release commit
+        id: source
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (context.ref !== 'refs/heads/main') throw new Error('Repair must run from main');
+            const tag = process.env.RELEASE_TAG;
+            const runID = process.env.SOURCE_RUN_ID;
+            if (!/^Snapshot-\d{10}$/.test(tag) || !/^\d+$/.test(runID)) throw new Error('Invalid Snapshot tag or run ID');
+            const run = (await github.rest.actions.getWorkflowRun({ ...context.repo, run_id: Number(runID) })).data;
+            const workflow = (await github.rest.actions.getWorkflow({ ...context.repo, workflow_id: 'snapshot.yml' })).data;
+            const release = (await github.rest.repos.getReleaseByTag({ ...context.repo, tag })).data;
+            const commit = (await github.rest.repos.getCommit({ ...context.repo, ref: tag })).data.sha;
+            if (run.workflow_id !== workflow.id || run.head_branch !== 'main' || run.event !== 'push' || run.conclusion !== 'success' || run.status !== 'completed') throw new Error('Source is not a successful main Snapshot publication');
+            if (!release.prerelease || release.draft || commit !== run.head_sha) throw new Error('Release and source build do not match');
+            core.setOutput('run_id', runID);
+            core.setOutput('release_id', String(release.id));
+            require('node:fs').mkdirSync('ci-artifacts', { recursive: true });
+            require('node:fs').writeFileSync('ci-artifacts/repair-source.json', JSON.stringify({ tag, run_id: run.id, commit, release_id: release.id }, null, 2));
+      - name: Reuse binaries from the original publication, without rebuilding
+        uses: actions/download-artifact@v7
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.source.outputs.run_id }}
+          pattern: komari-agent-*
+          path: artifacts
+          merge-multiple: true
+      - name: Verify original Linux versions, checksums and complete inventory
+        run: |
+          bash scripts/ci/run-audit-check.sh repair-versions bash -c '
+            set -euo pipefail
+            for component in komari-agent komari-host; do
+              for arch in 386 amd64 arm arm64 loong64; do
+                metadata=$(go version -m "artifacts/${component}-linux-${arch}")
+                printf "%s\n" "$metadata"
+                if [ "$component" = komari-host ]; then symbol=internal/hostcmd.ReleaseVersion; else symbol=update.CurrentVersion; fi
+                grep -Fq "github.com/komari-monitor/komari-agent/${symbol}=${RELEASE_TAG}" <<< "$metadata"
+              done
+            done'
+          bash scripts/ci/run-audit-check.sh repair-checksums bash -c 'node scripts/ci/snapshot-assets.cjs artifacts > ci-artifacts/snapshot-assets.txt && cat ci-artifacts/snapshot-assets.txt'
+      - name: Backfill only Linux Host assets and the aggregate checksum inventory
+        env:
+          EXPECTED_RELEASE_ID: ${{ steps.source.outputs.release_id }}
+        run: |
+          bash scripts/ci/run-audit-check.sh repair-upload bash -c '
+            set -euo pipefail
+            actual_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq .id)
+            [ "$actual_id" = "$EXPECTED_RELEASE_ID" ]
+            gh release upload "$RELEASE_TAG" artifacts/komari-host-linux-* artifacts/SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
+            gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName,assets > ci-artifacts/repaired-release.json'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-snapshot-repair-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
