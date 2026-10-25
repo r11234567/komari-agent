@@ -148,6 +148,17 @@ sudo cmp "$fixture/komari-host" "/usr/lib/komari/$pristine/komari-host"
 test "$(sudo systemctl show "$pristine" --property=User --value)" = komari
 echo 'PASS: registered node updated with credentials, policy, service identity and unit preserved'
 
+# Isolated synthetic pending host transaction: installer preflight must refuse
+# even an ordinary Agent/Host-only update before replacing installed files.
+printf '{"isolated_pending_host_fixture":true}\n' | sudo tee "/var/lib/komari-host/$pristine/transaction.json" >/dev/null
+sudo chmod 600 "/var/lib/komari-host/$pristine/transaction.json"
+sudo sha256sum "/usr/lib/komari/$pristine/komari-agent" "/usr/lib/komari/$pristine/komari-host" > "$log_dir/pending-host-before.sha256"
+expect_rejected 'pending host transaction before Agent-only update' run_installer "$pristine"
+sudo sha256sum -c "$log_dir/pending-host-before.sha256"
+sudo sha256sum -c "$log_dir/registered-before.sha256"
+sudo rm -- "/var/lib/komari-host/$pristine/transaction.json"
+echo 'PASS: pending host transaction refused before any installed program or protected identity changed'
+
 # A target Host that cannot read the current installation must be rejected
 # before either binary or any registration/state file changes.
 printf '#!/bin/sh\necho "fixture: incompatible host" >&2\nexit 42\n' > "$log_dir/komari-host-incompatible"
@@ -180,6 +191,22 @@ printf '\ninstaller-fixture-target-host\n' >> "$log_dir/komari-host-changed"
 sudo install -m 755 "$log_dir/komari-host-changed" "$fixture/komari-host-changed"
 sudo systemctl start "$pristine.service"
 sudo systemctl is-active --quiet "$pristine.service"
+# Isolated target-command refusal after the initial preflight. It must not
+# trigger shell rollback or restart a service whose files were never changed.
+cat > "$log_dir/komari-host-refuse" <<'REFUSE'
+#!/bin/sh
+if [ "$1" = update ]; then echo 'isolated fixture: transaction preflight refused update' >&2; exit 42; fi
+exec "$KOMARI_INSTALLER_FIXTURE/komari-host" "$@"
+REFUSE
+sudo install -m 755 "$log_dir/komari-host-refuse" "$fixture/komari-host-refuse"
+before_refusal_pid=$(sudo systemctl show "$pristine.service" --property=MainPID --value)
+sudo stat -c '%i %n' "/usr/lib/komari/$pristine/komari-agent" "/usr/lib/komari/$pristine/komari-host" > "$log_dir/refusal-before-inodes.log"
+host_variant=refuse
+KOMARI_INSTALLER_REGISTER_ONLY=false expect_rejected 'target update refused without rollback side effects' run_installer "$pristine" --install-metrics-only
+unset host_variant
+test "$(sudo systemctl show "$pristine.service" --property=MainPID --value)" = "$before_refusal_pid"
+sudo stat -c '%i %n' "/usr/lib/komari/$pristine/komari-agent" "/usr/lib/komari/$pristine/komari-host" > "$log_dir/refusal-after-inodes.log"
+cmp "$log_dir/refusal-before-inodes.log" "$log_dir/refusal-after-inodes.log"
 sudo sha256sum "/usr/lib/komari/$pristine/komari-agent" "/usr/lib/komari/$pristine/komari-host" > "$log_dir/rollback-before.sha256"
 bad_binary=true
 host_variant=changed
@@ -264,6 +291,7 @@ with open(registry + '.policy.json', 'w') as f:
 with open(config, 'w') as f:
     json.dump({'HostManifest': registry + '.json', 'AgentID': '00000000-0000-4000-8000-000000000001',
                'Endpoint': 'https://panel.invalid', 'Version': 'synthetic-previous',
+               'CredentialsFile': '/var/lib/komari/' + service + '/credentials.json',
                'Action': {'ServiceName': service, 'AgentPath': '/usr/lib/komari/' + service + '/komari-agent'}}, f)
 os.chmod(config, 0o600)
 RESCUE_FIXTURE
@@ -323,6 +351,41 @@ assert json.load(open(sys.argv[1]))['Version'] == 'fixture'
 CHECK_RESCUE_VERSION
 sudo systemctl is-active --quiet "$pristine-rescue.service"
 echo 'PASS: installed rescue detected; unavailable release leaves all components intact; failed startup restores all components; signed upgrade preserves authorization and updates all programs'
+
+# Isolated old-Snapshot restore_failed journal, not a real failed release.
+# Keep original files as root-only backups; live configuration is deliberately
+# damaged so recovery must read the original config, not partially updated data.
+sudo python3 - "$pristine" <<'INTERRUPTED_UPGRADE'
+import json,os,pathlib,shutil,sys
+service=sys.argv[1]; registry='/etc/komari/services/'+service+'.json'
+m=json.load(open(registry)); base=pathlib.Path(m['host_tool']).parent
+paths=[m['executable'],m['host_tool'],str(base/'komari-agent-rescue'),str(base/'rescue.json')]
+backup=pathlib.Path('/var/lib/komari-host')/service/'upgrade-isolated-interrupted'
+backup.mkdir(mode=0o700)
+modes=[]
+for i,path in enumerate(paths):
+ modes.append(os.stat(path).st_mode & 0o777); shutil.copyfile(path,backup/str(i)); os.chmod(backup/str(i),0o600)
+with (backup/'upgrade.json').open('w') as f:
+ json.dump(dict(phase='restore_failed',version='isolated-previous-snapshot',manifest=registry,paths=paths,modes=modes,active=[True,True],at='2026-10-25T00:00:00Z'),f)
+os.chmod(backup/'upgrade.json',0o600)
+with open(paths[3],'w') as f: f.write('{isolated-partial-config')
+INTERRUPTED_UPGRADE
+live_binary=true
+host_variant=changed
+KOMARI_INSTALLER_REGISTER_ONLY=false run_installer "$pristine" --install-metrics-only
+unset live_binary host_variant
+sudo sha256sum -c "$log_dir/rescue-state-before.sha256"
+sudo python3 - "$pristine" <<'CHECK_INTERRUPTED_RECOVERY'
+import json,pathlib,sys
+backup=pathlib.Path('/var/lib/komari-host')/sys.argv[1]/'upgrade-isolated-interrupted'
+j=json.load(open(backup/'upgrade.json'))
+assert j['phase']=='completed' and j['previous_attempt']
+assert json.load(open(backup/j['previous_attempt']))['phase']=='restore_failed'
+for i,path in enumerate(j['paths']): assert (backup/str(i)).read_bytes()==pathlib.Path(path).read_bytes()
+CHECK_INTERRUPTED_RECOVERY
+sudo systemctl is-active --quiet "$pristine.service"
+sudo systemctl is-active --quiet "$pristine-rescue.service"
+echo 'PASS: actual installer recovered a legacy pending software upgrade while retaining original backups and failed attempt'
 sudo systemctl stop "$pristine-rescue.service"
 live_binary=true
 host_variant=changed

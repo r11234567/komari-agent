@@ -435,10 +435,10 @@ if [ "$uninstall_only" != true ]; then
         local status=$?
         trap - EXIT
         set +e
+        [ -z "${host_stage:-}" ] || rm -f -- "$host_stage"
         if [ "$status" -ne 0 ] && [ "${update_started:-false}" = true ]; then
             log_error "Update did not complete; restoring the previous Agent and Host binaries."
             rollback_ok=true
-            [ -z "${host_stage:-}" ] || rm -f -- "$host_stage"
             if [ -n "${agent_rollback:-}" ] && [ -f "$agent_rollback" ]; then
                 rollback_stage=$(mktemp "$(dirname "$agent_path")/.komari-agent-rollback.XXXXXXXX") || {
                     rollback_ok=false
@@ -669,14 +669,15 @@ INSTALLED_PATHS
             host_path="${installed_paths[1]}"
             ensure_root_file "$agent_path"
             ensure_root_file "$host_path"
-            # Use the currently installed host to authorize the update. A
-            # target downgrade may have an older CLI and must never be trusted
-            # to mutate the current installation before compatibility is known.
+            # Both installed and staged tools must understand the protected
+            # installation. The staged target also checks pending transactions
+            # before any rollback copies, programs or services are changed.
             "$host_path" diagnose --manifest "$installed_manifest" || exit 1
             "$staging/komari-host" diagnose --manifest "$installed_manifest" > "$log_directory/target-host-readiness.log" || {
                 log_error "Target Host binary cannot read this installed manifest; refusing an incompatible upgrade/downgrade before changing files."
                 exit 1
             }
+            "$staging/komari-host" check-upgrade --manifest "$installed_manifest" || exit 1
             installed_policy="${installed_paths[2]}"
             ensure_root_file "$installed_policy"
             installed_helper=$(python3 - "$installed_policy" <<'HELPER_STATE'
@@ -736,10 +737,10 @@ HELPER_STATE
                 host_backup="/var/lib/komari-host/$service_name/host.previous"
                 if [ -e "$host_backup" ] || [ -L "$host_backup" ]; then ensure_root_file "$host_backup"; fi
                 install -m 700 "$host_rollback" "$host_backup" || { rm -f -- "$host_stage"; exit 1; }
+                "$staging/komari-host" update --manifest "$installed_manifest" --artifact "$staging/komari-agent" --sha256 "$agent_digest" || exit 1
                 update_started=true
-                "$host_path" update --manifest "$installed_manifest" --artifact "$staging/komari-agent" --sha256 "$agent_digest" || exit 1
                 # The host binary is not resident in the daemon. Replace it only
-                # after the installed host has atomically updated the Agent.
+                # after the target Host has atomically updated the Agent.
                 mv -fT -- "$host_stage" "$host_path" || { rm -f -- "$host_stage"; exit 1; }
             fi
             ;;
