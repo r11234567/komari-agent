@@ -276,6 +276,7 @@ RestartSec=5
 UNIT
 sudo systemctl daemon-reload
 sudo systemctl start "$pristine-rescue.service"
+sudo systemctl start "$pristine.service"
 upgrade_files=("/usr/lib/komari/$pristine/komari-agent" "/usr/lib/komari/$pristine/komari-host" "$helper_path" "$helper_config")
 sudo sha256sum "${upgrade_files[@]}" > "$log_dir/rescue-before.sha256"
 original_helper_pid=$(sudo systemctl show "$pristine-rescue.service" --property=MainPID --value)
@@ -328,6 +329,12 @@ host_variant=changed
 KOMARI_INSTALLER_REGISTER_ONLY=false run_installer "$pristine" --install-metrics-only
 unset live_binary host_variant
 if sudo systemctl is-active --quiet "$pristine-rescue.service"; then echo 'FAIL: upgrade started a previously stopped rescue service' >&2; exit 1; fi
+sudo systemctl stop "$pristine.service"
+# This fixture explicitly installed rescue above. Subsequent independent
+# installer cases must compare against that reviewed state, not its old policy.
+sudo sha256sum "/var/lib/komari/$pristine/credentials.json" \
+    "/etc/komari/services/$pristine.json" "/etc/komari/services/$pristine.policy.json" \
+    "/etc/systemd/system/$pristine.service" > "$log_dir/registered-before.sha256"
 
 # Reproduce migration of an active non-root legacy service under the
 # installer's umask 077, without precreating its destination binary directory.
