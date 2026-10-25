@@ -83,7 +83,7 @@ func verifiedArtifact(path, want string) ([]byte, error) {
 	return b, nil
 }
 
-func update(args []string, out io.Writer) error {
+func update(args []string, out io.Writer) (result error) {
 	fs := flag.NewFlagSet("update", flag.ContinueOnError)
 	fs.SetOutput(out)
 	manifest := fs.String("manifest", "", "service manifest")
@@ -139,6 +139,21 @@ func update(args []string, out io.Writer) error {
 	if err = hostops.WriteJSON(filepath.Join(journal, "update.json"), map[string]any{"phase": "prepared", "sha256": *digest, "service": m.ServiceName, "at": time.Now().UTC()}, 0o600); err != nil {
 		return err
 	}
+	// Keep rollback inside the lock if publication or recording fails. An
+	// installer must not roll back/restart after a preflight-only refusal, which
+	// may be caused by a host transaction starting since its first preflight.
+	defer func() {
+		if result == nil {
+			return
+		}
+		if restoreErr := hostops.AtomicWrite(m.Executable, old, 0o755); restoreErr != nil {
+			result = fmt.Errorf("update failed: %v; Agent rollback failed: %w; backup=%s", result, restoreErr, journal)
+			return
+		}
+		if journalErr := hostops.WriteJSON(filepath.Join(journal, "update.json"), map[string]any{"phase": "restored", "service": m.ServiceName, "at": time.Now().UTC()}, 0o600); journalErr != nil {
+			result = fmt.Errorf("update failed: %v; previous Agent restored but journal write failed: %w", result, journalErr)
+		}
+	}()
 	if err = hostops.AtomicWrite(m.Executable, data, 0o755); err != nil {
 		return err
 	}

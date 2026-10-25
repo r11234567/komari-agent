@@ -737,10 +737,10 @@ HELPER_STATE
                 host_backup="/var/lib/komari-host/$service_name/host.previous"
                 if [ -e "$host_backup" ] || [ -L "$host_backup" ]; then ensure_root_file "$host_backup"; fi
                 install -m 700 "$host_rollback" "$host_backup" || { rm -f -- "$host_stage"; exit 1; }
-                update_started=true
                 "$staging/komari-host" update --manifest "$installed_manifest" --artifact "$staging/komari-agent" --sha256 "$agent_digest" || exit 1
+                update_started=true
                 # The host binary is not resident in the daemon. Replace it only
-                # after the installed host has atomically updated the Agent.
+                # after the target Host has atomically updated the Agent.
                 mv -fT -- "$host_stage" "$host_path" || { rm -f -- "$host_stage"; exit 1; }
             fi
             ;;
