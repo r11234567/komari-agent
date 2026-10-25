@@ -359,7 +359,11 @@ func validateActions(m *hostops.Manifest, p *hostops.Policy, t *hostops.Trust, r
 	}
 	settings := privileged.SettingsFromProto(r.Privileged)
 	if reasons := localCeilingViolations(p, settings, seen[2]); len(reasons) > 0 {
-		return fmt.Errorf("approved configuration exceeds protected local ceilings (%s): %s", m.HostPolicyFile, strings.Join(reasons, "; "))
+		policyFile := "selected installation policy"
+		if m != nil && m.HostPolicyFile != "" {
+			policyFile = m.HostPolicyFile
+		}
+		return fmt.Errorf("approved configuration exceeds protected local ceilings (%s): %s", policyFile, strings.Join(reasons, "; "))
 	}
 	if seen[2] && len(t.ReleaseKeys) == 0 {
 		return errors.New("pin an independently verified release signing key before installing rescue")
