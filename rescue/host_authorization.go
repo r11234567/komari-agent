@@ -58,7 +58,7 @@ func (h *Helper) checkAuthorization(parent context.Context) error {
 		return err
 	}
 	if !r.GetPrivileged().GetRescueHelperEnabled() || (r.State != configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_APPLYING && r.State != configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_DELIVERED && r.State != configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_AWAITING_AGENT) {
-		return errors.New("current signed rescue grant is withdrawn or not approved")
+		return fmt.Errorf("rescue idle: current signed revision=%d state=%s rescue_enabled=%t; waiting for an approved rescue configuration", r.Revision, r.State, r.GetPrivileged().GetRescueHelperEnabled())
 	}
 	h.authorized.Store(true)
 	return nil

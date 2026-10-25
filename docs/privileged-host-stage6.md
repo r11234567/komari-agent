@@ -39,8 +39,8 @@ server change or hand-editing of JSON is required. The release of this historica
 restriction is recorded in the root-owned transaction and committed with the
 approved profile; rollback restores the previous restriction. Declining, failed
 authentication or changed approval leaves it intact. Explicit local denies and
-all other ceilings remain enforced, and rescue/ordinary remote control remain
-mutually exclusive. Ceiling errors identify the requested field and blocking
+all other ceilings remain enforced. Rescue and ordinary remote control may be
+enabled together with independent authorization. Ceiling errors identify the requested field and blocking
 policy key instead of returning only a generic message.
 
 The root profile clears the non-root NoNewPrivileges/capability ceiling. The non-root profile uses the original service account, NoNewPrivileges and CAP_NET_RAW. The root-owned policy constrains daemon snapshots during the restart window. A host LOCAL_APPLIED receipt is not final completion: the daemon must load the revision, independently observe its identity/helper and send its own immutable acknowledgement.
@@ -55,7 +55,7 @@ If an administrator restores after the panel already received the daemon ACK but
 
 ## On-demand rescue helper
 
-The helper is a separate root service, never a setuid daemon or a local arbitrary-command socket. Installing it does not elevate the ordinary daemon: a non-root Agent remains non-root unless the administrator separately selects a different Agent target identity. Save rescue-enabled settings with normal remote control disabled, confirm the revision with panel 2FA, then run the single command shown by the panel:
+The helper is a separate root service, never a setuid daemon or a local arbitrary-command socket. Installing it does not elevate the ordinary daemon: a non-root Agent remains non-root unless the administrator separately selects a different Agent target identity. Rescue and ordinary remote control can be enabled together; each keeps its own policy and signed authorization gates. Save the desired settings, confirm the revision with panel 2FA, then run the single command shown by the panel:
 
 ```sh
 sudo komari-host apply --manifest /etc/komari/services/SERVICE.json --revision N
@@ -67,7 +67,7 @@ No prior `--install-rescue`, `fetch-helper`, or `allow_rescue_helper=true` is re
 
 `fetch-helper --version EXACT_RELEASE_TAG` remains optional prefetch. Offline artifacts require both `--helper-artifact` and `--release-manifest`; they are independently verified, and starting an operation still requires an online currentness/lease check. Locally built Host binaries without an embedded release require these explicit artifacts. No fetched shell script is executed.
 
-The helper independently checks current signed authorization and signed rescue tasks. It withdraws authorization and cancels managed actions when the signed target revokes it or validation/connectivity fails. Root-owned fresh heartbeat, PID start ticks, kernel UID and systemd cgroup are checked separately for installed/running/authorized/lease-ready status. A non-root daemon is not required to readlink a root process's `/proc/PID/exe`. Uninstallation is a separately approved host action.
+The helper independently checks current signed authorization and signed rescue tasks. It withdraws authorization and cancels managed actions when the signed target revokes it or validation/connectivity fails. A pending/unapproved configuration or unavailable panel at startup keeps the installed service idle: its process and heartbeat remain available, but authorization/lease readiness are false and no rescue tasks are leased or executed. A genuinely valid signed approval restores readiness automatically. Root-owned fresh heartbeat, PID start ticks, kernel UID and systemd cgroup are checked separately for installed/running/authorized/lease-ready status. A non-root daemon is not required to readlink a root process's `/proc/PID/exe`. Uninstallation is a separately approved host action.
 
 The root helper creates and validates `/run/komari` on every startup, including legacy migrations and restarts after volatile `/run` is cleared. The directory is root-owned and mode 0755 so the ordinary Agent can read public heartbeat evidence. Existing symlinks, non-root ownership and writable directories are rejected rather than repaired. Initial heartbeat publication failure aborts startup with a specific error; recurring authorization or heartbeat errors are logged when they change. Host readiness timeout includes the last observation error. Real-systemd CI covers missing directories at first install and subsequent restart, unsafe paths, and retention of the ordinary Agent's non-root identity; runtime path metadata and public heartbeat evidence are retained with failure logs.
 

@@ -11,13 +11,15 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/komari-monitor/komari-agent/core/hostops"
+	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
 )
 
 // Called only inside the existing disposable real-systemd acceptance fixture.
 // Reuse its actual Agent, Host, rescue, pinned test publisher and panel.
-func exerciseInstalledRescueUpgrade(t *testing.T, m *hostops.Manifest, key ed25519.PrivateKey) {
+func exerciseInstalledRescueUpgrade(t *testing.T, m *hostops.Manifest, key ed25519.PrivateKey, panel *hostTestPanel) {
 	t.Helper()
 	stage := filepath.Join(filepath.Dir(m.HostTool), "upgrade-acceptance")
 	if err := ensureTrustedDir(stage); err != nil {
@@ -104,6 +106,70 @@ func exerciseInstalledRescueUpgrade(t *testing.T, m *hostops.Manifest, key ed255
 	unchanged(after)
 	if err := waitHelper(m); err != nil {
 		t.Fatal("previous real rescue did not recover after upgrade rollback:", err)
+	}
+	// A newer desired revision waiting for approval immediately withdraws work,
+	// including across process restart and upgrade. It is not an unhealthy ELF.
+	panel.mu.Lock()
+	panel.current.State = configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_NEEDS_CONFIRMATION
+	panel.current.UpdateSequence++
+	panel.mu.Unlock()
+	if err := restartReviewedService(helperUnit(m)); err != nil {
+		t.Fatal(err)
+	}
+	assertIdle := func() {
+		t.Helper()
+		panel.mu.Lock()
+		leases := panel.rescueLeases
+		panel.mu.Unlock()
+		if err := verifyUpgradeService(helperUnit(m), helperBinary(m)); err != nil {
+			t.Fatal("pending approval restarted or killed the installed helper:", err)
+		}
+		status, err := hostops.ReadHelperStatus(m)
+		if err != nil || status.Authorized || status.LeaseReady {
+			t.Fatalf("pending helper falsely advertises authorization/readiness: status=%+v error=%v", status, err)
+		}
+		panel.mu.Lock()
+		defer panel.mu.Unlock()
+		if panel.rescueLeases != leases {
+			t.Fatal("idle helper leased rescue work without approval")
+		}
+	}
+	assertIdle()
+	if err := hostops.AtomicWrite(filepath.Join(stage, "helper"), targets[2], 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := hostops.WriteJSON(metadata, testRelease(t, key, targets[2]), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(args, io.Discard); err != nil {
+		t.Fatal("pending approval must not block a signed software-only upgrade:", err)
+	}
+	assertIdle()
+	unchanged(after)
+	// Startup during a panel outage must also remain idle rather than prevent
+	// restoring software. No connectivity failure substitutes for approval.
+	panel.mu.Lock()
+	panel.failAuthorization = true
+	panel.mu.Unlock()
+	if err := restartReviewedService(helperUnit(m)); err != nil {
+		t.Fatal(err)
+	}
+	assertIdle()
+	panel.mu.Lock()
+	panel.failAuthorization = false
+	panel.current.State = configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_DELIVERED
+	panel.current.UpdateSequence++
+	panel.mu.Unlock()
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		status, err := hostops.ReadHelperStatus(m)
+		if err == nil && status.Authorized && status.LeaseReady {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if err := waitHelper(m); err != nil {
+		t.Fatal("helper did not regain readiness after genuine signed approval:", err)
 	}
 	t.Log("Real installed-rescue upgrade verified signatures, all three binaries, preserved authority/identity, and complete rollback after startup failure")
 }
