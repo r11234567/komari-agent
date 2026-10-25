@@ -55,6 +55,8 @@ func Run(args []string, out io.Writer) error {
 		return migrate(args[1:], out)
 	case "update":
 		return update(args[1:], out)
+	case "check-upgrade":
+		return checkUpgrade(args[1:], out)
 	case "upgrade-installed-rescue":
 		return upgradeInstalledRescue(args[1:], out)
 	default:

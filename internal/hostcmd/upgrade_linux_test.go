@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -146,6 +147,118 @@ func exerciseInstalledRescueUpgrade(t *testing.T, m *hostops.Manifest, key ed255
 	}
 	assertIdle()
 	unchanged(after)
+	// Isolated interrupted-upgrade fixtures reproduce each on-disk legacy
+	// Snapshot phase, with mixed installed versions and damaged live config.
+	// Only root-owned originals, not those mixed files, may be rollback input.
+	for _, phase := range []string{"prepared", "replacing", "restore_failed"} {
+		t.Run("pending software "+phase, func(t *testing.T) {
+			dir, err := os.MkdirTemp(journalDir(m), "upgrade-ci-interrupted-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			original := read()
+			for i := 0; i < 4; i++ {
+				if err := hostops.AtomicWrite(filepath.Join(dir, strconv.Itoa(i)), original[i], 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			state := softwareUpgrade{Phase: phase, Version: "isolated-interrupted-fixture", Manifest: m.ManifestPath, Paths: upgradePaths(m), Modes: []os.FileMode{0o755, 0o755, 0o755, 0o600}, Active: []bool{true, true}, At: time.Now().UTC()}
+			journal := filepath.Join(dir, "upgrade.json")
+			if err := hostops.WriteJSON(journal, state, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			priorJournal, err := os.ReadFile(journal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := systemctl("stop", helperUnit(m)); err != nil {
+				t.Fatal(err)
+			}
+			if err := hostops.AtomicWrite(m.Executable, before[0], 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := hostops.AtomicWrite(helperConfig(m), []byte("{isolated-interrupted-write"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			mixed := read()
+			if err := rejectPendingSoftwareUpgrade(m); err == nil {
+				t.Fatal("apply would ignore an interrupted software upgrade")
+			}
+			if err := Run([]string{"check-upgrade", "--manifest", m.ManifestPath}, io.Discard); err != nil {
+				t.Fatal("legacy pending upgrade not recognized:", err)
+			}
+			unchanged(mixed)
+			// A host authorization journal is never treated as software recovery.
+			hostJournal := filepath.Join(journalDir(m), "transaction.json")
+			if err := hostops.AtomicWrite(hostJournal, []byte("{\"isolated_pending_host_fixture\":true}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := Run(args, io.Discard); err == nil {
+				t.Fatal("software recovery crossed a pending host authorization transaction")
+			}
+			if err := Run([]string{"check-upgrade", "--manifest", m.ManifestPath}, io.Discard); err == nil {
+				t.Fatal("installer preflight ignored pending host transaction")
+			}
+			unchanged(mixed)
+			if err := os.Remove(hostJournal); err != nil {
+				t.Fatal(err)
+			}
+			// Incomplete backups and wrong publisher signatures cannot consume or
+			// rewrite a pending transaction, even if live files are already broken.
+			backup := filepath.Join(dir, "2")
+			if err := os.Rename(backup, backup+".held"); err != nil {
+				t.Fatal(err)
+			}
+			if err := Run(args, io.Discard); err == nil {
+				t.Fatal("recovery accepted missing protected backup")
+			}
+			unchanged(mixed)
+			if err := os.Rename(backup+".held", backup); err != nil {
+				t.Fatal(err)
+			}
+			invalid := testRelease(t, key, targets[2])
+			invalid.Signature[0] ^= 1
+			if err := hostops.WriteJSON(metadata, invalid, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := Run(args, io.Discard); err == nil {
+				t.Fatal("recovery accepted untrusted target")
+			}
+			unchanged(mixed)
+			gotJournal, err := os.ReadFile(journal)
+			if err != nil || !bytes.Equal(gotJournal, priorJournal) {
+				t.Fatal("failed preflight changed the original pending journal:", err)
+			}
+			if err := hostops.WriteJSON(metadata, testRelease(t, key, targets[2]), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := Run(args, io.Discard); err != nil {
+				t.Fatal("verified target could not recover legacy pending upgrade:", err)
+			}
+			unchanged(original)
+			assertIdle()
+			var completed softwareUpgrade
+			if err := hostops.ReadJSON(journal, &completed, true); err != nil {
+				t.Fatal(err)
+			}
+			if completed.Phase != "completed" || completed.PreviousAttempt == "" {
+				t.Fatal("successful recovery did not record completion and original attempt")
+			}
+			archived, err := os.ReadFile(filepath.Join(dir, completed.PreviousAttempt))
+			if err != nil || !bytes.Equal(archived, priorJournal) {
+				t.Fatal("original failed attempt was not retained exactly:", err)
+			}
+			for i := 0; i < 4; i++ {
+				data, err := os.ReadFile(filepath.Join(dir, strconv.Itoa(i)))
+				if err != nil || !bytes.Equal(data, original[i]) {
+					t.Fatal("recovery replaced original protected backups:", err)
+				}
+			}
+			if err := rejectPendingSoftwareUpgrade(m); err != nil {
+				t.Fatal("completed recovery still blocks apply:", err)
+			}
+		})
+	}
 	// Startup during a panel outage must also remain idle rather than prevent
 	// restoring software. No connectivity failure substitutes for approval.
 	panel.mu.Lock()

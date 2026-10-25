@@ -31,7 +31,7 @@ jobs:
         run: scripts/ci/test-approved-delivery.sh
       - name: Trusted installation and migration on disposable systemd runner
         run: scripts/ci/test-trusted-install.sh
-      - name: Real PAM, legacy reauthorization, systemd identities, helper lifecycle and recovery
+      - name: Real PAM, rescue coexistence, pending approval and interrupted upgrade recovery
         run: bash scripts/ci/test-host-transactions.sh
       - name: Cross-platform host tool compilation
         run: |
@@ -73,7 +73,7 @@ jobs:
         run: |
           go build -p=2 -o ci-artifacts/komari-host ./cmd/komari-host 2>&1 | tee ci-artifacts/installer-host-build.log
           go build -p=2 -o ci-artifacts/komari-agent . 2>&1 | tee ci-artifacts/installer-agent-build.log
-      - name: Install, coordinated rescue upgrade, signature failure, rollback and host preparation
+      - name: Install, pending-transaction preflight, signed rescue upgrade and rollback
         run: bash scripts/ci/test-installer-recovery.sh
       - uses: actions/upload-artifact@v4
         if: always()

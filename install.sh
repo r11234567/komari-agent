@@ -669,14 +669,15 @@ INSTALLED_PATHS
             host_path="${installed_paths[1]}"
             ensure_root_file "$agent_path"
             ensure_root_file "$host_path"
-            # Use the currently installed host to authorize the update. A
-            # target downgrade may have an older CLI and must never be trusted
-            # to mutate the current installation before compatibility is known.
+            # Both installed and staged tools must understand the protected
+            # installation. The staged target also checks pending transactions
+            # before any rollback copies, programs or services are changed.
             "$host_path" diagnose --manifest "$installed_manifest" || exit 1
             "$staging/komari-host" diagnose --manifest "$installed_manifest" > "$log_directory/target-host-readiness.log" || {
                 log_error "Target Host binary cannot read this installed manifest; refusing an incompatible upgrade/downgrade before changing files."
                 exit 1
             }
+            "$staging/komari-host" check-upgrade --manifest "$installed_manifest" || exit 1
             installed_policy="${installed_paths[2]}"
             ensure_root_file "$installed_policy"
             installed_helper=$(python3 - "$installed_policy" <<'HELPER_STATE'
@@ -737,7 +738,7 @@ HELPER_STATE
                 if [ -e "$host_backup" ] || [ -L "$host_backup" ]; then ensure_root_file "$host_backup"; fi
                 install -m 700 "$host_rollback" "$host_backup" || { rm -f -- "$host_stage"; exit 1; }
                 update_started=true
-                "$host_path" update --manifest "$installed_manifest" --artifact "$staging/komari-agent" --sha256 "$agent_digest" || exit 1
+                "$staging/komari-host" update --manifest "$installed_manifest" --artifact "$staging/komari-agent" --sha256 "$agent_digest" || exit 1
                 # The host binary is not resident in the daemon. Replace it only
                 # after the installed host has atomically updated the Agent.
                 mv -fT -- "$host_stage" "$host_path" || { rm -f -- "$host_stage"; exit 1; }

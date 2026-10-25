@@ -105,8 +105,18 @@ func update(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if _, err = hostops.ReadPolicy(m); err != nil {
+	p, err := hostops.ReadPolicy(m)
+	if err != nil {
 		return err
+	}
+	if err = noPendingHostTransaction(m); err != nil {
+		return err
+	}
+	if err = rejectPendingSoftwareUpgrade(m); err != nil {
+		return err
+	}
+	if p.HelperInstalled {
+		return errors.New("installed rescue requires upgrade-installed-rescue; Agent-only updates are refused")
 	}
 	if err = hostops.TrustedPath(m.Executable); err != nil {
 		return err

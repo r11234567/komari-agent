@@ -26,6 +26,17 @@ for path in glob.glob('/var/lib/komari-host/'+sys.argv[1]+'*/transaction.json'):
  except Exception as e: rows.append({'path':path,'error':str(e)})
 print(json.dumps(rows,indent=2))
 PY
+  sudo python3 - "$service" <<'PY' > ci-artifacts/software-upgrade-journals.json
+import glob,json,sys
+rows=[]
+# Only upgrade metadata; never the numbered program/configuration backups.
+for path in glob.glob('/var/lib/komari-host/'+sys.argv[1]+'/upgrade-*/*.json'):
+ try:
+  j=json.load(open(path))
+  rows.append(dict(path=path, **{k:j.get(k) for k in ['phase','version','manifest','paths','modes','active','at','previous_attempt']}))
+ except Exception as e: rows.append({'path':path,'error':str(e)})
+print(json.dumps(rows,indent=2))
+PY
   exit "$status"
 }
 trap collect EXIT

@@ -34,3 +34,7 @@ func fetchHelper([]string, io.Writer) error {
 func upgradeInstalledRescue([]string, io.Writer) error {
 	return errors.New("coordinated installed-rescue upgrades require Linux systemd")
 }
+
+func checkUpgrade([]string, io.Writer) error {
+	return errors.New("upgrade preflight requires Linux systemd")
+}
