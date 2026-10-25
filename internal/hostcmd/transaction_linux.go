@@ -44,24 +44,25 @@ type ownership struct {
 	Mode uint32 `json:"mode"`
 }
 type hostJournal struct {
-	Version            int          `json:"version"`
-	Manifest           string       `json:"manifest"`
-	ID                 string       `json:"operation_id"`
-	Phase              string       `json:"phase"`
-	Operator           string       `json:"operator"`
-	Revision           []byte       `json:"revision"`
-	Operation          []byte       `json:"operation"`
-	Receipt            []byte       `json:"receipt,omitempty"`
-	SupersededReceipts [][]byte     `json:"superseded_receipts,omitempty"`
-	Backups            []fileBackup `json:"backups"`
-	Ownership          []ownership  `json:"ownership"`
-	RecoveryOwnership  []ownership  `json:"recovery_ownership,omitempty"`
-	Error              string       `json:"error,omitempty"`
-	PreviousMode       int32        `json:"previous_mode"`
-	PreviousUID        int          `json:"previous_uid"`
-	PreviousHelper     bool         `json:"previous_helper"`
-	FenceStage         string       `json:"fence_stage,omitempty"`
-	dir                string
+	Version                    int          `json:"version"`
+	Manifest                   string       `json:"manifest"`
+	ID                         string       `json:"operation_id"`
+	Phase                      string       `json:"phase"`
+	Operator                   string       `json:"operator"`
+	Revision                   []byte       `json:"revision"`
+	Operation                  []byte       `json:"operation"`
+	Receipt                    []byte       `json:"receipt,omitempty"`
+	SupersededReceipts         [][]byte     `json:"superseded_receipts,omitempty"`
+	Backups                    []fileBackup `json:"backups"`
+	Ownership                  []ownership  `json:"ownership"`
+	RecoveryOwnership          []ownership  `json:"recovery_ownership,omitempty"`
+	Error                      string       `json:"error,omitempty"`
+	PreviousMode               int32        `json:"previous_mode"`
+	PreviousUID                int          `json:"previous_uid"`
+	PreviousHelper             bool         `json:"previous_helper"`
+	FenceStage                 string       `json:"fence_stage,omitempty"`
+	LegacyRemoteControlConsent bool         `json:"legacy_remote_control_consent,omitempty"`
+	dir                        string
 }
 
 // This journal schema is independent from the wire/installation protocol. Older
@@ -357,8 +358,12 @@ func validateActions(m *hostops.Manifest, p *hostops.Policy, t *hostops.Trust, r
 		return errors.New("identity action does not match actual source/target diff")
 	}
 	settings := privileged.SettingsFromProto(r.Privileged)
-	if settings.RemoteControlEnabled && (p.ForceDenyRemoteControl || !p.AllowRemoteControl) || settings.WebSSHEnabled && !p.AllowWebSSH || settings.ExecutionEnabled && !p.AllowExecution || settings.EnableGPU && !p.AllowGPU || settings.RescueHelperEnabled && (p.ForceDenyRescueHelper || !p.AllowRescueHelper && !seen[2]) {
-		return errors.New("approved configuration exceeds protected local ceilings")
+	if reasons := localCeilingViolations(p, settings, seen[2]); len(reasons) > 0 {
+		policyFile := "selected installation policy"
+		if m != nil && m.HostPolicyFile != "" {
+			policyFile = m.HostPolicyFile
+		}
+		return fmt.Errorf("approved configuration exceeds protected local ceilings (%s): %s", policyFile, strings.Join(reasons, "; "))
 	}
 	if seen[2] && len(t.ReleaseKeys) == 0 {
 		return errors.New("pin an independently verified release signing key before installing rescue")
@@ -439,7 +444,10 @@ func apply(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err = validateActions(m, p, t, r, o); err != nil {
+	// Preview only: no disk policy is relaxed before explicit consent, PAM,
+	// approval revalidation and a backed-up host transaction.
+	preview, reviewLegacyRemoteControl := legacyRemoteControlReview(p, r)
+	if err = validateActions(m, &preview, t, r, o); err != nil {
 		return err
 	}
 	previousUID := 0
@@ -491,6 +499,11 @@ func apply(args []string, out io.Writer) error {
 			fmt.Fprintf(out, "After authentication, Host will fetch and verify publisher-signed rescue release %s if it is not already cached.\n", ReleaseVersion)
 		}
 	}
+	if reviewLegacyRemoteControl {
+		if err = confirmLegacyRemoteControl(m.ServiceName, r.Revision); err != nil {
+			return err
+		}
+	}
 	operator, err := authenticate()
 	if err != nil {
 		return err
@@ -515,6 +528,7 @@ func apply(args []string, out io.Writer) error {
 	}
 	r = current
 	j := &hostJournal{Version: hostJournalVersion, Manifest: m.ManifestPath, ID: uuid.NewString(), Phase: "claiming", Operator: operator, PreviousMode: p.PrivilegeMode, PreviousUID: previousUID, PreviousHelper: p.HelperInstalled, dir: dir}
+	j.LegacyRemoteControlConsent = reviewLegacyRemoteControl
 	j.Revision, err = proto.Marshal(r)
 	if err != nil {
 		return err
@@ -623,6 +637,14 @@ func executeTransaction(ctx context.Context, m *hostops.Manifest, p *hostops.Pol
 	}
 	if op.Phase != 2 {
 		return errors.New("host operation is not applying")
+	}
+	if j.LegacyRemoteControlConsent {
+		preview, permitted := legacyRemoteControlReview(p, r)
+		if !permitted {
+			return errors.New("historical remote-control restriction changed after local consent")
+		}
+		*p = preview
+		p.DisableSource = "legacy-remote-control-reauthorized"
 	}
 	settings := privileged.SettingsFromProto(r.Privileged)
 	// Persist this boundary before changing any protected profile or starting

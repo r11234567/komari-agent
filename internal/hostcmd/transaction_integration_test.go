@@ -387,6 +387,25 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	if err = verifyService(service, uid, 2); err != nil {
 		t.Fatal(err)
 	}
+	// Isolated legacy-upgrade fixture: the same approved root task requests
+	// remote control, while migration preserved an unknown historical deny.
+	legacyPolicy, err := hostops.ReadPolicy(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyPolicy.ForceDenyRemoteControl = true
+	legacyPolicy.DisableSource = "legacy-unknown-preserve"
+	if err = hostops.WriteJSON(m.HostPolicyFile, legacyPolicy, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	panel.mu.Lock()
+	settings := privileged.SettingsFromProto(panel.current.Privileged)
+	settings.RemoteControlEnabled = true
+	panel.current.Privileged = settings.Proto()
+	panel.current.ConfigHash = privileged.Hash(settings)
+	panel.current.Authorization.ConfigHash = panel.current.ConfigHash
+	panel.mu.Unlock()
+	legacyConsentAnswer := "decline"
 	var interrupt <-chan struct{}
 	var lastRunOutput string
 	run := func(passwordInput string, args ...string) error {
@@ -414,10 +433,15 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 			defer close(done)
 			buf := make([]byte, 1024)
 			sent := false
+			consentSent := false
 			for {
 				n, e := terminal.Read(buf)
 				if n > 0 {
 					output.Write(buf[:n])
+					if !consentSent && strings.Contains(output.String(), "Legacy remote-control consent:") {
+						_, _ = terminal.Write([]byte(legacyConsentAnswer + "\n"))
+						consentSent = true
+					}
 					if !sent && strings.Contains(strings.ToLower(output.String()), "password:") {
 						_, _ = terminal.Write([]byte(passwordInput + "\n"))
 						sent = true
@@ -434,6 +458,10 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 		t.Log(lastRunOutput)
 		return err
 	}
+	if err = run(password, "apply", "--manifest", m.ManifestPath, "--revision", "2"); err == nil {
+		t.Fatal("declined local legacy consent executed a host task")
+	}
+	legacyConsentAnswer = "authorize " + service + " 2"
 	if err = run("deliberately-wrong", "apply", "--manifest", m.ManifestPath, "--revision", "2"); err == nil {
 		t.Fatal("root/sudo identity bypassed fresh PAM password")
 	}
@@ -443,11 +471,19 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	if claimed {
 		t.Fatal("failed local authentication claimed operation")
 	}
+	legacyPolicy, err = hostops.ReadPolicy(m)
+	if err != nil || !legacyPolicy.ForceDenyRemoteControl {
+		t.Fatal("declined consent or failed PAM changed the protected deny:", err)
+	}
 	if err = run(password, "apply", "--manifest", m.ManifestPath, "--revision", "2"); err != nil {
 		t.Fatal(err)
 	}
 	if err = verifyService(service, 0, 1); err != nil {
 		t.Fatal(err)
+	}
+	legacyPolicy, err = hostops.ReadPolicy(m)
+	if err != nil || legacyPolicy.ForceDenyRemoteControl || legacyPolicy.DisableSource != "legacy-remote-control-reauthorized" {
+		t.Fatal("approved, locally confirmed and PAM-authenticated task did not commit legacy consent:", err)
 	}
 	observed, err := observe(service)
 	if err != nil || observed.WorkingDirectory != filepath.Dir(m.CredentialsFile) {
@@ -624,6 +660,23 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 		t.Fatal(err)
 	}
 	failing := filepath.Join(filepath.Dir(profilePath(m)), "99-ci-startup-failure.conf")
+	legacyPolicy, err = hostops.ReadPolicy(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyPolicy.ForceDenyRemoteControl = true
+	legacyPolicy.DisableSource = "legacy-unknown-preserve"
+	if err = hostops.WriteJSON(m.HostPolicyFile, legacyPolicy, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	panel.mu.Lock()
+	settings = privileged.SettingsFromProto(panel.current.Privileged)
+	settings.RemoteControlEnabled = true
+	panel.current.Privileged = settings.Proto()
+	panel.current.ConfigHash = privileged.Hash(settings)
+	panel.current.Authorization.ConfigHash = panel.current.ConfigHash
+	panel.mu.Unlock()
+	legacyConsentAnswer = "authorize " + service + " 6"
 	if err = hostops.AtomicWrite(failing, []byte("[Service]\nExecStartPre=/bin/false\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -650,6 +703,10 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	bootstrapAfter, err := os.Stat(bootstrapPath(m))
 	if err != nil {
 		t.Fatal(err)
+	}
+	legacyPolicy, err = hostops.ReadPolicy(m)
+	if err != nil || !legacyPolicy.ForceDenyRemoteControl || legacyPolicy.DisableSource != "legacy-unknown-preserve" {
+		t.Fatal("failed transaction did not restore the pre-consent restriction:", err)
 	}
 	before, after := bootstrapBefore.Sys().(*syscall.Stat_t), bootstrapAfter.Sys().(*syscall.Stat_t)
 	if before.Uid != after.Uid || before.Gid != after.Gid || bootstrapBefore.Mode() != bootstrapAfter.Mode() {
