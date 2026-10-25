@@ -1,0 +1,55 @@
+name: Feature audit - agent
+on:
+  pull_request:
+  push:
+    branches: [main, 'ci/feature-audit-*']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: feature-audit-agent-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  files-and-runtime:
+    name: Agent / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    env:
+      GOMAXPROCS: '2'
+      GOMEMLIMIT: 3GiB
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Record protocol and tool versions
+        run: bash scripts/ci/run-audit-check.sh protocol bash -c 'go version; node scripts/ci/check-protocol.cjs --resolve-go'
+      - name: File operations, raw transfer, upload commit and cancellation
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh files bash scripts/ci/run-go-tests.sh ./files
+      - name: Client lifecycle, terminal, GPU and host capability regression
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh runtime bash scripts/ci/run-go-tests.sh ./clientcore ./terminal ./monitoring/... ./core/capability
+      - name: Compile complete agent
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh compile go build -trimpath -o ci-artifacts/agent-audit .
+      - name: Retain logs even if tests or compilation fail
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: feature-audit-agent-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 30

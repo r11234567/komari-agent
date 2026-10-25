@@ -37,7 +37,11 @@ jobs:
         with:
           script: |
             const { discoverRuns, REQUIRED } = require('./scripts/ci/release-gate.cjs');
-            const sha = context.payload.pull_request?.base.sha ?? context.sha;
+            // PRs may be stacked on an audit branch. Discovery is a main-run SDK
+            // contract check; release acceptance still uses the exact release SHA.
+            const sha = context.eventName === "pull_request"
+              ? (await github.rest.repos.getBranch({ ...context.repo, branch: "main" })).data.commit.sha
+              : context.sha;
             const observations = [];
             try {
               for (const workflow of REQUIRED) {

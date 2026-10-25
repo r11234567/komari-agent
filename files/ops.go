@@ -98,10 +98,67 @@ func statFile(path string) (json.RawMessage, error) {
 	return json.Marshal(info)
 }
 
+// Replacing a link would silently change its type, and replacing a special
+// file could lose device semantics. Require an explicit regular-file target.
+func replaceableFile(path string) (os.FileInfo, error) {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("cannot replace a non-regular file; choose its regular-file target explicitly")
+	}
+	return info, nil
+}
+
+func preserveReplacementMetadata(temporary string, existing os.FileInfo) error {
+	mode := fs.FileMode(0o644)
+	if existing != nil {
+		mode = existing.Mode() & (os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky)
+		uid, gid, _, _ := fileOwnership(existing)
+		if uid >= 0 && gid >= 0 {
+			if err := changeOwnership(temporary, uid, gid); err != nil {
+				return fmt.Errorf("cannot preserve file ownership: %w", err)
+			}
+		}
+	}
+	return os.Chmod(temporary, mode)
+}
+
 // createFile creates or truncates an empty regular file without carrying file
 // data through the RPC control channel. Non-empty replacements use the raw
 // upload stream and are finalized by upload_commit.
 func createFile(path string) (json.RawMessage, error) {
+	return createFileWithMode(path, "")
+}
+
+func createFileWithMode(path, modeValue string) (json.RawMessage, error) {
+	// Validate before creating directories or replacing existing contents.
+	hasMode := strings.TrimSpace(modeValue) != ""
+	var requestedMode fs.FileMode
+	if hasMode {
+		parsed, err := parseMode(modeValue)
+		if err != nil {
+			return nil, err
+		}
+		if parsed > 0o7777 {
+			return nil, fmt.Errorf("invalid octal mode: %s", modeValue)
+		}
+		requestedMode = fs.FileMode(parsed & 0o777)
+		// Go stores special permission flags separately from Unix octal bits.
+		if parsed&0o4000 != 0 {
+			requestedMode |= os.ModeSetuid
+		}
+		if parsed&0o2000 != 0 {
+			requestedMode |= os.ModeSetgid
+		}
+		if parsed&0o1000 != 0 {
+			requestedMode |= os.ModeSticky
+		}
+	}
 	path = resolveFilePath(path)
 	if path == string(filepath.Separator) || path == "." {
 		return nil, errors.New("file path is required")
@@ -110,13 +167,8 @@ func createFile(path string) (json.RawMessage, error) {
 	if err := os.MkdirAll(directory, 0o755); err != nil {
 		return nil, err
 	}
-	mode := fs.FileMode(0o644)
-	if info, err := os.Stat(path); err == nil {
-		if info.IsDir() {
-			return nil, errors.New("cannot replace a directory with a file")
-		}
-		mode = info.Mode().Perm()
-	} else if !os.IsNotExist(err) {
+	existing, err := replaceableFile(path)
+	if err != nil {
 		return nil, err
 	}
 	temporary, err := os.CreateTemp(directory, ".komari-empty-*")
@@ -131,8 +183,13 @@ func createFile(path string) (json.RawMessage, error) {
 			_ = os.Remove(temporaryName)
 		}
 	}()
-	if err := temporary.Chmod(mode); err != nil {
+	if err := preserveReplacementMetadata(temporaryName, existing); err != nil {
 		return nil, err
+	}
+	if hasMode {
+		if err := os.Chmod(temporaryName, requestedMode); err != nil {
+			return nil, err
+		}
 	}
 	if err := temporary.Close(); err != nil {
 		return nil, err
@@ -163,7 +220,7 @@ func mkdir(path, modeValue string) (json.RawMessage, error) {
 	return json.Marshal(map[string]any{"created": true})
 }
 
-func deletePath(path string) (json.RawMessage, error) {
+func deletePath(path string, recursive bool) (json.RawMessage, error) {
 	cleaned := resolveFilePath(path)
 	volume := filepath.VolumeName(cleaned)
 	volumeRoot := ""
@@ -176,13 +233,17 @@ func deletePath(path string) (json.RawMessage, error) {
 	if _, err := os.Lstat(cleaned); err != nil {
 		return nil, err
 	}
-	if err := os.RemoveAll(cleaned); err != nil {
+	remove := os.Remove
+	if recursive {
+		remove = os.RemoveAll
+	}
+	if err := remove(cleaned); err != nil {
 		return nil, err
 	}
 	return json.Marshal(map[string]any{"deleted": true})
 }
 
-func movePath(source, destination string) (json.RawMessage, error) {
+func movePath(source, destination string, overwrite bool) (json.RawMessage, error) {
 	source = resolveFilePath(source)
 	destination = resolveFilePath(destination)
 	if samePath(source, destination) {
@@ -191,10 +252,21 @@ func movePath(source, destination string) (json.RawMessage, error) {
 	if pathContains(source, destination) {
 		return nil, errors.New("cannot move a path into itself")
 	}
+	if !overwrite {
+		if _, err := os.Lstat(destination); err == nil {
+			return nil, fmt.Errorf("destination already exists: %s", destination)
+		} else if !os.IsNotExist(err) {
+			return nil, err
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
 		return nil, err
 	}
-	if err := os.Rename(source, destination); err != nil {
+	rename := replaceFile
+	if !overwrite {
+		rename = renameWithoutOverwrite
+	}
+	if err := rename(source, destination); err != nil {
 		if !isCrossDeviceRename(err) {
 			return nil, err
 		}
@@ -205,14 +277,14 @@ func movePath(source, destination string) (json.RawMessage, error) {
 			return nil, statErr
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			if copyErr := copySymlink(source, destination); copyErr != nil {
+			if copyErr := copySymlink(source, destination, overwrite); copyErr != nil {
 				return nil, copyErr
 			}
 		} else if info.IsDir() {
-			if copyErr := copyDirectory(source, destination); copyErr != nil {
+			if copyErr := copyDirectory(source, destination, overwrite); copyErr != nil {
 				return nil, copyErr
 			}
-		} else if copyErr := copyRegularFile(source, destination, info); copyErr != nil {
+		} else if copyErr := copyRegularFile(source, destination, info, overwrite); copyErr != nil {
 			return nil, copyErr
 		}
 		if removeErr := os.RemoveAll(source); removeErr != nil {
@@ -226,7 +298,7 @@ func isCrossDeviceRename(err error) bool {
 	return errors.Is(err, syscall.EXDEV) || errors.Is(err, syscall.Errno(17))
 }
 
-func copyPath(source, destination string) (json.RawMessage, error) {
+func copyPath(source, destination string, recursive, overwrite bool) (json.RawMessage, error) {
 	source = resolveFilePath(source)
 	destination = resolveFilePath(destination)
 	if samePath(source, destination) {
@@ -237,27 +309,33 @@ func copyPath(source, destination string) (json.RawMessage, error) {
 		return nil, err
 	}
 	if info.IsDir() {
+		if !recursive {
+			return nil, errors.New("recursive is required to copy a directory")
+		}
 		if pathContains(source, destination) {
 			return nil, errors.New("cannot copy a directory into itself")
 		}
-		if err := copyDirectory(source, destination); err != nil {
+		if err := copyDirectory(source, destination, overwrite); err != nil {
 			return nil, err
 		}
 		return json.Marshal(map[string]any{"copied": true})
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		if err := copySymlink(source, destination); err != nil {
+		if err := copySymlink(source, destination, overwrite); err != nil {
 			return nil, err
 		}
 		return json.Marshal(map[string]any{"copied": true})
 	}
-	if err := copyRegularFile(source, destination, info); err != nil {
+	if err := copyRegularFile(source, destination, info, overwrite); err != nil {
 		return nil, err
 	}
 	return json.Marshal(map[string]any{"copied": true})
 }
 
-func copyRegularFile(source, destination string, info os.FileInfo) error {
+func copyRegularFile(source, destination string, info os.FileInfo, overwrite bool) error {
+	if !info.Mode().IsRegular() {
+		return errors.New("only regular files can be copied")
+	}
 	input, err := os.Open(source)
 	if err != nil {
 		return err
@@ -266,26 +344,49 @@ func copyRegularFile(source, destination string, info os.FileInfo) error {
 	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
 		return err
 	}
-	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode().Perm())
+	if existing, err := os.Lstat(destination); err == nil {
+		if !overwrite {
+			return fmt.Errorf("destination already exists: %s", destination)
+		}
+		if !existing.Mode().IsRegular() {
+			return errors.New("cannot replace a non-regular destination with a file")
+		}
+		if os.SameFile(info, existing) {
+			return errors.New("source and destination are the same file")
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	output, err := os.CreateTemp(filepath.Dir(destination), ".komari-copy-*")
 	if err != nil {
 		return err
 	}
+	defer os.Remove(output.Name())
+	defer output.Close()
 	if _, err = io.Copy(output, input); err != nil {
-		_ = output.Close()
-		_ = os.Remove(destination)
+		return err
+	}
+	if err = output.Chmod(info.Mode().Perm()); err != nil {
+		return err
+	}
+	if err = output.Sync(); err != nil {
 		return err
 	}
 	if err = output.Close(); err != nil {
-		_ = os.Remove(destination)
 		return err
 	}
-	if err = os.Chmod(destination, info.Mode().Perm()); err != nil {
+	if err = os.Chtimes(output.Name(), info.ModTime(), info.ModTime()); err != nil {
 		return err
 	}
-	return os.Chtimes(destination, info.ModTime(), info.ModTime())
+	if !overwrite {
+		// Linking publishes the complete file without replacing a destination
+		// created after our check. Unsupported filesystems fail safely.
+		return os.Link(output.Name(), destination)
+	}
+	return replaceFile(output.Name(), destination)
 }
 
-func copySymlink(source, destination string) error {
+func copySymlink(source, destination string, overwrite bool) error {
 	target, err := os.Readlink(source)
 	if err != nil {
 		return err
@@ -294,6 +395,9 @@ func copySymlink(source, destination string) error {
 		return err
 	}
 	if existing, err := os.Lstat(destination); err == nil {
+		if !overwrite {
+			return fmt.Errorf("destination already exists: %s", destination)
+		}
 		if existing.IsDir() && existing.Mode()&os.ModeSymlink == 0 {
 			return errors.New("cannot replace destination directory with a symlink")
 		}
@@ -306,7 +410,15 @@ func copySymlink(source, destination string) error {
 	return os.Symlink(target, destination)
 }
 
-func copyDirectory(source, destination string) error {
+func copyDirectory(source, destination string, overwrite bool) error {
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		return err
+	}
+	if !overwrite {
+		if err := os.Mkdir(destination, 0o755); err != nil {
+			return err
+		}
+	}
 	return filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -324,9 +436,14 @@ func copyDirectory(source, destination string) error {
 			return err
 		}
 		if entry.Type()&os.ModeSymlink != 0 {
-			return copySymlink(path, target)
+			return copySymlink(path, target, overwrite)
 		}
 		if entry.IsDir() {
+			if existing, err := os.Lstat(target); err == nil && (!existing.IsDir() || existing.Mode()&os.ModeSymlink != 0) {
+				return errors.New("cannot copy a directory through a non-directory destination")
+			} else if err != nil && !os.IsNotExist(err) {
+				return err
+			}
 			if err := os.MkdirAll(target, info.Mode().Perm()); err != nil {
 				return err
 			}
@@ -335,7 +452,7 @@ func copyDirectory(source, destination string) error {
 			}
 			return os.Chtimes(target, info.ModTime(), info.ModTime())
 		}
-		return copyRegularFile(path, target, info)
+		return copyRegularFile(path, target, info, overwrite)
 	})
 }
 
@@ -627,16 +744,11 @@ func commitFileUpload(args map[string]interface{}) (json.RawMessage, error) {
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
 		return nil, err
 	}
-	if info, statErr := os.Stat(path); statErr == nil {
-		if info.IsDir() {
-			return nil, errors.New("cannot replace a directory with a file")
-		}
-		if err := os.Chmod(partPath, info.Mode().Perm()); err != nil {
-			return nil, err
-		}
-	} else if !os.IsNotExist(statErr) {
-		return nil, statErr
-	} else if err := os.Chmod(partPath, 0o644); err != nil {
+	existing, err := replaceableFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := preserveReplacementMetadata(partPath, existing); err != nil {
 		return nil, err
 	}
 	if err := replaceFile(partPath, path); err != nil {
