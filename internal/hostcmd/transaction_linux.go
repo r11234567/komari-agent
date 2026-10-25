@@ -403,6 +403,9 @@ func apply(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if err = rejectPendingSoftwareUpgrade(m); err != nil {
+		return err
+	}
 	p, err := hostops.ReadPolicy(m)
 	if err != nil {
 		return err

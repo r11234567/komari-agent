@@ -73,7 +73,7 @@ jobs:
         run: |
           go build -p=2 -o ci-artifacts/komari-host ./cmd/komari-host 2>&1 | tee ci-artifacts/installer-host-build.log
           go build -p=2 -o ci-artifacts/komari-agent . 2>&1 | tee ci-artifacts/installer-agent-build.log
-      - name: Install, update, downgrade rejection, rollback and full host preparation
+      - name: Install, coordinated rescue upgrade, signature failure, rollback and host preparation
         run: bash scripts/ci/test-installer-recovery.sh
       - uses: actions/upload-artifact@v4
         if: always()

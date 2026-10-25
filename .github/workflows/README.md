@@ -114,6 +114,10 @@ Binary release job:
 - Before publishing, requires the Agent, Host and individual SHA256 sidecars for
   every Linux installer target: `386`, `amd64`, `arm`, `arm64`, `loong64`.
   Missing files or mismatched checksums stop publication.
+- Linux rescue binaries and their checksums are required too. The existing
+  publisher signs each exact Snapshot helper with the reviewed release key.
+  Inventory validation verifies the signature, version, platform and binary hash
+  before any release is created. Missing signing configuration stops the build.
 - Generates `SHA256SUMS` and uses the verified file inventory as the actual
   `gh release create --prerelease` upload list. It includes existing
   `komari-agent-*` assets plus Linux `komari-host-*` binaries and sidecars, all
@@ -126,8 +130,9 @@ Binary release job:
 
 The Linux systemd installer can select a Snapshot with
 `--install-version Snapshot-yymmddhhMM`. Without that option it still uses the
-latest stable release. Snapshot assets do not include signed rescue-helper
-metadata required by `--install-rescue`.
+latest stable release. New Snapshots include signed Linux rescue-helper metadata
+for installation and coordinated upgrades of existing rescue services. Older
+unsigned Snapshots cannot be used to update an installed rescue service.
 
 Snapshot retention:
 

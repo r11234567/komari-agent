@@ -45,6 +45,21 @@ jobs:
             exit 1
           fi
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Validate the pinned rescue publisher signing key
+        env:
+          KOMARI_RELEASE_SIGNING_KEY: ${{ secrets.KOMARI_RELEASE_SIGNING_KEY }}
+          KOMARI_RELEASE_SIGNING_KEY_ID: ${{ vars.KOMARI_RELEASE_SIGNING_KEY_ID }}
+        run: bash scripts/ci/run-audit-check.sh snapshot-signing-preflight go run scripts/sign-helper-release.go --check
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: snapshot-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+
   prepare:
     needs: validate-ref
     runs-on: ubuntu-latest
@@ -96,6 +111,10 @@ jobs:
           CGO_ENABLED: 0
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
+          set -euo pipefail
+          mkdir -p ci-artifacts
+          exec > >(tee ci-artifacts/build.log) 2>&1
+          trap 'echo "$?" > ci-artifacts/build-exit.txt' EXIT
           BINARY_NAME=komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}
           if [ "${{ matrix.goos }}" = "windows" ]; then
             BINARY_NAME=${BINARY_NAME}.exe
@@ -113,7 +132,16 @@ jobs:
           go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/internal/hostcmd.ReleaseVersion=${VERSION}" -o "$HOST_BINARY_NAME" ./cmd/komari-host
           sha256sum "$BINARY_NAME" > "$BINARY_NAME.sha256"
           sha256sum "$HOST_BINARY_NAME" > "$HOST_BINARY_NAME.sha256"
+          sha256sum "$RESCUE_BINARY_NAME" > "$RESCUE_BINARY_NAME.sha256"
 
+      - name: Sign Linux rescue for the exact Snapshot release
+        if: matrix.goos == 'linux'
+        env:
+          KOMARI_RELEASE_SIGNING_KEY: ${{ secrets.KOMARI_RELEASE_SIGNING_KEY }}
+          KOMARI_RELEASE_SIGNING_KEY_ID: ${{ vars.KOMARI_RELEASE_SIGNING_KEY_ID }}
+          SNAPSHOT_VERSION: ${{ needs.prepare.outputs.version }}
+          SNAPSHOT_ARCH: ${{ matrix.goarch }}
+        run: bash scripts/ci/run-audit-check.sh snapshot-rescue-signing go run scripts/sign-helper-release.go "komari-agent-rescue-linux-$SNAPSHOT_ARCH" "$SNAPSHOT_VERSION" linux "$SNAPSHOT_ARCH"
 
       - name: Upload binary as artifact
         uses: actions/upload-artifact@v7
@@ -123,6 +151,13 @@ jobs:
             komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}*
             komari-agent-rescue-${{ matrix.goos }}-${{ matrix.goarch }}*
             komari-host-${{ matrix.goos }}-${{ matrix.goarch }}*
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: snapshot-build-logs-${{ matrix.goos }}-${{ matrix.goarch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
 
   publish-snapshot-release:
     needs: [prepare, build-and-attach-binaries]
@@ -160,8 +195,10 @@ jobs:
           merge-multiple: true
 
       - name: Verify Linux installer assets and generate publication inventory
+        env:
+          SNAPSHOT_VERSION: ${{ needs.prepare.outputs.version }}
         # This inventory is the input to this workflow's release upload below.
-        run: bash scripts/ci/run-audit-check.sh snapshot-prepare bash -c 'node scripts/ci/snapshot-assets.cjs artifacts > ci-artifacts/snapshot-assets.txt && cat ci-artifacts/snapshot-assets.txt'
+        run: bash scripts/ci/run-audit-check.sh snapshot-prepare bash -c 'node scripts/ci/snapshot-assets.cjs artifacts "$SNAPSHOT_VERSION" > ci-artifacts/snapshot-assets.txt && cat ci-artifacts/snapshot-assets.txt'
 
       - name: Create snapshot prerelease and upload binaries
         env:
