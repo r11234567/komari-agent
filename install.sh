@@ -491,6 +491,8 @@ if [ "$uninstall_only" != true ]; then
         if [ "$status" -ne 0 ]; then
             systemctl show "${service_name}.service" --property=ActiveState,SubState,Result,NRestarts > "$log_directory/service-status.log" 2>&1 || true
             journalctl -u "${service_name}.service" -n 120 --no-pager > "$log_directory/service-journal.log" 2>&1 || true
+            systemctl show "${service_name}-rescue.service" --property=ActiveState,SubState,Result,NRestarts > "$log_directory/rescue-status.log" 2>&1 || true
+            journalctl -u "${service_name}-rescue.service" -n 120 --no-pager > "$log_directory/rescue-journal.log" 2>&1 || true
             log_error "Installation failed (exit $status). Logs: $log_directory"
         else
             log_info "Installation log: $install_log"
@@ -604,6 +606,7 @@ if [ "$uninstall_only" != true ]; then
     ensure_root_dir /var/cache/komari-installer
     staging=$(mktemp -d /var/cache/komari-installer/download.XXXXXXXX) || exit 1
     agent_digest=""
+    host_digest=""
     for component in komari-agent komari-host; do
         asset="${component}-linux-${arch}"
         binary_path="${staging}/${component}"
@@ -615,6 +618,7 @@ if [ "$uninstall_only" != true ]; then
         [ "${actual%% *}" = "$expected" ] || { log_error "Checksum mismatch for $asset"; exit 1; }
         chmod 755 "$binary_path" || exit 1
         [ "$component" != komari-agent ] || agent_digest="$expected"
+        [ "$component" != komari-host ] || host_digest="$expected"
     done
     case "$install_mode" in
         fresh)
@@ -634,6 +638,10 @@ if [ "$uninstall_only" != true ]; then
             host_path="${target_dir}/komari-host"
             ;;
         migrate)
+            if systemctl cat "${service_name}-rescue.service" >/dev/null 2>&1; then
+                log_error "An existing legacy rescue service needs a reviewed migration; refusing to upgrade only its Agent."
+                exit 1
+            fi
             log_info "Migrating the existing service; preserving node files, service identity and local remote-control restrictions."
             "$staging/komari-host" migrate --service "$service_name" --legacy-disable preserve > "$log_directory/migration-preview.json" || exit 1
             prepare_service_directories "/usr/lib/komari/$service_name"
@@ -649,7 +657,7 @@ with open(sys.argv[1]) as f:
     m = json.load(f)
 if m.get('version') != 2 or m.get('service_name') != sys.argv[2]:
     raise SystemExit('Installed manifest version or service does not match')
-for field in ('executable', 'host_tool'):
+for field in ('executable', 'host_tool', 'host_policy_file'):
     path = m.get(field)
     if not isinstance(path, str) or not os.path.isabs(path) or any(c in path for c in '\x00\r\n'):
         raise SystemExit('Invalid installed binary path')
@@ -669,26 +677,71 @@ INSTALLED_PATHS
                 log_error "Target Host binary cannot read this installed manifest; refusing an incompatible upgrade/downgrade before changing files."
                 exit 1
             }
-            prepare_service_directories "$(dirname "$agent_path")"
-            # Prepare both rollback copies and the replacement Host before the
-            # Agent is touched. Keep recovery copies in the protected log dir.
-            agent_rollback="$log_directory/agent.previous"
-            host_rollback="$log_directory/host.previous"
-            install -m 700 "$agent_path" "$agent_rollback" || exit 1
-            install -m 700 "$host_path" "$host_rollback" || exit 1
-            host_stage=$(mktemp "$(dirname "$host_path")/.komari-host-update.XXXXXXXX") || exit 1
-            if ! cp "$staging/komari-host" "$host_stage" || ! chmod 755 "$host_stage"; then
-                rm -f -- "$host_stage"; exit 1
+            installed_policy="${installed_paths[2]}"
+            ensure_root_file "$installed_policy"
+            installed_helper=$(python3 - "$installed_policy" <<'HELPER_STATE'
+import json, sys
+with open(sys.argv[1]) as f:
+    policy = json.load(f)
+if not isinstance(policy.get('helper_installed'), bool):
+    raise SystemExit('Installed policy has no valid helper installation state')
+print('true' if policy['helper_installed'] else 'false')
+HELPER_STATE
+            ) || exit 1
+            helper_path="$(dirname "$host_path")/komari-agent-rescue"
+            helper_config="$(dirname "$host_path")/rescue.json"
+            helper_unit="/etc/systemd/system/${service_name}-rescue.service"
+            helper_found=false
+            for path in "$helper_path" "$helper_config" "$helper_unit"; do
+                if [ -e "$path" ] || [ -L "$path" ]; then helper_found=true; fi
+            done
+            if [ "$installed_helper" != true ] && { [ "$helper_found" = true ] || systemctl cat "${service_name}-rescue.service" >/dev/null 2>&1; }; then
+                log_error "Rescue files/service exist but the protected policy does not register them. Reconcile the installation before upgrading; no binaries were changed."
+                exit 1
             fi
-            ensure_root_dir "/var/lib/komari-host/$service_name"
-            host_backup="/var/lib/komari-host/$service_name/host.previous"
-            if [ -e "$host_backup" ] || [ -L "$host_backup" ]; then ensure_root_file "$host_backup"; fi
-            install -m 700 "$host_rollback" "$host_backup" || { rm -f -- "$host_stage"; exit 1; }
-            update_started=true
-            "$host_path" update --manifest "$installed_manifest" --artifact "$staging/komari-agent" --sha256 "$agent_digest" || exit 1
-            # The host binary is not resident in the daemon. Replace it only
-            # after the installed host has atomically updated the Agent.
-            mv -fT -- "$host_stage" "$host_path" || { rm -f -- "$host_stage"; exit 1; }
+            if [ "$installed_helper" = true ]; then
+                if [ "$register_only" = true ]; then
+                    log_error "Registration-only mode cannot coordinate an installed rescue upgrade; rerun without --install-register-only."
+                    exit 1
+                fi
+                for path in "$helper_path" "$helper_config" "$helper_unit"; do ensure_root_file "$path"; done
+                helper_asset="komari-agent-rescue-linux-${arch}"
+                log_info "Installed rescue detected. Staging $install_version and its publisher signature before changing any installed program."
+                curl -fsSL -o "$staging/komari-agent-rescue" "${release_base}/${release_path}/${helper_asset}" || exit 1
+                curl -fsSL -o "$staging/komari-agent-rescue.release.json" "${release_base}/${release_path}/${helper_asset}.release.json" || {
+                    log_error "Target release lacks signed rescue metadata; previous Agent, Host and rescue remain unchanged."
+                    exit 1
+                }
+                "$staging/komari-host" upgrade-installed-rescue --manifest "$installed_manifest" \
+                    --agent-artifact "$staging/komari-agent" --agent-sha256 "$agent_digest" \
+                    --host-artifact "$staging/komari-host" --host-sha256 "$host_digest" \
+                    --helper-artifact "$staging/komari-agent-rescue" \
+                    --release-manifest "$staging/komari-agent-rescue.release.json" --version "$install_version" || exit 1
+                rescue_upgrade_complete=true
+                # The coordinator holds the host operation lock, preserves both
+                # services' states, checks health and restores all three on error.
+            else
+                prepare_service_directories "$(dirname "$agent_path")"
+                # Prepare both rollback copies and the replacement Host before the
+                # Agent is touched. Keep recovery copies in the protected log dir.
+                agent_rollback="$log_directory/agent.previous"
+                host_rollback="$log_directory/host.previous"
+                install -m 700 "$agent_path" "$agent_rollback" || exit 1
+                install -m 700 "$host_path" "$host_rollback" || exit 1
+                host_stage=$(mktemp "$(dirname "$host_path")/.komari-host-update.XXXXXXXX") || exit 1
+                if ! cp "$staging/komari-host" "$host_stage" || ! chmod 755 "$host_stage"; then
+                    rm -f -- "$host_stage"; exit 1
+                fi
+                ensure_root_dir "/var/lib/komari-host/$service_name"
+                host_backup="/var/lib/komari-host/$service_name/host.previous"
+                if [ -e "$host_backup" ] || [ -L "$host_backup" ]; then ensure_root_file "$host_backup"; fi
+                install -m 700 "$host_rollback" "$host_backup" || { rm -f -- "$host_stage"; exit 1; }
+                update_started=true
+                "$host_path" update --manifest "$installed_manifest" --artifact "$staging/komari-agent" --sha256 "$agent_digest" || exit 1
+                # The host binary is not resident in the daemon. Replace it only
+                # after the installed host has atomically updated the Agent.
+                mv -fT -- "$host_stage" "$host_path" || { rm -f -- "$host_stage"; exit 1; }
+            fi
             ;;
     esac
     ensure_root_dir /usr/local/bin
@@ -876,7 +929,9 @@ ALLOW_HELPER
         else
             log_warning "Metrics-only mode: privileged host action preparation was explicitly skipped."
         fi
-        if [ "$service_was_active" = true ] || [ "$enrolled_now" = true ] || [ "$install_mode" = fresh ]; then
+        if [ "${rescue_upgrade_complete:-false}" = true ]; then
+            log_info "Agent and rescue restart/health checks completed by the coordinated upgrade."
+        elif [ "$service_was_active" = true ] || [ "$enrolled_now" = true ] || [ "$install_mode" = fresh ]; then
             systemctl reset-failed "${service_name}.service"
             systemctl restart "${service_name}.service"
             initial_restarts=$(systemctl show "${service_name}.service" --property=NRestarts --value)

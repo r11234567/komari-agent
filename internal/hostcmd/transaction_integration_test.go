@@ -602,6 +602,7 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	if err != nil || !status.LeaseReady || !status.Authorized {
 		t.Fatalf("helper not independently ready: %v", err)
 	}
+	exerciseInstalledRescueUpgrade(t, m, key)
 	if err = hostops.TrustedPath(heartbeatDir); err != nil {
 		t.Fatal(err)
 	}

@@ -27,7 +27,7 @@ cleanup() {
         sudo unlink /var/lib/komari
         sudo mv "$saved_parent" /var/lib/komari
     fi
-    for unit in "$service" "$pristine" "$legacy"; do
+    for unit in "$service" "$pristine" "$pristine-rescue" "$legacy"; do
         sudo systemctl show "$unit" --property=ActiveState,SubState,Result > "$log_dir/$unit-status.log" 2>&1 || true
         sudo journalctl -u "$unit" --no-pager > "$log_dir/$unit-journal.log" 2>&1 || true
         sudo namei -l "/usr/lib/komari/$unit/komari-agent" > "$log_dir/$unit-executable-permissions.log" 2>&1 || true
@@ -61,11 +61,17 @@ while [ "$#" -gt 0 ]; do
     case "$1" in -o) output="$2"; shift 2 ;; -*) shift ;; *) url="$1"; shift ;; esac
 done
 case "${url##*/}" in
+    komari-agent-rescue-linux-*) component=komari-agent-rescue ;;
     komari-agent-linux-*) component=komari-agent ;;
     komari-host-linux-*) component=komari-host ;;
     *) echo 'Unexpected fixture request' >&2; exit 1 ;;
 esac
 source="$KOMARI_INSTALLER_FIXTURE/$component"
+if [ "$component" = komari-agent-rescue ]; then
+    if [ "${KOMARI_INSTALLER_MISSING_RESCUE:-}" = true ]; then echo 'isolated fixture: rescue metadata unavailable' >&2; exit 22; fi
+    if [ "${KOMARI_INSTALLER_BAD_RESCUE:-}" = true ]; then source="$source-bad"; fi
+    if [[ "$url" = *.release.json ]]; then source="$source.release.json"; fi
+fi
 if [ "$component" = komari-agent ] && [ "${KOMARI_INSTALLER_BAD_BINARY:-}" = true ]; then
     source="$KOMARI_INSTALLER_FIXTURE/komari-agent-bad"
 fi
@@ -97,6 +103,8 @@ run_installer() {
         KOMARI_INSTALLER_BAD_BINARY="${bad_binary:-}" \
         KOMARI_INSTALLER_LIVE_BINARY="${live_binary:-}" \
         KOMARI_INSTALLER_HOST_VARIANT="${host_variant:-}" \
+        KOMARI_INSTALLER_MISSING_RESCUE="${missing_rescue:-}" \
+        KOMARI_INSTALLER_BAD_RESCUE="${bad_rescue:-}" \
         KOMARI_INSTALLER_REQUEST_LOG="$log_dir/release-requests.log" \
         bash "$root/install.sh" "${installer_flags[@]}" "$@"
 }
@@ -231,6 +239,102 @@ sudo sha256sum "/var/lib/komari/$pristine/credentials.json" \
     "/etc/komari/services/$pristine.json" "/etc/komari/services/$pristine.policy.json" \
     "/etc/systemd/system/$pristine.service" > "$log_dir/registered-before.sha256"
 echo 'PASS: promoted root service updated, credentials retained and full host prerequisites ready'
+
+# Isolated synthetic installed-rescue fixture. Real PAM, signed network tasks
+# and the actual rescue binary are covered by test-host-transactions.sh; this
+# fixture tests the real installer/coordinator against a stable ELF process.
+helper_path="/usr/lib/komari/$pristine/komari-agent-rescue"
+helper_config="/usr/lib/komari/$pristine/rescue.json"
+helper_unit="/etc/systemd/system/$pristine-rescue.service"
+sudo install -m 755 "$fixture/komari-agent-live" "$helper_path"
+sudo install -m 755 "$fixture/komari-agent-live" "$fixture/komari-agent-rescue"
+printf '\nsynthetic-target-rescue\n' | sudo tee -a "$fixture/komari-agent-rescue" >/dev/null
+sudo install -m 755 "$fixture/komari-agent-bad" "$fixture/komari-agent-rescue-bad"
+GOMAXPROCS=2 go build -p=2 -o "$log_dir/installer-rescue-fixtures" scripts/ci/installer-rescue-fixtures.go
+sudo env GITHUB_ACTIONS=true "$log_dir/installer-rescue-fixtures" "$fixture" "$pristine"
+sudo python3 - "$pristine" "$helper_config" <<'RESCUE_FIXTURE'
+import json, os, sys
+service, config = sys.argv[1:]
+registry = '/etc/komari/services/' + service
+with open(registry + '.policy.json') as f:
+    policy = json.load(f)
+policy.update(helper_installed=True, helper_authorized=True, allow_rescue_helper=True)
+with open(registry + '.policy.json', 'w') as f:
+    json.dump(policy, f)
+with open(config, 'w') as f:
+    json.dump({'HostManifest': registry + '.json', 'AgentID': '00000000-0000-4000-8000-000000000001',
+               'Endpoint': 'https://panel.invalid', 'Version': 'synthetic-previous',
+               'Action': {'ServiceName': service, 'AgentPath': '/usr/lib/komari/' + service + '/komari-agent'}}, f)
+os.chmod(config, 0o600)
+RESCUE_FIXTURE
+sudo tee "$helper_unit" >/dev/null <<UNIT
+[Service]
+User=root
+ExecStart=$helper_path --config $helper_config
+Restart=on-failure
+RestartSec=5
+UNIT
+sudo systemctl daemon-reload
+sudo systemctl start "$pristine-rescue.service"
+sudo systemctl start "$pristine.service"
+upgrade_files=("/usr/lib/komari/$pristine/komari-agent" "/usr/lib/komari/$pristine/komari-host" "$helper_path" "$helper_config")
+sudo sha256sum "${upgrade_files[@]}" > "$log_dir/rescue-before.sha256"
+original_helper_pid=$(sudo systemctl show "$pristine-rescue.service" --property=MainPID --value)
+missing_rescue=true
+KOMARI_INSTALLER_REGISTER_ONLY=false expect_rejected 'installed rescue has no matching target release' run_installer "$pristine" --install-metrics-only
+unset missing_rescue
+sudo sha256sum -c "$log_dir/rescue-before.sha256"
+test "$(sudo systemctl show "$pristine-rescue.service" --property=MainPID --value)" = "$original_helper_pid"
+
+sudo cp "$fixture/komari-agent-rescue.release.json" "$fixture/komari-agent-rescue.release.json.valid"
+sudo python3 - "$fixture/komari-agent-rescue.release.json" <<'BAD_SIGNATURE'
+import json, sys
+with open(sys.argv[1]) as f: metadata = json.load(f)
+metadata['signature'] = 'AQ=='
+with open(sys.argv[1], 'w') as f: json.dump(metadata, f)
+BAD_SIGNATURE
+KOMARI_INSTALLER_REGISTER_ONLY=false expect_rejected 'untrusted rescue publisher signature' run_installer "$pristine" --install-metrics-only
+sudo mv "$fixture/komari-agent-rescue.release.json.valid" "$fixture/komari-agent-rescue.release.json"
+sudo sha256sum -c "$log_dir/rescue-before.sha256"
+test "$(sudo systemctl show "$pristine-rescue.service" --property=MainPID --value)" = "$original_helper_pid"
+
+# A signed but unhealthy target must restore all three binaries and the helper
+# config, while returning both originally active services to their old programs.
+bad_rescue=true
+live_binary=true
+host_variant=changed
+KOMARI_INSTALLER_REGISTER_ONLY=false expect_rejected 'unhealthy rescue rolls back every installed component' run_installer "$pristine" --install-metrics-only
+unset bad_rescue
+sudo sha256sum -c "$log_dir/rescue-before.sha256"
+sudo systemctl is-active --quiet "$pristine.service"
+sudo systemctl is-active --quiet "$pristine-rescue.service"
+
+sudo sha256sum "/etc/komari/services/$pristine.policy.json" "/etc/komari/services/$pristine.trust.json" \
+    "/var/lib/komari/$pristine/credentials.json" "$helper_unit" > "$log_dir/rescue-state-before.sha256"
+KOMARI_INSTALLER_REGISTER_ONLY=false run_installer "$pristine" --install-metrics-only
+unset live_binary host_variant
+sudo cmp "$fixture/komari-agent-live" "/usr/lib/komari/$pristine/komari-agent"
+sudo cmp "$fixture/komari-host-changed" "/usr/lib/komari/$pristine/komari-host"
+sudo cmp "$fixture/komari-agent-rescue" "$helper_path"
+sudo sha256sum -c "$log_dir/rescue-state-before.sha256"
+sudo python3 - "$helper_config" <<'CHECK_RESCUE_VERSION'
+import json, sys
+assert json.load(open(sys.argv[1]))['Version'] == 'fixture'
+CHECK_RESCUE_VERSION
+sudo systemctl is-active --quiet "$pristine-rescue.service"
+echo 'PASS: installed rescue detected; unavailable release leaves all components intact; failed startup restores all components; signed upgrade preserves authorization and updates all programs'
+sudo systemctl stop "$pristine-rescue.service"
+live_binary=true
+host_variant=changed
+KOMARI_INSTALLER_REGISTER_ONLY=false run_installer "$pristine" --install-metrics-only
+unset live_binary host_variant
+if sudo systemctl is-active --quiet "$pristine-rescue.service"; then echo 'FAIL: upgrade started a previously stopped rescue service' >&2; exit 1; fi
+sudo systemctl stop "$pristine.service"
+# This fixture explicitly installed rescue above. Subsequent independent
+# installer cases must compare against that reviewed state, not its old policy.
+sudo sha256sum "/var/lib/komari/$pristine/credentials.json" \
+    "/etc/komari/services/$pristine.json" "/etc/komari/services/$pristine.policy.json" \
+    "/etc/systemd/system/$pristine.service" > "$log_dir/registered-before.sha256"
 
 # Reproduce migration of an active non-root legacy service under the
 # installer's umask 077, without precreating its destination binary directory.

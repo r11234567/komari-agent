@@ -1,5 +1,23 @@
 # 守护进程启动排查
 
+## Linux：升级已安装的 rescue
+
+安装器同时检查受保护 policy、rescue 程序、配置和 systemd 服务。已有 rescue
+时，会先下载同一版本的 Agent、Host、rescue 和发布者签名，在固定本机公钥下
+验证 rescue 的版本、平台和 SHA256，再持有主机操作锁整体替换。缺少签名或
+安装状态不一致时，在改动程序前退出，不会仅升级 Agent。
+
+升级不改变节点身份、凭据、权限策略、签名公钥或服务原来的启停状态。启动
+健康检查失败时，恢复三件程序及 rescue 配置，再验证原来运行的服务。备份和
+升级阶段保留在 `/var/lib/komari-host/SERVICE/upgrade-*`，目录仅 root 可读；
+失败日志同时包含 Agent 和 rescue 的 systemd 状态与 journal。断电或强制杀死
+升级留下未完成记录时，后续升级和 apply 会停止并指出受保护备份位置，要求
+先完成本机恢复。不要把包含凭据的备份目录上传为 CI artifact。
+
+没有 rescue 的节点不会自动安装 rescue。存在 rescue 时不接受仅注册模式的
+升级；应移除 `--install-register-only`，让安装器协调两个服务的重启。旧的无
+签名 Snapshot、不能读取当前安装或没有协调升级入口的目标版本会被拒绝。
+
 ## 前台正常、服务退出
 
 先比较两处路径：`login` 输出的 `Credentials stored at ...`，以及服务参数的 `--credentials-file`。它们必须指向同一个文件，并且运行服务的账号必须能读取、更新它和它的父目录。
