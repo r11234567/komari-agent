@@ -40,7 +40,14 @@ func systemctl(args ...string) (string, error) {
 // counter. Normal Restart= policy and its rate limits remain configured.
 func restartReviewedService(service string) error {
 	if _, err := systemctl("reset-failed", service); err != nil {
-		return err
+		// systemd may garbage-collect a stopped, disabled rescue unit. In
+		// that case reset-failed says "not loaded" even though its unit file
+		// exists. Resolve it before restart; a genuinely missing/broken unit
+		// still fails, and restart remains responsible for startup errors.
+		state, loadErr := systemctl("show", service, "--property=LoadState", "--value")
+		if loadErr != nil || strings.TrimSpace(state) != "loaded" {
+			return err
+		}
 	}
 	_, err := systemctl("restart", service)
 	return err
