@@ -11,6 +11,52 @@ import (
 
 // These regressions exercise only isolated temporary files. They protect the
 // published operation flags and the existing file type from accidental loss.
+func TestAuditCreateHonorsExplicitMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission bits are not the Windows ACL model")
+	}
+	for _, existing := range []bool{false, true} {
+		t.Run(map[bool]string{false: "new", true: "existing"}[existing], func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "private.txt")
+			if existing {
+				if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			event := Execute(filev1.FileOperation_FILE_OPERATION_CREATE, map[string]any{"path": path, "mode": "0600"})
+			if !event.GetSuccess() {
+				t.Fatal(event.GetError())
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode().Perm() != 0o600 || info.Size() != 0 {
+				t.Fatalf("requested private empty file: mode=%o size=%d", info.Mode().Perm(), info.Size())
+			}
+		})
+	}
+}
+
+func TestAuditCreateInvalidModePreservesExistingFile(t *testing.T) {
+	for _, mode := range []string{"invalid", "10000"} {
+		t.Run(mode, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "keep.txt")
+			if err := os.WriteFile(path, []byte("keep contents"), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			event := Execute(filev1.FileOperation_FILE_OPERATION_CREATE, map[string]any{"path": path, "mode": mode})
+			contents, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if event.GetSuccess() || string(contents) != "keep contents" {
+				t.Fatalf("invalid mode must not truncate contents: success=%v error=%q contents=%q", event.GetSuccess(), event.GetError(), contents)
+			}
+		})
+	}
+}
+
 func TestAuditCopyWithoutOverwritePreservesDestination(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "source.txt")

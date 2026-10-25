@@ -132,6 +132,33 @@ func preserveReplacementMetadata(temporary string, existing os.FileInfo) error {
 // data through the RPC control channel. Non-empty replacements use the raw
 // upload stream and are finalized by upload_commit.
 func createFile(path string) (json.RawMessage, error) {
+	return createFileWithMode(path, "")
+}
+
+func createFileWithMode(path, modeValue string) (json.RawMessage, error) {
+	// Validate before creating directories or replacing existing contents.
+	hasMode := strings.TrimSpace(modeValue) != ""
+	var requestedMode fs.FileMode
+	if hasMode {
+		parsed, err := parseMode(modeValue)
+		if err != nil {
+			return nil, err
+		}
+		if parsed > 0o7777 {
+			return nil, fmt.Errorf("invalid octal mode: %s", modeValue)
+		}
+		requestedMode = fs.FileMode(parsed & 0o777)
+		// Go stores special permission flags separately from Unix octal bits.
+		if parsed&0o4000 != 0 {
+			requestedMode |= os.ModeSetuid
+		}
+		if parsed&0o2000 != 0 {
+			requestedMode |= os.ModeSetgid
+		}
+		if parsed&0o1000 != 0 {
+			requestedMode |= os.ModeSticky
+		}
+	}
 	path = resolveFilePath(path)
 	if path == string(filepath.Separator) || path == "." {
 		return nil, errors.New("file path is required")
@@ -158,6 +185,11 @@ func createFile(path string) (json.RawMessage, error) {
 	}()
 	if err := preserveReplacementMetadata(temporaryName, existing); err != nil {
 		return nil, err
+	}
+	if hasMode {
+		if err := os.Chmod(temporaryName, requestedMode); err != nil {
+			return nil, err
+		}
 	}
 	if err := temporary.Close(); err != nil {
 		return nil, err
