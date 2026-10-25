@@ -111,8 +111,23 @@ Binary release job:
 
 - Builds the same OS/architecture matrix as the normal release workflow.
 - Uploads all binaries as workflow artifacts.
-- Creates a GitHub release with `--prerelease`.
-- Uploads all `komari-agent-*` artifacts to that prerelease.
+- Before publishing, requires the Agent, Host and individual SHA256 sidecars for
+  every Linux installer target: `386`, `amd64`, `arm`, `arm64`, `loong64`.
+  Missing files or mismatched checksums stop publication.
+- Generates `SHA256SUMS` and uses the verified file inventory as the actual
+  `gh release create --prerelease` upload list. It includes existing
+  `komari-agent-*` assets plus Linux `komari-host-*` binaries and sidecars, all
+  built from the same commit with the same Snapshot version.
+- Keeps the inventory, checksum and publication logs, including failures, as
+  Actions artifacts for 30 days.
+- Asset regression tests run in the existing Linux `feature-audit.yml` job.
+  Snapshot binaries are built and published only through this `snapshot.yml`
+  flow; there is no separate attachment repair workflow.
+
+The Linux systemd installer can select a Snapshot with
+`--install-version Snapshot-yymmddhhMM`. Without that option it still uses the
+latest stable release. Snapshot assets do not include signed rescue-helper
+metadata required by `--install-rescue`.
 
 Snapshot retention:
 
