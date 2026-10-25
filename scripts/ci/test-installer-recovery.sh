@@ -191,6 +191,22 @@ printf '\ninstaller-fixture-target-host\n' >> "$log_dir/komari-host-changed"
 sudo install -m 755 "$log_dir/komari-host-changed" "$fixture/komari-host-changed"
 sudo systemctl start "$pristine.service"
 sudo systemctl is-active --quiet "$pristine.service"
+# Isolated target-command refusal after the initial preflight. It must not
+# trigger shell rollback or restart a service whose files were never changed.
+cat > "$log_dir/komari-host-refuse" <<'REFUSE'
+#!/bin/sh
+if [ "$1" = update ]; then echo 'isolated fixture: transaction preflight refused update' >&2; exit 42; fi
+exec "$KOMARI_INSTALLER_FIXTURE/komari-host" "$@"
+REFUSE
+sudo install -m 755 "$log_dir/komari-host-refuse" "$fixture/komari-host-refuse"
+before_refusal_pid=$(sudo systemctl show "$pristine.service" --property=MainPID --value)
+sudo stat -c '%i %n' "/usr/lib/komari/$pristine/komari-agent" "/usr/lib/komari/$pristine/komari-host" > "$log_dir/refusal-before-inodes.log"
+host_variant=refuse
+KOMARI_INSTALLER_REGISTER_ONLY=false expect_rejected 'target update refused without rollback side effects' run_installer "$pristine" --install-metrics-only
+unset host_variant
+test "$(sudo systemctl show "$pristine.service" --property=MainPID --value)" = "$before_refusal_pid"
+sudo stat -c '%i %n' "/usr/lib/komari/$pristine/komari-agent" "/usr/lib/komari/$pristine/komari-host" > "$log_dir/refusal-after-inodes.log"
+cmp "$log_dir/refusal-before-inodes.log" "$log_dir/refusal-after-inodes.log"
 sudo sha256sum "/usr/lib/komari/$pristine/komari-agent" "/usr/lib/komari/$pristine/komari-host" > "$log_dir/rollback-before.sha256"
 bad_binary=true
 host_variant=changed

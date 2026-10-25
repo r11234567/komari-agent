@@ -435,10 +435,10 @@ if [ "$uninstall_only" != true ]; then
         local status=$?
         trap - EXIT
         set +e
+        [ -z "${host_stage:-}" ] || rm -f -- "$host_stage"
         if [ "$status" -ne 0 ] && [ "${update_started:-false}" = true ]; then
             log_error "Update did not complete; restoring the previous Agent and Host binaries."
             rollback_ok=true
-            [ -z "${host_stage:-}" ] || rm -f -- "$host_stage"
             if [ -n "${agent_rollback:-}" ] && [ -f "$agent_rollback" ]; then
                 rollback_stage=$(mktemp "$(dirname "$agent_path")/.komari-agent-rollback.XXXXXXXX") || {
                     rollback_ok=false
