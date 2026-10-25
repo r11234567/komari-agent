@@ -20,13 +20,24 @@ jobs:
       - name: Build isolated worker test binary
         if: ${{ !cancelled() }}
         run: bash scripts/ci/run-audit-check.sh build-worker go test -c -o /tmp/komari-workspace-worker.test ./files
+      - name: Build selected-account PTY checkpoint
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh build-terminal go test -c -o /tmp/komari-workspace-terminal.test ./terminal
       - name: Real root-to-nonroot permissions on a disposable hosted runner
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          sudo useradd --create-home --shell /bin/sh komari-workspace-ci
+          sudo useradd --create-home --shell /bin/bash komari-workspace-ci
           chmod 755 /tmp/komari-workspace-worker.test
           bash scripts/ci/run-audit-check.sh real-uid sudo env KOMARI_IDENTITY_TEST_USER=komari-workspace-ci /tmp/komari-workspace-worker.test -test.v -test.run '^TestWorker(RealOSPermissionsAndScope|TransfersPreserveUploadStateAndOSAccount)$'
+      - name: Real selected-account login profile, prompt, home and secret isolation
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' 'echo WORKSPACE_LOGIN_PROFILE_LOADED' 'PS1="\u@\h:\w\$ "' | sudo tee /home/komari-workspace-ci/.bash_profile > /dev/null
+          sudo chown komari-workspace-ci:komari-workspace-ci /home/komari-workspace-ci/.bash_profile
+          chmod 755 /tmp/komari-workspace-terminal.test
+          bash scripts/ci/run-audit-check.sh real-pty sudo env KOMARI_TERMINAL_TEST_USER=komari-workspace-ci /tmp/komari-workspace-terminal.test -test.v -test.run '^TestSelectedAccountInteractiveLoginPTY$'
       - uses: actions/upload-artifact@v4
         if: always()
         with:
