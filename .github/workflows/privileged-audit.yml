@@ -31,7 +31,7 @@ jobs:
         run: scripts/ci/test-approved-delivery.sh
       - name: Trusted installation and migration on disposable systemd runner
         run: scripts/ci/test-trusted-install.sh
-      - name: Real PAM, systemd identities, helper lifecycle and transaction recovery
+      - name: Real PAM, legacy reauthorization, systemd identities, helper lifecycle and recovery
         run: bash scripts/ci/test-host-transactions.sh
       - name: Cross-platform host tool compilation
         run: |
