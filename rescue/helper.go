@@ -202,13 +202,23 @@ func DefaultInstanceIDPath() string {
 }
 
 func (h *Helper) Run(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	if h.hostTrust != nil {
 		if err := hostops.PrepareHelperStatus(h.manifest); err != nil {
 			return fmt.Errorf("prepare rescue heartbeat directory: %w", err)
 		}
 		if err := h.checkAuthorization(ctx); err != nil {
-			return err
+			// Installation/process health is separate from permission to act.
+			// A pending/revoked revision or unavailable panel leaves this process
+			// alive, with no leases or actions, until authorization is valid again.
+			log.Printf("rescue authorization check failed at startup: %s", truncateError(err.Error()))
+			h.authorized.Store(false)
+			if err := CloseTemporarySSHAccess(ctx, h.action); err != nil {
+				return fmt.Errorf("close temporary SSH access while unauthorized: %w", err)
+			}
 		}
+		h.leaseReady.Store(h.authorized.Load())
 		if err := h.publishHostStatus(); err != nil {
 			return fmt.Errorf("publish initial rescue heartbeat: %w", err)
 		}
@@ -221,12 +231,20 @@ func (h *Helper) Run(ctx context.Context) error {
 	if err := ReconcileTemporarySSHAccess(ctx, h.action); err != nil {
 		log.Printf("reconcile temporary SSH access: %v", err)
 	}
-	if err := h.reportStatus(ctx, nil); err != nil {
-		return fmt.Errorf("report rescue helper status: %w", err)
+	if h.hostTrust == nil {
+		if err := h.reportStatus(ctx, nil); err != nil {
+			return fmt.Errorf("report rescue helper status: %w", err)
+		}
+		h.leaseReady.Store(true)
 	}
-	h.leaseReady.Store(true)
 	afterAssignmentID := ""
 	for {
+		if h.hostTrust != nil && !h.authorized.Load() {
+			if !wait(ctx, reconnectDelay) {
+				return nil
+			}
+			continue
+		}
 		// Reconciling once per lease bounds how long a lost timer can leave a
 		// window open to one lease interval, without any polling of its own.
 		if err := ReconcileTemporarySSHAccess(ctx, h.action); err != nil {
@@ -263,8 +281,14 @@ func (h *Helper) Run(ctx context.Context) error {
 }
 
 func (h *Helper) lease(parent context.Context, afterAssignmentID string) (*rescuev1.RescueAssignment, error) {
+	if h.hostTrust != nil && !h.authorized.Load() {
+		return nil, errors.New("rescue authorization is withdrawn or unverifiable")
+	}
 	ctx, cancel := context.WithTimeout(parent, leaseTimeout)
 	defer cancel()
+	if h.hostTrust != nil {
+		go h.cancelOnRevocation(ctx, cancel)
+	}
 	request := connect.NewRequest(&rescuev1.LeaseRescueSessionsRequest{
 		AgentId: h.agentID, HelperInstanceId: h.instanceID, AfterAssignmentId: afterAssignmentID,
 	})

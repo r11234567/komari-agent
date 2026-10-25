@@ -368,9 +368,9 @@ func validateActions(m *hostops.Manifest, p *hostops.Policy, t *hostops.Trust, r
 	if seen[2] && len(t.ReleaseKeys) == 0 {
 		return errors.New("pin an independently verified release signing key before installing rescue")
 	}
-	if settings.RescueHelperEnabled && settings.RemoteControlEnabled {
-		return errors.New("rescue and ordinary remote control must remain mutually exclusive")
-	}
+	// Rescue has its own root service, consent and signed action gates. It does
+	// not replace the ordinary daemon or constrain its independently approved
+	// remote-control settings.
 	if seen[2] != (settings.RescueHelperEnabled && !p.HelperInstalled) || seen[3] != (!settings.RescueHelperEnabled && p.HelperInstalled) {
 		return errors.New("helper actions do not match installed/desired state")
 	}

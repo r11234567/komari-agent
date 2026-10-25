@@ -70,6 +70,8 @@ type hostTestPanel struct {
 	failLocalACK      bool
 	loseDaemonACK     bool
 	hideCompletedRead bool
+	failAuthorization bool
+	rescueLeases      int
 	interruptProfile  chan struct{}
 }
 
@@ -97,7 +99,9 @@ func (s *hostTestPanel) set(service string, mode reportv1.PrivilegeMode, helper 
 	if s.current != nil {
 		rev = s.current.Revision + 1
 	}
-	settings := privileged.Settings{RequiredPrivilegeMode: mode, RescueHelperEnabled: helper}
+	// Production panel permits independently authorized ordinary remote control
+	// alongside its separate root rescue service.
+	settings := privileged.Settings{RequiredPrivilegeMode: mode, RescueHelperEnabled: helper, RemoteControlEnabled: helper, WebSSHEnabled: helper, ExecutionEnabled: helper}
 	var actions []hostv1.HostAction
 	if s.mode != mode {
 		actions = append(actions, 1)
@@ -134,7 +138,7 @@ func (s *hostTestPanel) NegotiateHostProtocol(_ context.Context, r *connect.Requ
 func (s *hostTestPanel) GetPrivilegedDelivery(context.Context, *connect.Request[configv1.GetPrivilegedDeliveryRequest]) (*connect.Response[configv1.GetPrivilegedDeliveryResponse], error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.hideCompletedRead && s.current.State == configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_DELIVERED {
+	if s.failAuthorization || (s.hideCompletedRead && s.current.State == configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_DELIVERED) {
 		return nil, connect.NewError(connect.CodeUnavailable, errors.New("fixture completed-read outage"))
 	}
 	return connect.NewResponse(&configv1.GetPrivilegedDeliveryResponse{Revision: s.revision()}), nil
@@ -267,6 +271,9 @@ func (s *hostTestPanel) ReportRescueStatus(context.Context, *connect.Request[res
 	return connect.NewResponse(&rescuev1.ReportRescueStatusResponse{Accepted: true}), nil
 }
 func (s *hostTestPanel) LeaseRescueSessions(ctx context.Context, _ *connect.Request[rescuev1.LeaseRescueSessionsRequest], stream *connect.ServerStream[rescuev1.LeaseRescueSessionsResponse]) error {
+	s.mu.Lock()
+	s.rescueLeases++
+	s.mu.Unlock()
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -602,7 +609,7 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	if err != nil || !status.LeaseReady || !status.Authorized {
 		t.Fatalf("helper not independently ready: %v", err)
 	}
-	exerciseInstalledRescueUpgrade(t, m, key)
+	exerciseInstalledRescueUpgrade(t, m, key, panel)
 	if err = hostops.TrustedPath(heartbeatDir); err != nil {
 		t.Fatal(err)
 	}
