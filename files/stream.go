@@ -54,6 +54,13 @@ type uploadStreamSpec struct {
 }
 
 func buildFileTransferURL(args map[string]interface{}) (string, error) {
+	if endpoint := argString(args, workerTransferURL); endpoint != "" {
+		base, err := url.Parse(endpoint)
+		if err != nil || base.Scheme != "http" || base.Hostname() != "127.0.0.1" || base.User != nil || base.RawQuery != "" || base.Fragment != "" {
+			return "", errors.New("invalid workspace transfer relay")
+		}
+		return base.String(), nil
+	}
 	id := strings.TrimSpace(argString(args, "transfer_id"))
 	token := strings.TrimSpace(argString(args, "transfer_token"))
 	if id == "" || token == "" {

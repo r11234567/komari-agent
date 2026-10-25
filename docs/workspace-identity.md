@@ -22,6 +22,11 @@ in-memory chunk state. Cancellation stops that workspace worker; concurrent
 operations in it may also need retrying. Idle workers are reclaimed. This does
 not add ACL/xattr/hard-link metadata preservation.
 
+For upload/download streams, a parent-owned loopback relay exposes only one
+fixed transfer to the worker and closes with that request. The parent keeps
+the long-lived Agent token, uses the existing authenticated data-plane route,
+and never sends its config or credential-bearing upstream URLs to the child.
+
 All tests/builds run on GitHub-hosted Actions. The focused identity checkpoint
 checks actual root-to-nonroot filesystem permissions, as well as race tests,
 without starting the complete panel or running E2E. Logs are always uploaded.

@@ -122,6 +122,26 @@ func (e *Executor) Execute(ctx context.Context, scope, username, requestID strin
 	if scope == "" || requestID == "" {
 		return failure(errors.New("a scoped workspace assignment is required"))
 	}
+	// Never accept a relay override from remote metadata, and never mutate a
+	// caller's map while sibling operations may still be using it.
+	workerArgs := make(map[string]any, len(args)+1)
+	for key, value := range args {
+		if key != workerTransferURL {
+			workerArgs[key] = value
+		}
+	}
+	name := operationName(operation)
+	if override := argString(workerArgs, "_op"); override != "" {
+		name = override
+	}
+	if name == "upload_stream" || name == "download_stream" {
+		endpoint, closeRelay, err := newWorkerTransferRelay(ctx, workerArgs)
+		if err != nil {
+			return failure(err)
+		}
+		defer closeRelay()
+		workerArgs[workerTransferURL] = endpoint
+	}
 	e.mu.Lock()
 	w := e.workers[scope]
 	if w != nil {
@@ -161,7 +181,7 @@ func (e *Executor) Execute(ctx context.Context, scope, username, requestID strin
 	w.mu.Unlock()
 	defer func() { w.mu.Lock(); delete(w.pending, requestID); w.lastUsed = time.Now(); w.mu.Unlock() }()
 	w.writeMu.Lock()
-	err := w.encoder.Encode(workerRequest{ID: requestID, Operation: operation, Args: args})
+	err := w.encoder.Encode(workerRequest{ID: requestID, Operation: operation, Args: workerArgs})
 	w.writeMu.Unlock()
 	if err != nil {
 		w.stop()
