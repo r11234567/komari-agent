@@ -55,11 +55,11 @@ func execute(operation string, args map[string]any) (json.RawMessage, error) {
 	case "mkdir":
 		return mkdir(argString(args, "path"), argString(args, "mode"))
 	case "delete":
-		return deletePath(argString(args, "path"))
+		return deletePath(argString(args, "path"), argBool(args, "recursive"))
 	case "move":
-		return movePath(argString(args, "source"), argString(args, "destination"))
+		return movePath(argString(args, "source"), argString(args, "destination"), argBool(args, "overwrite"))
 	case "copy":
-		return copyPath(argString(args, "source"), argString(args, "destination"))
+		return copyPath(argString(args, "source"), argString(args, "destination"), argBool(args, "recursive"), argBool(args, "overwrite"))
 	case "chmod":
 		return chmodPath(argString(args, "path"), argString(args, "mode"))
 	case "chown":

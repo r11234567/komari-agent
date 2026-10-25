@@ -77,7 +77,7 @@ func TestCopyDirectory(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(source, "nested", "note.txt"), []byte("copied"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := copyPath(source, destination); err != nil {
+	if _, err := copyPath(source, destination, true, false); err != nil {
 		t.Fatalf("copy directory: %v", err)
 	}
 	content, err := os.ReadFile(filepath.Join(destination, "nested", "note.txt"))
@@ -87,7 +87,7 @@ func TestCopyDirectory(t *testing.T) {
 	if string(content) != "copied" {
 		t.Fatalf("copied content = %q", content)
 	}
-	if _, err := copyPath(source, filepath.Join(source, "child")); err == nil {
+	if _, err := copyPath(source, filepath.Join(source, "child"), true, false); err == nil {
 		t.Fatal("copy into source directory was accepted")
 	}
 }
@@ -174,7 +174,7 @@ func mustRunFileOperation(t *testing.T, operation operation) json.RawMessage {
 
 func TestDeletePathRejectsFilesystemRoot(t *testing.T) {
 	root := filepath.VolumeName(filepath.Clean(os.TempDir())) + string(filepath.Separator)
-	if _, err := deletePath(root); err == nil {
+	if _, err := deletePath(root, true); err == nil {
 		t.Fatalf("deletePath(%q) did not reject filesystem root", root)
 	}
 }

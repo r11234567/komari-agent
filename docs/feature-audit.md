@@ -22,9 +22,9 @@ regressions use `t.TempDir()`. The browser harness mounts the real TerminalSessi
 component with an isolated synthetic transport; it is not a full production
 panel/Agent end-to-end acceptance test.
 
-The application source and protocol gitlinks stay at the synced revisions.
-These branches add verification only. Existing product defects may intentionally
-make the new regression cases fail until the application is repaired.
+The audit branch now includes repairs driven by CI and pinned upstream source
+comparisons. Protocol gitlinks remain unchanged. See
+[upstream-feature-audit.md](upstream-feature-audit.md) for provenance and limits.
 
 Agent checks run on Ubuntu and Windows. File controls, stream chunks, upload
 commit/cancel, client lifecycle, terminal and GPU collection regressions have

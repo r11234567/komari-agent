@@ -73,3 +73,38 @@ func TestAuditEmptySaveDoesNotReplaceSymlink(t *testing.T) {
 		t.Fatalf("saving via a symlink must preserve the link or reject the operation; save_error=%v mode=%v", saveErr, info.Mode())
 	}
 }
+
+func TestAuditMoveWithoutOverwritePreservesBothFiles(t *testing.T) {
+	root := t.TempDir()
+	source, destination := filepath.Join(root, "source"), filepath.Join(root, "destination")
+	for path, content := range map[string]string{source: "source", destination: "keep"} {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	event := Execute(filev1.FileOperation_FILE_OPERATION_MOVE, map[string]any{
+		"source": source, "destination": destination, "overwrite": false,
+	})
+	if event.GetSuccess() {
+		t.Fatal("move overwrote an existing file")
+	}
+	for path, expected := range map[string]string{source: "source", destination: "keep"} {
+		if content, err := os.ReadFile(path); err != nil || string(content) != expected {
+			t.Fatalf("move changed %s: content=%q error=%v", path, content, err)
+		}
+	}
+}
+
+func TestAuditCopyDirectoryRequiresRecursive(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	if err := os.Mkdir(source, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	event := Execute(filev1.FileOperation_FILE_OPERATION_COPY, map[string]any{
+		"source": source, "destination": filepath.Join(root, "copy"), "recursive": false,
+	})
+	if event.GetSuccess() {
+		t.Fatal("directory copy ignored recursive=false")
+	}
+}

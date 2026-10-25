@@ -113,11 +113,21 @@ func changeOwnership(path string, uid, gid int) error {
 }
 
 func replaceFile(source, destination string) error {
-	if err := os.Rename(source, destination); err == nil {
-		return nil
-	}
-	if err := os.Remove(destination); err != nil && !os.IsNotExist(err) {
+	return moveWindowsFile(source, destination, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
+}
+
+func renameWithoutOverwrite(source, destination string) error {
+	return moveWindowsFile(source, destination, windows.MOVEFILE_WRITE_THROUGH)
+}
+
+func moveWindowsFile(source, destination string, flags uint32) error {
+	from, err := windows.UTF16PtrFromString(source)
+	if err != nil {
 		return err
 	}
-	return os.Rename(source, destination)
+	to, err := windows.UTF16PtrFromString(destination)
+	if err != nil {
+		return err
+	}
+	return windows.MoveFileEx(from, to, flags)
 }
