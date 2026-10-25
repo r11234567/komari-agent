@@ -150,12 +150,12 @@ jobs:
       - name: Download all binaries
         uses: actions/download-artifact@v7
         with:
+          pattern: komari-agent-*
           path: artifacts
           merge-multiple: true
 
-      - name: Generate checksums
-        working-directory: artifacts
-        run: sha256sum komari-agent-* > SHA256SUMS
+      - name: Verify Linux installer assets and generate publication inventory
+        run: bash scripts/ci/run-audit-check.sh snapshot-prepare bash -c 'node scripts/ci/snapshot-assets.cjs artifacts > ci-artifacts/snapshot-assets.txt && cat ci-artifacts/snapshot-assets.txt'
 
       - name: Create snapshot prerelease and upload binaries
         env:
@@ -163,8 +163,10 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euxo pipefail
+          exec > >(tee ci-artifacts/snapshot-publish.log) 2>&1
+          trap 'echo "$?" > ci-artifacts/snapshot-publish-exit.txt' EXIT
           echo "Snapshot version: ${VERSION}"
-          ls -alR artifacts
+          mapfile -t release_assets < ci-artifacts/snapshot-assets.txt
 
           if gh release view "${VERSION}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
             echo "Release ${VERSION} already exists, deleting it before recreation..."
@@ -177,8 +179,7 @@ jobs:
             --title "${VERSION}" \
             --notes "Automated snapshot build (${VERSION}) from commit ${{ github.sha }}." \
             --prerelease \
-            artifacts/komari-agent-* \
-            artifacts/SHA256SUMS
+            "${release_assets[@]}"
 
           gh release list \
             --repo "${{ github.repository }}" \
@@ -194,6 +195,16 @@ jobs:
             gh release delete "${tag}" --repo "${{ github.repository }}" --cleanup-tag --yes
           done
         shell: bash
+
+      - name: Retain snapshot asset and checksum diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshot-publication-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ci-artifacts/
+            artifacts/SHA256SUMS
+          retention-days: 30
 
   build-and-push-docker:
     needs: [prepare, publish-snapshot-release]
