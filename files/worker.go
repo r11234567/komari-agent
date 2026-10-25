@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"sync"
@@ -57,9 +58,16 @@ func ServeWorker(input io.Reader, output io.Writer) error {
 }
 
 type Executor struct {
-	ctx     context.Context
-	mu      sync.Mutex
-	workers map[string]*fileWorker
+	ctx               context.Context
+	mu                sync.Mutex
+	workers           map[string]*fileWorker
+	authorizeTransfer func(http.Header)
+}
+
+type ExecutorOptions struct {
+	// Evaluated in the parent for each transfer, after token refreshes. The
+	// callback and its credentials are never sent to account workers.
+	AuthorizeTransfer func(http.Header)
 }
 type fileWorker struct {
 	username string
@@ -74,8 +82,11 @@ type fileWorker struct {
 	done     chan struct{}
 }
 
-func NewExecutor(ctx context.Context) *Executor {
+func NewExecutor(ctx context.Context, options ...ExecutorOptions) *Executor {
 	e := &Executor{ctx: ctx, workers: make(map[string]*fileWorker)}
+	if len(options) > 0 {
+		e.authorizeTransfer = options[0].AuthorizeTransfer
+	}
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
@@ -135,7 +146,7 @@ func (e *Executor) Execute(ctx context.Context, scope, username, requestID strin
 		name = override
 	}
 	if name == "upload_stream" || name == "download_stream" {
-		endpoint, closeRelay, err := newWorkerTransferRelay(ctx, workerArgs)
+		endpoint, closeRelay, err := newWorkerTransferRelay(ctx, workerArgs, e.authorizeTransfer)
 		if err != nil {
 			return failure(err)
 		}

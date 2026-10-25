@@ -102,7 +102,7 @@ func TestWorkerTransfersPreserveUploadStateAndOSAccount(t *testing.T) {
 		}
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("token") != "agent-token" {
+		if r.Header.Get("Authorization") != "Bearer agent-token" || r.URL.Query().Get("token") != "" {
 			t.Error("upstream Agent authentication missing")
 		}
 		switch r.URL.Path {

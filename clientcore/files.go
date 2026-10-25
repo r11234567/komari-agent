@@ -18,7 +18,7 @@ const (
 )
 
 func (c *Client) runFileOperations(ctx context.Context) {
-	executor := files.NewExecutor(ctx)
+	executor := files.NewExecutor(ctx, files.ExecutorOptions{AuthorizeTransfer: c.authorize})
 	defer executor.Close()
 	semaphore := make(chan struct{}, 4)
 	var retry retryPolicy

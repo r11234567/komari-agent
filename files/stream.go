@@ -81,9 +81,8 @@ func buildFileTransferURL(args map[string]interface{}) (string, error) {
 
 func fileStreamHTTPClient() *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	// The one-shot transfer endpoint is a plain HTTP/1.1 relay. Forcing
-	// HTTP/2 here would multiplex unrelated transfers over one connection and
-	// defeat the per-transfer backpressure the relay relies on.
+	// Account workers reach the one-shot parent relay over HTTP/1.1 loopback.
+	// The parent uses workspaceTransferHTTPClient for the configured upstream.
 	transport.ForceAttemptHTTP2 = false
 	return &http.Client{Transport: transport, Timeout: fileStreamHTTPTimeout}
 }

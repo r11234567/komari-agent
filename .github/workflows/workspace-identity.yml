@@ -15,7 +15,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: File relay HTTPS, HTTP2, refreshed credentials, streaming and cancellation
+        run: bash scripts/ci/run-audit-check.sh workspace-transfer bash scripts/ci/run-go-tests.sh -race -run 'Test(WorkerTransferRelay|WorkspaceTransferClient|TransferFailureReason)' ./files
       - name: Race regressions for identity, file workers and terminal
+        if: ${{ !cancelled() }}
         run: bash scripts/ci/run-audit-check.sh workspace-identity bash scripts/ci/run-go-tests.sh -race ./core/osidentity ./files ./terminal ./clientcore
       - name: Build isolated worker test binary
         if: ${{ !cancelled() }}
