@@ -31,6 +31,18 @@ sudo komari-host restore --manifest /etc/komari/services/SERVICE.json
 
 The host tool validates full signatures, agent/service binding, approval generation, hash, action set, nonce, expiry and signed operation lease. It stops the actual service, fences reviewed state roots onto fresh root-owned inodes, writes a canonical service profile, restarts it, and checks real PID/UID, capability bounding/effective sets and NoNewPrivileges. It preserves credentials, UUID, runtime revisions and the safe original working directory. Arbitrary environment overrides, unsafe state parents, nested state roots, links, mounts and special files require an explicit local migration rather than automatic conversion.
 
+An upgraded legacy installation may retain `force_deny_remote_control=true`
+with `disable_source=legacy-unknown-preserve`. When the current signed host task
+requests remote control, the normal `apply` command offers a local review:
+type `authorize SERVICE REVISION`, then complete fresh PAM authentication. No
+server change or hand-editing of JSON is required. The release of this historical
+restriction is recorded in the root-owned transaction and committed with the
+approved profile; rollback restores the previous restriction. Declining, failed
+authentication or changed approval leaves it intact. Explicit local denies and
+all other ceilings remain enforced, and rescue/ordinary remote control remain
+mutually exclusive. Ceiling errors identify the requested field and blocking
+policy key instead of returning only a generic message.
+
 The root profile clears the non-root NoNewPrivileges/capability ceiling. The non-root profile uses the original service account, NoNewPrivileges and CAP_NET_RAW. The root-owned policy constrains daemon snapshots during the restart window. A host LOCAL_APPLIED receipt is not final completion: the daemon must load the revision, independently observe its identity/helper and send its own immutable acknowledgement.
 
 `/var/lib/komari-host/SERVICE/transaction.json` (journal schema 3) records state before mutation. It includes backed-up contents and UID/GID/mode; copies and ownership restoration account for newly created state files. Starting restoration first records `restoring`, so interruption cannot re-enter a success path. Restore works locally without needing network connectivity; its recovery receipt is retried later with the same ID and bytes. Superseded success receipts remain in the protected journal for diagnosis. Successful/recovered journals and backups are archived as whole directories; they are not deleted.
