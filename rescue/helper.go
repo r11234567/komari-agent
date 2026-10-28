@@ -208,16 +208,13 @@ func (h *Helper) Run(ctx context.Context) error {
 		if err := hostops.PrepareHelperStatus(h.manifest); err != nil {
 			return fmt.Errorf("prepare rescue heartbeat directory: %w", err)
 		}
-		if err := h.checkAuthorization(ctx); err != nil {
-			// Installation/process health is separate from permission to act.
-			// A pending/revoked revision or unavailable panel leaves this process
-			// alive, with no leases or actions, until authorization is valid again.
-			log.Printf("rescue authorization check failed at startup: %s", truncateError(err.Error()))
-			h.authorized.Store(false)
-			if err := CloseTemporarySSHAccess(ctx, h.action); err != nil {
-				return fmt.Errorf("close temporary SSH access while unauthorized: %w", err)
-			}
+		// No authorization survives startup. The signed watch establishes a
+		// new bounded heartbeat before any lease or action can begin.
+		h.authorized.Store(false)
+		if err := CloseTemporarySSHAccess(ctx, h.action); err != nil {
+			return fmt.Errorf("close temporary SSH access while unauthorized: %w", err)
 		}
+
 		h.leaseReady.Store(h.authorized.Load())
 		if err := h.publishHostStatus(); err != nil {
 			return fmt.Errorf("publish initial rescue heartbeat: %w", err)

@@ -144,6 +144,10 @@ func (s *hostTestPanel) GetPrivilegedDelivery(context.Context, *connect.Request[
 	return connect.NewResponse(&configv1.GetPrivilegedDeliveryResponse{Revision: s.revision()}), nil
 }
 func (s *hostTestPanel) WatchPrivilegedDelivery(ctx context.Context, r *connect.Request[configv1.WatchPrivilegedDeliveryRequest], stream *connect.ServerStream[configv1.WatchPrivilegedDeliveryResponse]) error {
+	rescueWatch := r.Header().Get("X-Komari-Rescue-Watch") == "v1"
+	if rescueWatch {
+		stream.ResponseHeader().Set("X-Komari-Rescue-Watch", "v1")
+	}
 	seq := r.Msg.AfterSequence
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
@@ -153,9 +157,13 @@ func (s *hostTestPanel) WatchPrivilegedDelivery(ctx context.Context, r *connect.
 			return ctx.Err()
 		case <-ticker.C:
 			s.mu.Lock()
+			if rescueWatch && s.failAuthorization {
+				s.mu.Unlock()
+				return connect.NewError(connect.CodeUnavailable, errors.New("fixture authorization outage"))
+			}
 			current := s.revision()
 			s.mu.Unlock()
-			if current.UpdateSequence > seq {
+			if current.UpdateSequence > seq || rescueWatch {
 				if err := stream.Send(&configv1.WatchPrivilegedDeliveryResponse{Revision: current, UpdateSequence: current.UpdateSequence}); err != nil {
 					return err
 				}
