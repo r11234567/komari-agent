@@ -61,7 +61,7 @@ func TestRescueHeartbeatRejectsReplayDelayRegressionAndTampering(t *testing.T) {
 		t.Fatal("future heartbeat accepted")
 	}
 	tampered := sign(now.Add(time.Millisecond), 6)
-	tampered.Privileged.RescueHelperEnabled = false
+	tampered.Privileged.RescueHelperEnabled = proto.Bool(false)
 	if err := cursor.accept(trust, tampered, now); err == nil {
 		t.Fatal("tampered binding accepted")
 	}
