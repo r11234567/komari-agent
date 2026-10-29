@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 root=Path('ci-artifacts')
 required={
+ 'TestRescueHeartbeatJitterWindowUsesSignedTime',
  'TestCredentialRefreshPendingSurvivesReopenAndCommitFailure',
  'TestCredentialFileWatchAtomicRenameAndCancellation',
  'TestCredentialRefreshV2RejectsTamperingAndMissingProof',
@@ -20,7 +21,10 @@ assert not any(e.get('Action')=='skip' and e.get('Test') in required for e in ev
 name='TestCredentialHandoffPreservesFreshLeaseAndHonorsRevocation'
 log=(root/'credential-handoff.log').read_text()
 assert '--- PASS: '+name in log and '--- SKIP: '+name not in log and '--- FAIL:' not in log
+jitter_tests=['TestRescueAuthorizationJitterAndBoundedSilence','TestRescueAuthorizationDisconnectStillDeniesImmediately']
+for test in jitter_tests:
+ assert '--- PASS: '+test in log and '--- SKIP: '+test not in log, test
 for label in ('credential-agent','credential-handoff-build','credential-handoff'):
  assert (root/(label+'-exit-code.txt')).read_text().strip()=='0',label
-(root/'credential-agent-evidence.json').write_text(json.dumps({'unit_assertions':sorted(required),'protected_handoff':name},indent=2)+'\n')
+(root/'credential-agent-evidence.json').write_text(json.dumps({'unit_assertions':sorted(required),'protected_handoff':name,'jitter_boundaries':jitter_tests},indent=2)+'\n')
 print('Observed required tests:',sorted(required),name)
