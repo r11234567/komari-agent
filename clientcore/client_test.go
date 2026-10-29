@@ -366,12 +366,17 @@ func TestDPoP_AutoRefreshOn401(t *testing.T) {
 		RefreshTokenExpiresAt: time.Now().Add(30 * 24 * time.Hour),
 	}
 
+	panelPublic, panelPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialIdentity.ControlPlaneKeys = []credentials.PinnedKey{{Algorithm: 1, KeyID: "renewal-panel", Value: base64.StdEncoding.EncodeToString(panelPublic)}}
 	var submitAttempts int
 	var serverURL string
 	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/komari.enrollment.v1.EnrollmentService/RefreshCredentials":
-			// Mock refresh endpoint
+			// Return a real request-bound signed refresh result.
 			respMsg := &enrollmentv1.RefreshCredentialsResponse{
 				Credentials: &enrollmentv1.AgentCredentials{
 					AgentId:               "agent-refresh-1",
@@ -381,6 +386,7 @@ func TestDPoP_AutoRefreshOn401(t *testing.T) {
 					RefreshTokenExpiresAt: timestamppb.New(time.Now().Add(30 * 24 * time.Hour)),
 				},
 			}
+			signRenewalResponse(t, r, respMsg, panelPrivate)
 			out, _ := proto.Marshal(respMsg)
 			w.Header().Set("Content-Type", "application/proto")
 			w.WriteHeader(http.StatusOK)

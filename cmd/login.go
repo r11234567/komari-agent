@@ -153,12 +153,15 @@ a human to approve in the panel again. That is the point of an expiry.`,
 		ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Minute)
 		defer cancel()
 
-		renewed, err := client.Refresh(ctx, identity)
+		pending, err := store.BeginRefresh()
 		if err != nil {
 			return err
 		}
-		if err := store.UpdateCredentials(renewed.AgentID, renewed.AccessToken, renewed.AccessTokenExpiresAt,
-			renewed.RefreshToken, renewed.RefreshTokenExpiresAt, renewed.Scopes); err != nil {
+		renewed, err := client.Refresh(ctx, pending)
+		if err != nil {
+			return err
+		}
+		if err := store.CommitRefresh(pending, renewed); err != nil {
 			return err
 		}
 		fmt.Printf("Renewed credentials for agent %s\n", renewed.AgentID)
