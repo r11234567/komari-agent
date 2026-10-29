@@ -64,7 +64,7 @@ func jitterHelperFixture(t *testing.T) (*Helper, *jitterHeartbeatPanel, func(tim
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 	trust.Endpoint = server.URL
-	manifest := &hostops.Manifest{Version: 2, ServiceName: "jitter-ci-" + filepath.Base(root), HostPolicyFile: filepath.Join(root, "policy.json"), CredentialsFile: filepath.Join(root, "credentials.json")}
+	manifest := &hostops.Manifest{Version: 2, InitSystem: "systemd", ServiceName: "jitter-ci-" + filepath.Base(root), HostPolicyFile: filepath.Join(root, "policy.json"), CredentialsFile: filepath.Join(root, "credentials.json")}
 	policy := hostops.Policy{Version: 2, ServiceID: manifest.ServiceName, AllowRescueHelper: true, HelperInstalled: true, HelperAuthorized: true}
 	if err = hostops.WriteJSON(manifest.HostPolicyFile, policy, 0600); err != nil {
 		t.Fatal(err)
