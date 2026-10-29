@@ -23,6 +23,12 @@ func credentialRenewalDelay(identity credentials.Identity, now time.Time) time.D
 	if identity.AccessTokenExpiresAt.IsZero() {
 		return time.Hour
 	}
+	// At the fixed authorization horizon both tokens are capped to the same
+	// deadline. Renewing early cannot extend either token and would loop on
+	// successful rotations until expiry. Sleep to the boundary instead.
+	if !identity.RefreshTokenExpiresAt.IsZero() && !identity.RefreshTokenExpiresAt.After(identity.AccessTokenExpiresAt) {
+		return max(0, identity.RefreshTokenExpiresAt.Sub(now))
+	}
 	digest := sha256.Sum256([]byte(identity.AgentID))
 	jitter := time.Duration((uint16(digest[0])<<8|uint16(digest[1]))%60) * time.Second
 	return max(0, identity.AccessTokenExpiresAt.Add(-5*time.Minute-jitter).Sub(now))

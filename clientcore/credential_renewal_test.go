@@ -185,3 +185,41 @@ func TestCredentialRenewalPermanentRejectionDoesNotPoll(t *testing.T) {
 		t.Fatal("permanent rejection destroyed recoverable identity")
 	}
 }
+
+func TestCredentialRenewalFinalHorizonDoesNotPoll(t *testing.T) {
+	client, _, calls := renewalFixture(t)
+	id, _ := client.credentialStore.Identity()
+	now := time.Now()
+	id.AccessTokenExpiresAt = now.Add(2 * time.Minute)
+	id.RefreshTokenExpiresAt = id.AccessTokenExpiresAt
+	if err := client.credentialStore.Save(id); err != nil {
+		t.Fatal(err)
+	}
+	if delay := credentialRenewalDelay(id, now); delay != 2*time.Minute {
+		t.Fatalf("final authorization horizon must not renew early: %s", delay)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); client.runCredentialRenewal(ctx) }()
+	select {
+	case <-done:
+		t.Fatal("worker exited before authorization boundary")
+	case <-time.After(150 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("final-horizon timer ignored cancellation")
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("fixed-expiry success storm: %d exchanges", calls.Load())
+	}
+	if delay := credentialRenewalDelay(id, id.RefreshTokenExpiresAt); delay != 0 {
+		t.Fatalf("expired credentials must reach authoritative server rejection: %s", delay)
+	}
+	id.RefreshTokenExpiresAt = now.Add(24 * time.Hour)
+	if delay := credentialRenewalDelay(id, now); delay != 0 {
+		t.Fatalf("ordinary short-lived AT must still refresh early: %s", delay)
+	}
+}

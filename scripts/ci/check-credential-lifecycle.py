@@ -9,6 +9,7 @@ required={
  'TestCredentialRenewalTimerRefreshesBeforeExpiryAndCancels',
  'TestDPoP_AutoRefreshOn401',
  'TestCredentialRenewalPermanentRejectionDoesNotPoll',
+ 'TestCredentialRenewalFinalHorizonDoesNotPoll',
  'TestCredentialReauthUsesExistingKeyAtEnrollmentBoundary',
 }
 events=[json.loads(s) for s in (root/'credential-agent-go/tests.jsonl').read_text().splitlines() if s.strip()]
