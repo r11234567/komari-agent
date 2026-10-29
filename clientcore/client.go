@@ -77,23 +77,25 @@ type Client struct {
 	runtimeSyncMu     sync.Mutex
 	runtimeReconciled bool
 
-	config     configv1connect.ConfigServiceClient
-	privileged configv1connect.PrivilegedDeliveryServiceClient
-	events     agentv1connect.AgentEventServiceClient
-	report     reportv1connect.AgentReportServiceClient
-	metrics    metricsv1connect.MetricsServiceClient
-	network    networkv1connect.NetworkProbeServiceClient
-	execution  execv1connect.ExecutionServiceClient
-	webssh     websshv1connect.WebSSHServiceClient
-	files      filev1connect.FileServiceClient
-	endpoint   string
-	tokenMu    sync.RWMutex
-	token      string
-	refreshMu  sync.Mutex
-	agentMu    sync.RWMutex
-	agentID    string
-	sequence   atomic.Uint64
-	store      *runtimeconfig.Store
+	config         configv1connect.ConfigServiceClient
+	privileged     configv1connect.PrivilegedDeliveryServiceClient
+	events         agentv1connect.AgentEventServiceClient
+	report         reportv1connect.AgentReportServiceClient
+	metrics        metricsv1connect.MetricsServiceClient
+	network        networkv1connect.NetworkProbeServiceClient
+	execution      execv1connect.ExecutionServiceClient
+	webssh         websshv1connect.WebSSHServiceClient
+	files          filev1connect.FileServiceClient
+	endpoint       string
+	tokenMu        sync.RWMutex
+	token          string
+	refreshMu      sync.Mutex
+	refreshRetryAt time.Time
+	refreshLastErr error
+	agentMu        sync.RWMutex
+	agentID        string
+	sequence       atomic.Uint64
+	store          *runtimeconfig.Store
 	// privilegedStore is daemon-owned. Only a verified current v2 approval can
 	// activate a same-identity candidate; host actions remain unavailable.
 	privilegedStore *privileged.Store
@@ -154,7 +156,7 @@ func (c *Client) updateToken(token string) {
 	c.token = token
 }
 
-func (c *Client) refreshCredentials(ctx context.Context, oldToken string) error {
+func (c *Client) refreshCredentials(ctx context.Context, oldToken string) (resultErr error) {
 	c.refreshMu.Lock()
 	defer c.refreshMu.Unlock()
 
@@ -162,6 +164,22 @@ func (c *Client) refreshCredentials(ctx context.Context, oldToken string) error 
 		return nil
 	}
 
+	if c.refreshLastErr != nil && time.Now().Before(c.refreshRetryAt) {
+		return c.refreshLastErr
+	}
+	defer func() {
+		if resultErr == nil {
+			c.refreshLastErr = nil
+			c.refreshRetryAt = time.Time{}
+			return
+		}
+		delay := 5 * time.Second
+		if permanentCredentialRejection(resultErr) {
+			delay = 15 * time.Minute
+		}
+		c.refreshLastErr = resultErr
+		c.refreshRetryAt = time.Now().Add(delay)
+	}()
 	identity, ok := c.identity()
 	if !ok || strings.TrimSpace(identity.RefreshToken) == "" {
 		return errors.New("no refresh token available for credential refresh")

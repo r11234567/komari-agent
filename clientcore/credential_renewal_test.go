@@ -151,3 +151,37 @@ func TestCredentialRenewalTimerRefreshesBeforeExpiryAndCancels(t *testing.T) {
 		t.Fatalf("invalid proactive jitter: %s", delay)
 	}
 }
+
+func TestCredentialRenewalPermanentRejectionDoesNotPoll(t *testing.T) {
+	client, _, _ := renewalFixture(t)
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"code": "unauthenticated", "message": "administrator reapproval required"})
+	}))
+	defer server.Close()
+	client.endpoint = server.URL
+	done := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { defer close(done); client.runCredentialRenewal(ctx) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("permanent denial kept proactive renewal polling")
+	}
+	for range 10 {
+		if err := client.refreshCredentials(ctx, "synthetic-old-access"); !permanentCredentialRejection(err) {
+			t.Fatalf("cached denial lost its type: %v", err)
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("concurrent/reactive consumers repeated a permanent exchange: %d", calls.Load())
+	}
+	id, _ := client.credentialStore.Identity()
+	if id.AccessToken != "synthetic-old-access" || id.PendingRefresh == nil {
+		t.Fatal("permanent rejection destroyed recoverable identity")
+	}
+}

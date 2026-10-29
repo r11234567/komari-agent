@@ -141,10 +141,8 @@ a human to approve in the panel again. That is the point of an expiry.`,
 		if !ok {
 			return errors.New("this machine is not enrolled; run 'komari-agent login' first")
 		}
-		if identity.RefreshExpired(time.Now()) {
-			return fmt.Errorf("the sign-in for agent %s expired on %s\nrun 'komari-agent login --endpoint %s' to enroll again",
-				identity.AgentID, identity.RefreshTokenExpiresAt.Local().Format("2006-01-02"), identity.Endpoint)
-		}
+		// The server may have just approved an expired identity. Only its signed
+		// refresh response, not a stale local deadline, decides whether it can renew.
 
 		client, err := enrollment.New(identity.Endpoint, dnsresolver.GetHTTPClientWithPreference(30*time.Second, flags.PreferIPVersion))
 		if err != nil {
@@ -208,7 +206,13 @@ persisted configuration.`,
 			fmt.Println("Sign-in:         valid")
 		}
 		if !identity.RefreshTokenExpiresAt.IsZero() {
-			fmt.Printf("Valid until:     %s\n", identity.RefreshTokenExpiresAt.Local().Format("2006-01-02 15:04"))
+			fmt.Printf("RT idle expiry:  %s\n", identity.RefreshTokenExpiresAt.Local().Format("2006-01-02 15:04"))
+		}
+		if identity.Generation != nil {
+			fmt.Printf("Credential generation: %d\n", *identity.Generation)
+		}
+		if identity.PendingRefresh != nil {
+			fmt.Printf("Refresh recovery: pending since %s\n", identity.PendingRefresh.StartedAt.Local().Format("2006-01-02 15:04"))
 		}
 		fmt.Printf("Pinned keys:     %d\n", len(identity.ControlPlaneKeys))
 		return nil

@@ -89,7 +89,7 @@ func (c *Client) Endpoint() string { return c.endpoint }
 // process, so the credentials the server issues are bound to a key only this
 // machine holds.
 func (c *Client) Enroll(ctx context.Context, scopes []string, progress Progress) (credentials.Identity, error) {
-	return c.enroll(ctx, scopes, "", progress)
+	return c.enroll(ctx, scopes, nil, progress)
 }
 
 // Reauth re-authenticates an already-registered agent whose refresh token has
@@ -100,27 +100,38 @@ func (c *Client) Reauth(ctx context.Context, identity credentials.Identity, prog
 	if identity.AgentID == "" {
 		return identity, errors.New("no agent ID is stored; run komari-agent login")
 	}
-	next, err := c.enroll(ctx, identity.Scopes, identity.AgentID, progress)
+	next, err := c.enroll(ctx, identity.Scopes, &identity, progress)
 	if err != nil {
 		return identity, err
 	}
-	// Preserve the keypair and trust bundle: re-auth renews credentials, it
-	// does not replace identity.
-	next.PrivateKey = identity.PrivateKey
-	next.PublicKey = identity.PublicKey
-	next.KeyID = identity.KeyID
+	if next.AgentID != identity.AgentID {
+		return identity, errors.New("reapproval selected a different machine; bind to the original Agent ID")
+	}
+	// Reauth offered the existing public key, so returned credentials and the
+	// locally retained keypair have the same identity.
+
 	next.ControlPlaneKeys = identity.ControlPlaneKeys
 	next.PolicyAlgorithms = identity.PolicyAlgorithms
 	next.PolicyRequireAll = identity.PolicyRequireAll
 	next.PolicyMinimumSignatures = identity.PolicyMinimumSignatures
-	next.EnrolledAt = identity.EnrolledAt
 	return next, nil
 }
 
-func (c *Client) enroll(ctx context.Context, scopes []string, existingAgentID string, progress Progress) (credentials.Identity, error) {
+func (c *Client) enroll(ctx context.Context, scopes []string, existing *credentials.Identity, progress Progress) (credentials.Identity, error) {
 	publicKey, privateKey, keyID, err := credentials.GenerateKeypair()
 	if err != nil {
 		return credentials.Identity{}, err
+	}
+	if existing != nil {
+		private, err := existing.SigningKey()
+		if err != nil {
+			return credentials.Identity{}, err
+		}
+		expected, err := base64.StdEncoding.DecodeString(existing.PublicKey)
+		if err != nil || !bytes.Equal(private.Public().(ed25519.PublicKey), expected) {
+			return credentials.Identity{}, errors.New("stored enrollment keypair does not match")
+		}
+		publicKey, privateKey, keyID = existing.PublicKey, existing.PrivateKey, existing.KeyID
 	}
 	rawPublic, err := base64.StdEncoding.DecodeString(publicKey)
 	if err != nil {
@@ -136,8 +147,8 @@ func (c *Client) enroll(ctx context.Context, scopes []string, existingAgentID st
 		Device:          localDevice(),
 		RequestedScopes: scopes,
 	}
-	if existingAgentID != "" {
-		req.ExistingAgentId = &existingAgentID
+	if existing != nil {
+		req.ExistingAgentId = &existing.AgentID
 	}
 	begin, err := c.service.BeginEnrollment(ctx, connect.NewRequest(req))
 	if err != nil {

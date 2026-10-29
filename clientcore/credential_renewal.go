@@ -1,6 +1,7 @@
 package clientcore
 
 import (
+	"connectrpc.com/connect"
 	"context"
 	"crypto/sha256"
 	"log"
@@ -8,6 +9,11 @@ import (
 
 	"github.com/komari-monitor/komari-agent/core/credentials"
 )
+
+func permanentCredentialRejection(err error) bool {
+	code := connect.CodeOf(err)
+	return code == connect.CodeUnauthenticated || code == connect.CodePermissionDenied
+}
 
 // Stable per-machine jitter spreads renewal load without a polling loop.
 func credentialRenewalDelay(identity credentials.Identity, now time.Time) time.Duration {
@@ -53,6 +59,10 @@ func (c *Client) runCredentialRenewal(ctx context.Context) {
 			continue
 		}
 		if ctx.Err() != nil {
+			return
+		}
+		if permanentCredentialRejection(err) {
+			log.Printf("Credential renewal requires administrator reapproval or device reenrollment; proactive retries stopped: %v", err)
 			return
 		}
 		log.Printf("Proactive credential renewal failed; retrying in %s: %v", backoff, err)

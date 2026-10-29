@@ -8,6 +8,8 @@ required={
  'TestCredentialRenewalOneOwnerForConcurrentCallers',
  'TestCredentialRenewalTimerRefreshesBeforeExpiryAndCancels',
  'TestDPoP_AutoRefreshOn401',
+ 'TestCredentialRenewalPermanentRejectionDoesNotPoll',
+ 'TestCredentialReauthUsesExistingKeyAtEnrollmentBoundary',
 }
 events=[json.loads(s) for s in (root/'credential-agent-go/tests.jsonl').read_text().splitlines() if s.strip()]
 assert not any(e.get('Action')=='fail' for e in events), 'unit/package test failure'
