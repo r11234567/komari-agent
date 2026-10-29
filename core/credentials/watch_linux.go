@@ -45,9 +45,13 @@ func WatchChanges(ctx context.Context, path string) (<-chan struct{}, error) {
 			if err != nil {
 				return
 			}
-			relevant := false
+			relevant, invalidated := false, false
 			for offset := 0; offset+16 <= n; {
 				mask := binary.NativeEndian.Uint32(buffer[offset+4 : offset+8])
+				if mask&unix.IN_IGNORED != 0 {
+					relevant = true
+					invalidated = true
+				}
 				size := int(binary.NativeEndian.Uint32(buffer[offset+12 : offset+16]))
 				if offset+16+size > n {
 					relevant = true
@@ -64,6 +68,9 @@ func WatchChanges(ctx context.Context, path string) (<-chan struct{}, error) {
 				case changes <- struct{}{}:
 				default:
 				}
+			}
+			if invalidated {
+				return
 			}
 		}
 	}()

@@ -195,7 +195,11 @@ func (h *Helper) watchAuthorization(ctx context.Context) {
 
 	handoff := func() {
 		id, ok := readHostIdentity(h.manifest, h.hostTrust)
-		if !ok || id.AccessToken == connectedToken {
+		if !ok {
+			disconnect(time.Now(), errors.New("helper credentials unavailable"))
+			return
+		}
+		if id.AccessToken == connectedToken {
 			return
 		}
 		// Switch connections immediately while retaining only the last verified

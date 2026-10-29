@@ -133,6 +133,16 @@ func TestCredentialHandoffPreservesFreshLeaseAndHonorsRevocation(t *testing.T) {
 	if panel.requests.Load() != 2 {
 		t.Fatalf("expected exactly two streams, got %d", panel.requests.Load())
 	}
+
+	// Losing local identity must fail closed despite valid old network frames.
+	if err = os.Remove(manifest.CredentialsFile); err != nil {
+		t.Fatal(err)
+	}
+	wait(func() bool { return !helper.authorized.Load() }, time.Second)
+	if err = store.Save(id); err != nil {
+		t.Fatal(err)
+	}
+	wait(func() bool { return helper.authorized.Load() }, 3*time.Second)
 	policy.ForceDenyRescueHelper = true
 	if err = hostops.WriteJSON(manifest.HostPolicyFile, policy, 0600); err != nil {
 		t.Fatal(err)

@@ -269,9 +269,7 @@ func (c *Client) Refresh(ctx context.Context, identity credentials.Identity) (cr
 		next.RefreshToken = token
 		next.RefreshTokenExpiresAt = timeOrZero(issued.GetRefreshTokenExpiresAt())
 	}
-	if scopes := issued.GetScopes(); len(scopes) > 0 {
-		next.Scopes = scopes
-	}
+	next.Scopes = append([]string(nil), issued.GetScopes()...)
 	return next, nil
 }
 
