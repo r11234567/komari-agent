@@ -77,23 +77,25 @@ type Client struct {
 	runtimeSyncMu     sync.Mutex
 	runtimeReconciled bool
 
-	config     configv1connect.ConfigServiceClient
-	privileged configv1connect.PrivilegedDeliveryServiceClient
-	events     agentv1connect.AgentEventServiceClient
-	report     reportv1connect.AgentReportServiceClient
-	metrics    metricsv1connect.MetricsServiceClient
-	network    networkv1connect.NetworkProbeServiceClient
-	execution  execv1connect.ExecutionServiceClient
-	webssh     websshv1connect.WebSSHServiceClient
-	files      filev1connect.FileServiceClient
-	endpoint   string
-	tokenMu    sync.RWMutex
-	token      string
-	refreshMu  sync.Mutex
-	agentMu    sync.RWMutex
-	agentID    string
-	sequence   atomic.Uint64
-	store      *runtimeconfig.Store
+	config         configv1connect.ConfigServiceClient
+	privileged     configv1connect.PrivilegedDeliveryServiceClient
+	events         agentv1connect.AgentEventServiceClient
+	report         reportv1connect.AgentReportServiceClient
+	metrics        metricsv1connect.MetricsServiceClient
+	network        networkv1connect.NetworkProbeServiceClient
+	execution      execv1connect.ExecutionServiceClient
+	webssh         websshv1connect.WebSSHServiceClient
+	files          filev1connect.FileServiceClient
+	endpoint       string
+	tokenMu        sync.RWMutex
+	token          string
+	refreshMu      sync.Mutex
+	refreshRetryAt time.Time
+	refreshLastErr error
+	agentMu        sync.RWMutex
+	agentID        string
+	sequence       atomic.Uint64
+	store          *runtimeconfig.Store
 	// privilegedStore is daemon-owned. Only a verified current v2 approval can
 	// activate a same-identity candidate; host actions remain unavailable.
 	privilegedStore *privileged.Store
@@ -154,7 +156,7 @@ func (c *Client) updateToken(token string) {
 	c.token = token
 }
 
-func (c *Client) refreshCredentials(ctx context.Context, oldToken string) error {
+func (c *Client) refreshCredentials(ctx context.Context, oldToken string) (resultErr error) {
 	c.refreshMu.Lock()
 	defer c.refreshMu.Unlock()
 
@@ -162,6 +164,22 @@ func (c *Client) refreshCredentials(ctx context.Context, oldToken string) error 
 		return nil
 	}
 
+	if c.refreshLastErr != nil && time.Now().Before(c.refreshRetryAt) {
+		return c.refreshLastErr
+	}
+	defer func() {
+		if resultErr == nil {
+			c.refreshLastErr = nil
+			c.refreshRetryAt = time.Time{}
+			return
+		}
+		delay := 5 * time.Second
+		if permanentCredentialRejection(resultErr) {
+			delay = 15 * time.Minute
+		}
+		c.refreshLastErr = resultErr
+		c.refreshRetryAt = time.Now().Add(delay)
+	}()
 	identity, ok := c.identity()
 	if !ok || strings.TrimSpace(identity.RefreshToken) == "" {
 		return errors.New("no refresh token available for credential refresh")
@@ -177,12 +195,20 @@ func (c *Client) refreshCredentials(ctx context.Context, oldToken string) error 
 		return fmt.Errorf("create enrollment client: %w", err)
 	}
 
-	refreshed, err := enrollClient.Refresh(ctx, identity)
+	pending, err := c.credentialStore.BeginRefresh()
+	if err != nil {
+		return fmt.Errorf("persist pending refresh: %w", err)
+	}
+	pending.ControlPlaneKeys = identity.ControlPlaneKeys
+	pending.PolicyAlgorithms = identity.PolicyAlgorithms
+	pending.PolicyRequireAll = identity.PolicyRequireAll
+	pending.PolicyMinimumSignatures = identity.PolicyMinimumSignatures
+	refreshed, err := enrollClient.Refresh(ctx, pending)
 	if err != nil {
 		return fmt.Errorf("refresh credentials: %w", err)
 	}
 
-	if err := c.credentialStore.Save(refreshed); err != nil {
+	if err := c.credentialStore.CommitRefresh(pending, refreshed); err != nil {
 		return fmt.Errorf("save refreshed identity: %w", err)
 	}
 
@@ -335,6 +361,12 @@ func New(config *flags_pkg.Config, store *runtimeconfig.Store) (*Client, error) 
 }
 
 func (c *Client) Run(ctx context.Context) error {
+	// Renewal starts before configuration synchronization so an expired AT or
+	// startup backoff cannot postpone recovery. All paths share refreshMu.
+	renewalCtx, stopRenewal := context.WithCancel(ctx)
+	renewalDone := make(chan struct{})
+	go func() { defer close(renewalDone); c.runCredentialRenewal(renewalCtx) }()
+	defer func() { stopRenewal(); <-renewalDone }()
 	// Startup trust bundle self-healing: ensure control plane keys are pinned
 	_ = c.ensureTrustBundle(ctx)
 

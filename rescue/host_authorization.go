@@ -154,6 +154,11 @@ func (h *Helper) watchAuthorization(ctx context.Context) {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	defer os.Remove(hostops.HelperStatusPath(h.manifest))
+	changes, watchErr := credentials.WatchChanges(ctx, h.manifest.CredentialsFile)
+	if watchErr != nil {
+		log.Printf("credential file notification unavailable: %v", watchErr)
+	}
+	var connectedToken string
 	var frames chan authorizationFrame
 	var cancelStream context.CancelFunc
 	defer func() {
@@ -164,7 +169,7 @@ func (h *Helper) watchAuthorization(ctx context.Context) {
 		h.leaseReady.Store(false)
 	}()
 	var cursor heartbeatCursor
-	var lastFrame, nextRetry, lastLocal, lastPublish time.Time
+	var lastFrame, nextRetry, lastLocal, lastPublish, lastCredentialCheck time.Time
 	backoff := 500 * time.Millisecond
 	lastError := ""
 	deny := func(err error) {
@@ -187,11 +192,38 @@ func (h *Helper) watchAuthorization(ctx context.Context) {
 		nextRetry = now.Add(backoff)
 		backoff = min(30*time.Second, backoff*2)
 	}
+
+	handoff := func() {
+		id, ok := readHostIdentity(h.manifest, h.hostTrust)
+		if !ok {
+			disconnect(time.Now(), errors.New("helper credentials unavailable"))
+			return
+		}
+		if id.AccessToken == connectedToken {
+			return
+		}
+		// Switch connections immediately while retaining only the last verified
+		// heartbeat's original two-second freshness. No lease is extended here.
+		if cancelStream != nil {
+			cancelStream()
+			cancelStream = nil
+		}
+		frames = nil
+		nextRetry = time.Time{}
+		backoff = 500 * time.Millisecond
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			deny(ctx.Err())
 			return
+		case _, open := <-changes:
+			if !open {
+				changes = nil
+				continue
+			}
+			handoff()
 		case frame := <-frames:
 			now := time.Now()
 			if frame.err != nil {
@@ -225,6 +257,10 @@ func (h *Helper) watchAuthorization(ctx context.Context) {
 			}
 			backoff = 500 * time.Millisecond
 		case now := <-ticker.C:
+			if changes == nil && now.Sub(lastCredentialCheck) >= 5*time.Second {
+				lastCredentialCheck = now
+				handoff()
+			}
 			if frames == nil && !now.Before(nextRetry) {
 				id, ok := readHostIdentity(h.manifest, h.hostTrust)
 				if !ok {
@@ -233,13 +269,16 @@ func (h *Helper) watchAuthorization(ctx context.Context) {
 				}
 				streamCtx, cancel := context.WithTimeout(ctx, 25*time.Minute)
 				cancelStream = cancel
+				connectedToken = id.AccessToken
 				client := newAuthorizationWatchClient(id)
 				rpc := configconnect.NewPrivilegedDeliveryServiceClient(client, h.hostTrust.Endpoint, connect.WithReadMaxBytes(1<<20))
 				req := connect.NewRequest(&configv1.WatchPrivilegedDeliveryRequest{AgentId: id.AgentID, ProtocolVersion: 2})
 				h.authorize(req.Header())
 				req.Header().Set(authorizationWatchHeader, "v1")
 				frames = make(chan authorizationFrame, 1)
-				lastFrame = now
+				if lastFrame.IsZero() || !h.authorized.Load() {
+					lastFrame = now
+				}
 				go receiveAuthorization(streamCtx, rpc, req, frames)
 			}
 			if frames != nil && now.Sub(lastFrame) >= authorizationSilence {

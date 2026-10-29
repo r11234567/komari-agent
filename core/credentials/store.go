@@ -24,6 +24,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 const (
@@ -37,6 +39,11 @@ const (
 
 // Identity is the persisted enrollment. Field names are stable because this
 // file is read by a newer Agent after an upgrade.
+type RefreshAttempt struct {
+	RequestID string    `json:"request_id"`
+	StartedAt time.Time `json:"started_at"`
+}
+
 type Identity struct {
 	// Endpoint is the control plane this identity belongs to. It is recorded
 	// so an Agent pointed at a different panel does not silently present
@@ -50,11 +57,13 @@ type Identity struct {
 	PublicKey  string `json:"public_key"`
 	KeyID      string `json:"key_id"`
 
-	AccessToken           string    `json:"access_token"`
-	AccessTokenExpiresAt  time.Time `json:"access_token_expires_at"`
-	RefreshToken          string    `json:"refresh_token"`
-	RefreshTokenExpiresAt time.Time `json:"refresh_token_expires_at"`
-	Scopes                []string  `json:"scopes,omitempty"`
+	Generation            *uint64         `json:"credential_generation,omitempty"`
+	PendingRefresh        *RefreshAttempt `json:"pending_refresh,omitempty"`
+	AccessToken           string          `json:"access_token"`
+	AccessTokenExpiresAt  time.Time       `json:"access_token_expires_at"`
+	RefreshToken          string          `json:"refresh_token"`
+	RefreshTokenExpiresAt time.Time       `json:"refresh_token_expires_at"`
+	Scopes                []string        `json:"scopes,omitempty"`
 
 	// ControlPlaneKeys are the signing keys this Agent will accept for signed
 	// instructions, pinned on first contact. Trust here is established on
@@ -310,6 +319,9 @@ func (s *Store) persist(identity *Identity) error {
 	if err := os.Rename(name, s.path); err != nil {
 		return fmt.Errorf("replace credentials: %w", err)
 	}
+	if err := syncCredentialDirectory(directory); err != nil {
+		return fmt.Errorf("flush credentials directory: %w", err)
+	}
 	return nil
 }
 
@@ -318,8 +330,60 @@ func (identity *Identity) clone() *Identity {
 		return nil
 	}
 	copied := *identity
+	if identity.Generation != nil {
+		n := *identity.Generation
+		copied.Generation = &n
+	}
+	if identity.PendingRefresh != nil {
+		attempt := *identity.PendingRefresh
+		copied.PendingRefresh = &attempt
+	}
 	copied.Scopes = append([]string(nil), identity.Scopes...)
 	copied.PolicyAlgorithms = append([]int32(nil), identity.PolicyAlgorithms...)
 	copied.ControlPlaneKeys = append([]PinnedKey(nil), identity.ControlPlaneKeys...)
 	return &copied
+}
+
+// BeginRefresh durably records the operation before any request leaves the host.
+// Restart/retry uses this ID; it never silently creates a second rotation.
+func (s *Store) BeginRefresh() (Identity, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.identity == nil || s.identity.RefreshToken == "" {
+		return Identity{}, errors.New("agent is not enrolled")
+	}
+	next := s.identity.clone()
+	if next.PendingRefresh == nil {
+		next.PendingRefresh = &RefreshAttempt{RequestID: uuid.NewString(), StartedAt: time.Now().UTC()}
+		next.UpdatedAt = time.Now().UTC()
+		if err := s.persist(next); err != nil {
+			return Identity{}, err
+		}
+		s.identity = next
+	}
+	return *next.clone(), nil
+}
+
+// CommitRefresh publishes only a verified result for the currently pending
+// operation. Failed persistence leaves the old pair and request ID intact.
+func (s *Store) CommitRefresh(before, after Identity) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.identity == nil || before.PendingRefresh == nil || s.identity.PendingRefresh == nil ||
+		s.identity.RefreshToken != before.RefreshToken || s.identity.AgentID != before.AgentID ||
+		s.identity.PendingRefresh.RequestID != before.PendingRefresh.RequestID || after.AgentID != before.AgentID || after.Generation == nil {
+		return errors.New("credential refresh commit conflict")
+	}
+	if before.Generation != nil && *after.Generation != *before.Generation+1 {
+		return errors.New("credential generation did not advance once")
+	}
+	next := after.clone()
+	next.PendingRefresh = nil
+	next.EnrolledAt = s.identity.EnrolledAt
+	next.UpdatedAt = time.Now().UTC()
+	if err := s.persist(next); err != nil {
+		return err
+	}
+	s.identity = next
+	return nil
 }
