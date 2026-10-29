@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -71,6 +72,23 @@ func (h *Helper) checkAuthorization(parent context.Context) error {
 // second bound matches the previous 500ms + 1500ms unary failure window.
 const authorizationSilence = 2 * time.Second
 const authorizationWatchHeader = "X-Komari-Rescue-Watch"
+
+// Share the connection pool across reconnects, including credential rotation.
+var authorizationWatchTransport = func() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	transport.TLSHandshakeTimeout = 5 * time.Second
+	transport.ResponseHeaderTimeout = 10 * time.Second
+	return transport
+}()
+
+// A response stream has no HTTP total deadline: signed-heartbeat freshness
+// and the watch context bound its lifetime. Unary RPCs retain their timeout.
+func newAuthorizationWatchClient(id credentials.Identity) *http.Client {
+	client := requestheaders.WrapWithStaticDPoP(&http.Client{Transport: authorizationWatchTransport}, id)
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return errors.New("helper redirects forbidden") }
+	return client
+}
 
 type authorizationFrame struct {
 	revision *configv1.PrivilegedRevision
@@ -215,8 +233,7 @@ func (h *Helper) watchAuthorization(ctx context.Context) {
 				}
 				streamCtx, cancel := context.WithTimeout(ctx, 25*time.Minute)
 				cancelStream = cancel
-				client := requestheaders.WrapWithStaticDPoP(nil, id)
-				client.CheckRedirect = func(*http.Request, []*http.Request) error { return errors.New("helper redirects forbidden") }
+				client := newAuthorizationWatchClient(id)
 				rpc := configconnect.NewPrivilegedDeliveryServiceClient(client, h.hostTrust.Endpoint, connect.WithReadMaxBytes(1<<20))
 				req := connect.NewRequest(&configv1.WatchPrivilegedDeliveryRequest{AgentId: id.AgentID, ProtocolVersion: 2})
 				h.authorize(req.Header())
