@@ -22,10 +22,13 @@ type jitterHeartbeatPanel struct {
 	configconnect.UnimplementedPrivilegedDeliveryServiceHandler
 	frames   chan *configv1.PrivilegedRevision
 	requests atomic.Int32
+	active   atomic.Int32
 }
 
 func (p *jitterHeartbeatPanel) WatchPrivilegedDelivery(ctx context.Context, _ *connect.Request[configv1.WatchPrivilegedDeliveryRequest], stream *connect.ServerStream[configv1.WatchPrivilegedDeliveryResponse]) error {
 	p.requests.Add(1)
+	p.active.Add(1)
+	defer p.active.Add(-1)
 	stream.ResponseHeader().Set(authorizationWatchHeader, "v1")
 	for {
 		select {
@@ -77,6 +80,10 @@ func jitterHelperFixture(t *testing.T) (*Helper, *jitterHeartbeatPanel, func(tim
 	if err = store.Save(credentials.Identity{Endpoint: server.URL, AgentID: "node", PrivateKey: key, KeyID: keyID, AccessToken: "synthetic-jitter-at", RefreshToken: "synthetic-jitter-rt"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := hostops.PrepareHelperStatus(manifest); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(hostops.HelperStatusPath(manifest)) })
 	helper := &Helper{manifest: manifest, hostTrust: trust, action: ActionConfig{IsolationStatePath: filepath.Join(root, "isolation.json")}}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -128,6 +135,8 @@ func TestRescueAuthorizationJitterAndBoundedSilence(t *testing.T) {
 		t.Fatalf("signed silence deadline moved: %s", elapsed)
 	}
 	t.Logf("three-second jitter survived; signed authorization expired after %s", elapsed)
+	// Wait for the old canceled handler to exit before delivering to its replacement.
+	waitJitterCondition(t, func() bool { return panel.requests.Load() >= 2 && panel.active.Load() == 1 }, 3*time.Second)
 	panel.frames <- sign(time.Now(), 3)
 	waitJitterCondition(t, func() bool { return helper.authorized.Load() }, 3*time.Second)
 	policy := hostops.Policy{Version: 2, ServiceID: helper.manifest.ServiceName, AllowRescueHelper: true, HelperInstalled: true, HelperAuthorized: true, ForceDenyRescueHelper: true}
