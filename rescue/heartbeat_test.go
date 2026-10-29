@@ -54,7 +54,7 @@ func TestRescueHeartbeatRejectsReplayDelayRegressionAndTampering(t *testing.T) {
 	if err := cursor.accept(trust, sign(now.Add(time.Millisecond), 4), now); err == nil {
 		t.Fatal("regressed sequence accepted")
 	}
-	if err := cursor.accept(trust, sign(now.Add(-3*time.Second), 6), now); err == nil {
+	if err := cursor.accept(trust, sign(now.Add(-authorizationSilence-time.Second), 6), now); err == nil {
 		t.Fatal("delayed heartbeat accepted")
 	}
 	if err := cursor.accept(trust, sign(now.Add(2*time.Second), 6), now); err == nil {
@@ -113,5 +113,32 @@ func TestRescueReceivesRealSignedStreamAndReportsDisconnect(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("disconnect was not surfaced")
+	}
+}
+
+func TestRescueHeartbeatJitterWindowUsesSignedTime(t *testing.T) {
+	trust, sign := heartbeatFixture(t)
+	now := time.Now()
+	var cursor heartbeatCursor
+	// Delivery time cannot refresh a delayed frame's original signed deadline.
+	issued := now.Add(-3 * time.Second)
+	if err := cursor.accept(trust, sign(issued, 1), now); err != nil {
+		t.Fatalf("three-second network delay must be tolerated: %v", err)
+	}
+	if !cursor.issued.Equal(issued) {
+		t.Fatal("receipt reset signed heartbeat time")
+	}
+	for _, age := range []time.Duration{10 * time.Second, 10*time.Second + time.Nanosecond, time.Minute} {
+		var stale heartbeatCursor
+		if err := stale.accept(trust, sign(now.Add(-age), 1), now); err == nil {
+			t.Fatalf("signed frame aged %s extended the authorization window", age)
+		}
+	}
+	if err := cursor.accept(trust, sign(issued, 1), now.Add(time.Second)); err == nil {
+		t.Fatal("replay extended jitter tolerance")
+	}
+	// Even within the wider window, a newer frame cannot regress the revision.
+	if err := cursor.accept(trust, sign(now.Add(-time.Second), 0), now); err == nil {
+		t.Fatal("new timestamp permitted sequence regression")
 	}
 }

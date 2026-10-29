@@ -68,9 +68,10 @@ func (h *Helper) checkAuthorization(parent context.Context) error {
 }
 
 // Rescue streams carry a fresh, fully signed revision every second. No frame,
-// invalid frame, disconnect or local policy denial closes the gate. The two
-// second bound matches the previous 500ms + 1500ms unary failure window.
-const authorizationSilence = 2 * time.Second
+// invalid frame, disconnect or local policy denial closes the gate. A ten-second
+// window tolerates Internet jitter without extending a signed heartbeat on receipt,
+// reconnect or credential handoff. This is the maximum silent-revocation delay.
+const authorizationSilence = 10 * time.Second
 const authorizationWatchHeader = "X-Komari-Rescue-Watch"
 
 // Share the connection pool across reconnects, including credential rotation.
@@ -113,7 +114,7 @@ func (c *heartbeatCursor) accept(trust *hostops.Trust, r *configv1.PrivilegedRev
 		return errors.New("missing rescue heartbeat time")
 	}
 	issued := instruction.IssuedAt.AsTime()
-	if now.Sub(issued) > authorizationSilence || issued.After(now.Add(time.Second)) || !issued.After(c.issued) || r.UpdateSequence < c.sequence {
+	if now.Sub(issued) >= authorizationSilence || issued.After(now.Add(time.Second)) || !issued.After(c.issued) || r.UpdateSequence < c.sequence {
 		return errors.New("stale, replayed or regressed rescue heartbeat")
 	}
 	c.issued, c.sequence = issued, r.UpdateSequence
@@ -203,7 +204,7 @@ func (h *Helper) watchAuthorization(ctx context.Context) {
 			return
 		}
 		// Switch connections immediately while retaining only the last verified
-		// heartbeat's original two-second freshness. No lease is extended here.
+		// heartbeat's original signed freshness deadline. No lease is extended here.
 		if cancelStream != nil {
 			cancelStream()
 			cancelStream = nil
