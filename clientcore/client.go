@@ -943,6 +943,8 @@ func (c *Client) runRemoteSessions(ctx context.Context) {
 }
 
 func (c *Client) attachRemoteSession(ctx context.Context, assignment *websshv1.SessionAssignment) error {
+	startupAt := time.Now()
+	log.Printf("WebSSH session=%s stage=assignment-received", assignment.SessionId)
 	cols, rows := 80, 24
 	if assignment.Size != nil {
 		cols, rows = int(assignment.Size.Columns), int(assignment.Size.Rows)
@@ -959,6 +961,7 @@ func (c *Client) attachRemoteSession(ctx context.Context, assignment *websshv1.S
 		_ = failed.CloseResponse()
 		return err
 	}
+	log.Printf("WebSSH session=%s stage=pty-open elapsed=%s", assignment.SessionId, time.Since(startupAt).Round(time.Millisecond))
 	defer pty.Close()
 	sessionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -1000,9 +1003,14 @@ func (c *Client) attachRemoteSession(ctx context.Context, assignment *websshv1.S
 	}()
 	go func() {
 		buffer := make([]byte, 32<<10)
+		firstOutput := true
 		for {
 			n, err := pty.Read(buffer)
 			if n > 0 {
+				if firstOutput {
+					log.Printf("WebSSH session=%s stage=first-output elapsed=%s", assignment.SessionId, time.Since(startupAt).Round(time.Millisecond))
+					firstOutput = false
+				}
 				data := append([]byte(nil), buffer[:n]...)
 				select {
 				case outboundEvents <- outbound{event: &websshv1.AgentSessionEvent{Event: &websshv1.AgentSessionEvent_Output{Output: data}}}:
