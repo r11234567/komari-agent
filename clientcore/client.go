@@ -951,7 +951,9 @@ func (c *Client) attachRemoteSession(ctx context.Context, assignment *websshv1.S
 	}
 	pty, err := terminal.OpenSessionAs(cols, rows, assignment.GetSystemUser(), assignment.GetShell(), assignment.GetWorkingDirectory())
 	if err != nil {
-		failed := c.webssh.AttachSession(ctx)
+		failedCtx, failedCancel := context.WithTimeout(ctx, requestDeadline)
+		defer failedCancel()
+		failed := c.webssh.AttachSession(failedCtx)
 		c.authorize(failed.RequestHeader())
 		failed.RequestHeader().Set("X-Komari-Workspace-Identity", "v1")
 		if attachErr := failed.Send(&websshv1.AttachSessionRequest{Message: &websshv1.AttachSessionRequest_Attach{Attach: &websshv1.AgentSessionAttach{AgentId: c.agentIDValue(), AssignmentId: assignment.AssignmentId, SessionId: assignment.SessionId}}}); attachErr == nil {
@@ -967,6 +969,11 @@ func (c *Client) attachRemoteSession(ctx context.Context, assignment *websshv1.S
 	defer cancel()
 	go capability.CancelOnRevocation(sessionCtx, cancel, capability.WebSSHAllowed)
 	stream := c.webssh.AttachSession(sessionCtx)
+	defer func() {
+		cancel()
+		_ = stream.CloseRequest()
+		_ = stream.CloseResponse()
+	}()
 	c.authorize(stream.RequestHeader())
 	stream.RequestHeader().Set("X-Komari-Workspace-Identity", "v1")
 	if err := stream.Send(&websshv1.AttachSessionRequest{Message: &websshv1.AttachSessionRequest_Attach{Attach: &websshv1.AgentSessionAttach{
@@ -974,106 +981,7 @@ func (c *Client) attachRemoteSession(ctx context.Context, assignment *websshv1.S
 	}}}); err != nil {
 		return err
 	}
-	type outbound struct {
-		event *websshv1.AgentSessionEvent
-	}
-	outboundEvents := make(chan outbound, 32)
-	sendErr := make(chan error, 1)
-	var accepted atomic.Uint64
-	go func() {
-		var sequence uint64
-		for {
-			var message outbound
-			select {
-			case message = <-outboundEvents:
-			case <-sessionCtx.Done():
-				return
-			}
-			message.event.AcceptedCommandSequence = accepted.Load()
-			if message.event.Event != nil {
-				sequence++
-				message.event.Sequence = sequence
-				message.event.OccurredAt = timestamppb.Now()
-			}
-			if err := stream.Send(&websshv1.AttachSessionRequest{Message: &websshv1.AttachSessionRequest_Event{Event: message.event}}); err != nil {
-				sendErr <- err
-				return
-			}
-		}
-	}()
-	go func() {
-		buffer := make([]byte, 32<<10)
-		firstOutput := true
-		for {
-			n, err := pty.Read(buffer)
-			if n > 0 {
-				if firstOutput {
-					log.Printf("WebSSH session=%s stage=first-output elapsed=%s", assignment.SessionId, time.Since(startupAt).Round(time.Millisecond))
-					firstOutput = false
-				}
-				data := append([]byte(nil), buffer[:n]...)
-				select {
-				case outboundEvents <- outbound{event: &websshv1.AgentSessionEvent{Event: &websshv1.AgentSessionEvent_Output{Output: data}}}:
-				case <-sessionCtx.Done():
-					return
-				}
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
-	go func() {
-		err := pty.Wait()
-		reason := websshv1.CloseReason_CLOSE_REASON_NORMAL
-		var exitCode *int32
-		if err != nil {
-			reason = websshv1.CloseReason_CLOSE_REASON_FAILED
-			code := int32(-1)
-			exitCode = &code
-		}
-		closed := &websshv1.AgentSessionEvent{Event: &websshv1.AgentSessionEvent_Closed{Closed: &websshv1.SessionClosed{
-			SessionId: assignment.SessionId, Reason: reason, ExitCode: exitCode, ClosedAt: timestamppb.Now(),
-		}}}
-		select {
-		case outboundEvents <- outbound{event: closed}:
-		case <-sessionCtx.Done():
-		}
-	}()
-	for {
-		response, err := stream.Receive()
-		if err != nil {
-			return err
-		}
-		if ok, reason := capability.WebSSHAllowed(); !ok {
-			return fmt.Errorf("WebSSH authorization withdrawn: %s", reason)
-		}
-		switch command := response.Command.(type) {
-		case *websshv1.AttachSessionResponse_Input:
-			_, err = pty.Write(command.Input)
-		case *websshv1.AttachSessionResponse_Resize:
-			if command.Resize != nil {
-				err = pty.Resize(int(command.Resize.Columns), int(command.Resize.Rows))
-			}
-		case *websshv1.AttachSessionResponse_File:
-			err = errors.New("terminal file commands are disabled; use the account-isolated FileService")
-		case *websshv1.AttachSessionResponse_CloseReason:
-			return nil
-		default:
-			err = errors.New("empty remote session command")
-		}
-		if err != nil {
-			return err
-		}
-		accepted.Store(response.Sequence)
-		select {
-		case outboundEvents <- outbound{event: &websshv1.AgentSessionEvent{}}:
-		case err := <-sendErr:
-			return err
-		case <-sessionCtx.Done():
-			return sessionCtx.Err()
-		}
-	}
+	return runRemoteTerminal(sessionCtx, cancel, stream, pty, assignment.SessionId, startupAt, capability.WebSSHAllowed)
 }
 
 func isUnsupported(err error) bool {
