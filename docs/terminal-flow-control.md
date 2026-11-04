@@ -6,9 +6,11 @@ they do not block the command receiver behind queued output. A single sender
 serializes frames and gives ACKs priority between output sends. An already
 blocked network write still depends on cancellation or receiver progress.
 
-Send failure cancels the session, including quiet Receive. The context closes
-the PTY, and cleanup joins sender, reader and process-wait workers. Close events
-follow the successfully read output tail. Unix process waiting is shared by
+Non-retryable failure or authorization expiry cancels the session, including
+quiet Receive. Transient transport failure follows the bounded resumption
+procedure below. Final cancellation closes the PTY, and cleanup joins sender,
+reader and process-wait workers. Close events follow the successfully read
+output tail. Unix process waiting is shared by
 Wait/Close and the PTY descriptor is released after both cancellation and natural
 exit. Local capability revocation retains its existing polling deadline.
 
