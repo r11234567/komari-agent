@@ -143,6 +143,19 @@ func runRemoteTerminal(sessionCtx context.Context, cancel context.CancelFunc, st
 		if ok, reason := allowed(); !ok {
 			return fmt.Errorf("WebSSH authorization withdrawn: %s", reason)
 		}
+		if response.GetCloseReason() != "" {
+			return nil
+		}
+		if response.Sequence <= accepted.Load() {
+			select {
+			case acknowledge <- struct{}{}:
+			default:
+			}
+			continue
+		}
+		if response.Sequence != accepted.Load()+1 {
+			return errors.New("terminal command sequence gap")
+		}
 		switch command := response.Command.(type) {
 		case *websshv1.AttachSessionResponse_Input:
 			_, err = pty.Write(command.Input)
@@ -161,6 +174,9 @@ func runRemoteTerminal(sessionCtx context.Context, cancel context.CancelFunc, st
 			return err
 		}
 		accepted.Store(response.Sequence)
+		if resumable, ok := stream.(interface{ AcceptCommand(uint64) }); ok {
+			resumable.AcceptCommand(response.Sequence)
+		}
 		select {
 		case acknowledge <- struct{}{}:
 		default:

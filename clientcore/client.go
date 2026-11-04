@@ -943,6 +943,9 @@ func (c *Client) runRemoteSessions(ctx context.Context) {
 }
 
 func (c *Client) attachRemoteSession(ctx context.Context, assignment *websshv1.SessionAssignment) error {
+	if assignment.LeaseExpiresAt == nil || !assignment.LeaseExpiresAt.IsValid() || !time.Now().Before(assignment.LeaseExpiresAt.AsTime()) {
+		return errors.New("terminal assignment lease expired")
+	}
 	startupAt := time.Now()
 	log.Printf("WebSSH session=%s stage=assignment-received", assignment.SessionId)
 	cols, rows := 80, 24
@@ -968,19 +971,18 @@ func (c *Client) attachRemoteSession(ctx context.Context, assignment *websshv1.S
 	sessionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go capability.CancelOnRevocation(sessionCtx, cancel, capability.WebSSHAllowed)
-	stream := c.webssh.AttachSession(sessionCtx)
-	defer func() {
-		cancel()
-		_ = stream.CloseRequest()
-		_ = stream.CloseResponse()
-	}()
-	c.authorize(stream.RequestHeader())
-	stream.RequestHeader().Set("X-Komari-Workspace-Identity", "v1")
-	if err := stream.Send(&websshv1.AttachSessionRequest{Message: &websshv1.AttachSessionRequest_Attach{Attach: &websshv1.AgentSessionAttach{
-		AgentId: c.agentIDValue(), AssignmentId: assignment.AssignmentId, SessionId: assignment.SessionId,
-	}}}); err != nil {
-		return err
+	until := time.Now().Add(30 * time.Second)
+	if assignment.LeaseExpiresAt != nil {
+		until = assignment.LeaseExpiresAt.AsTime()
 	}
+	stream := newResumableTerminal(sessionCtx, cancel, until, func(attempt context.Context, after uint64) (terminalConnection, error) {
+		connection := c.webssh.AttachSession(attempt)
+		c.authorize(connection.RequestHeader())
+		connection.RequestHeader().Set("X-Komari-Workspace-Identity", "v1")
+		err := connection.Send(&websshv1.AttachSessionRequest{Message: &websshv1.AttachSessionRequest_Attach{Attach: &websshv1.AgentSessionAttach{AgentId: c.agentIDValue(), AssignmentId: assignment.AssignmentId, SessionId: assignment.SessionId, AfterCommandSequence: after, Resumable: true}}})
+		return connection, err
+	})
+	defer stream.close()
 	return runRemoteTerminal(sessionCtx, cancel, stream, pty, assignment.SessionId, startupAt, capability.WebSSHAllowed)
 }
 
