@@ -55,3 +55,30 @@ Deploy the updated Agent together with the backend for the complete behavior.
 The panel's buffer limits and actual Debian/Docker/Nginx acceptance checklist
 are documented in the backend repository. This fix does not prove that every
 previous cold-start delay had the same cause as the earlier DNS/dial fix.
+
+## Proxy-restart EOF and silent-transport repair (2026-11-04)
+
+The first resumption dev incorrectly treated Connect's locally generated
+`internal: protocol error: incomplete envelope: unexpected EOF` as a permanent
+failure. A severed HTTP/2 connection therefore closed the PTY instead of
+retrying it. The classifier now follows the wrapped EOF/closed-pipe/network
+cause while retaining explicit authorization, state-loss, resource and protocol
+failures as terminal. Server-sent Internal/Unknown errors do not become retryable
+because their text resembles a socket failure.
+
+The ten-second opening deadline now covers dialing and the first Send as well
+as the first Receive. After attachment, twelve seconds without a valid backend
+checkpoint cancels only the current HTTP request and retries within the existing
+retention lease. It does not cancel the PTY or extend authorization. A temporary
+silent/half-open route can no longer occupy the entire thirty-second retention
+window without a new attempt. The backend heartbeat interval remains five seconds.
+
+Agent logs record the session, attachment attempt, accepted cursors, interruption
+code and retry decision. Terminal input, output and credentials are not logged.
+
+The regression severs a real TLS/HTTP2 connection while a real `/bin/sh` is
+running and verifies the same PID/directory after reattachment. Additional tests
+cover authoritative HTTP/2 rejections, silent peers and stalled opening. This
+reproduces the observed EOF without claiming a deployed Xray/Nginx acceptance
+result. A disconnect around the original three-minute idle deadline still ends
+an idle grant; transport recovery must not bypass that deadline.

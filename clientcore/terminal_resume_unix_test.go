@@ -56,7 +56,7 @@ func TestActualPTYKeepsPIDAndWorkingDirectoryAcrossTransportLoss(t *testing.T) {
 	var attempts atomic.Uint32
 	opened := make(chan *resumeConnection, 4)
 	cursors := make(chan uint64, 4)
-	stream := newResumableTerminal(ctx, cancel, time.Now().Add(3*time.Second), func(attempt context.Context, after uint64) (terminalConnection, error) {
+	stream := newResumableTerminal(ctx, cancel, time.Now().Add(3*time.Second), "real-pty", func(attempt context.Context, after uint64) (terminalConnection, error) {
 		if attempts.Add(1) > 1 {
 			// Keep the transport offline while the original shell emits output.
 			select {

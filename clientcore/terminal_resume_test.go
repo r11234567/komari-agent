@@ -3,8 +3,10 @@ package clientcore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -51,7 +53,7 @@ func TestTerminalResumeReplaysUnconfirmedOutputAndPreservesCommandCursor(t *test
 	cursors := make(chan uint64, 4)
 	var mu sync.Mutex
 	attempt := 0
-	r := newResumableTerminal(ctx, cancel, time.Now().Add(3*time.Second), func(attemptCtx context.Context, after uint64) (terminalConnection, error) {
+	r := newResumableTerminal(ctx, cancel, time.Now().Add(3*time.Second), "replay", func(attemptCtx context.Context, after uint64) (terminalConnection, error) {
 		s := &resumeConnection{ctx: attemptCtx, frames: make(chan *websshv1.AttachSessionResponse, 8), sent: make(chan *websshv1.AgentSessionEvent, 8)}
 		mu.Lock()
 		attempt++
@@ -119,7 +121,7 @@ func TestTerminalResumeReplaysUnconfirmedOutputAndPreservesCommandCursor(t *test
 func TestTerminalResumeIsBoundedAndExpiryCancelsBlockedProducer(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	r := newResumableTerminal(ctx, cancel, time.Now().Add(150*time.Millisecond), func(context.Context, uint64) (terminalConnection, error) {
+	r := newResumableTerminal(ctx, cancel, time.Now().Add(150*time.Millisecond), "bounded", func(context.Context, uint64) (terminalConnection, error) {
 		return nil, connect.NewError(connect.CodeUnavailable, errors.New("offline"))
 	})
 	defer r.close()
@@ -150,7 +152,7 @@ func TestTerminalResumeIsBoundedAndExpiryCancelsBlockedProducer(t *testing.T) {
 func TestTerminalResumeRejectsLostStateAndNeverRecreatesShell(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	r := newResumableTerminal(ctx, cancel, time.Now().Add(time.Second), func(context.Context, uint64) (terminalConnection, error) {
+	r := newResumableTerminal(ctx, cancel, time.Now().Add(time.Second), "lost-state", func(context.Context, uint64) (terminalConnection, error) {
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("panel lost original session"))
 	})
 	defer r.close()
@@ -161,5 +163,76 @@ func TestTerminalResumeRejectsLostStateAndNeverRecreatesShell(t *testing.T) {
 	}
 	if r.failure() == nil {
 		t.Fatal("missing state-loss error")
+	}
+}
+
+func TestTerminalResumeRetriesLocalTruncationButNotAuthorizationOrProtocolFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"truncated prefix", connect.NewError(connect.CodeInternal, fmt.Errorf("protocol error: incomplete envelope: %w", io.ErrUnexpectedEOF)), true},
+		{"truncated body", connect.NewError(connect.CodeInternal, fmt.Errorf("protocol error: promised 8 bytes, got 2: %w", io.ErrUnexpectedEOF)), true},
+		{"wrapped clean EOF", connect.NewError(connect.CodeUnknown, io.EOF), true},
+		{"permission denied", connect.NewError(connect.CodePermissionDenied, io.ErrUnexpectedEOF), false},
+		{"unauthenticated", connect.NewError(connect.CodeUnauthenticated, io.ErrUnexpectedEOF), false},
+		{"lost state", connect.NewError(connect.CodeFailedPrecondition, io.ErrUnexpectedEOF), false},
+		{"unknown session", connect.NewError(connect.CodeNotFound, io.ErrUnexpectedEOF), false},
+		{"invalid frame", connect.NewError(connect.CodeInvalidArgument, errors.New("malformed protobuf")), false},
+		{"ordinary internal", connect.NewError(connect.CodeInternal, errors.New("backend invariant failed")), false},
+		{"text is not transport evidence", connect.NewError(connect.CodeInternal, errors.New("protocol error: incomplete envelope: unexpected EOF")), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := terminalRetryable(tc.err); got != tc.want {
+				t.Fatalf("retry=%t want=%t for %v", got, tc.want, tc.err)
+			}
+		})
+	}
+}
+
+func TestTerminalResumeReplacesSilentTransportBeforeLeaseExpiry(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 18*time.Second)
+	defer cancel()
+	opened := make(chan uint64, 4)
+	r := newResumableTerminal(ctx, cancel, time.Now().Add(20*time.Second), "silent-transport", func(attempt context.Context, after uint64) (terminalConnection, error) {
+		connection := &resumeConnection{ctx: attempt, frames: make(chan *websshv1.AttachSessionResponse, 4), sent: make(chan *websshv1.AgentSessionEvent, 8)}
+		connection.frames <- &websshv1.AttachSessionResponse{ResumeUntil: timestamppb.New(time.Now().Add(20 * time.Second))}
+		opened <- after
+		return connection, nil
+	})
+	defer r.close()
+	<-opened
+	r.AcceptCommand(7)
+	select {
+	case after := <-opened:
+		if after != 7 || ctx.Err() != nil {
+			t.Fatalf("silent transport lost original command/PTY lifetime: cursor=%d error=%v", after, ctx.Err())
+		}
+	case <-ctx.Done():
+		t.Fatal("silent connection consumed the entire original retention lease")
+	}
+}
+
+func TestTerminalResumeBoundsOpeningBeforeFirstCheckpoint(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 16*time.Second)
+	defer cancel()
+	var attempts atomic.Uint32
+	retried := make(chan struct{})
+	r := newResumableTerminal(ctx, cancel, time.Now().Add(20*time.Second), "stalled-open", func(attempt context.Context, _ uint64) (terminalConnection, error) {
+		if attempts.Add(1) == 2 {
+			close(retried)
+		}
+		<-attempt.Done()
+		return nil, attempt.Err()
+	})
+	defer r.close()
+	select {
+	case <-retried:
+		if ctx.Err() != nil {
+			t.Fatal("opening timeout cancelled the PTY authorization")
+		}
+	case <-ctx.Done():
+		t.Fatal("initial Send/dial was outside the handshake timeout")
 	}
 }

@@ -975,7 +975,7 @@ func (c *Client) attachRemoteSession(ctx context.Context, assignment *websshv1.S
 	if assignment.LeaseExpiresAt != nil {
 		until = assignment.LeaseExpiresAt.AsTime()
 	}
-	stream := newResumableTerminal(sessionCtx, cancel, until, func(attempt context.Context, after uint64) (terminalConnection, error) {
+	stream := newResumableTerminal(sessionCtx, cancel, until, assignment.SessionId, func(attempt context.Context, after uint64) (terminalConnection, error) {
 		connection := c.webssh.AttachSession(attempt)
 		c.authorize(connection.RequestHeader())
 		connection.RequestHeader().Set("X-Komari-Workspace-Identity", "v1")

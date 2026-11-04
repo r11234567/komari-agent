@@ -4,12 +4,19 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log"
+	"net"
 	"sync"
 	"time"
 
 	"connectrpc.com/connect"
 	websshv1 "github.com/r11234567/komari-proto/gen/go/komari/webssh/v1"
 	"google.golang.org/protobuf/proto"
+)
+
+const (
+	terminalHandshakeTimeout  = 10 * time.Second
+	terminalCheckpointTimeout = 12 * time.Second // backend heartbeats every five seconds
 )
 
 // The PTY belongs to the authorization, not to one HTTP connection. Output is
@@ -27,6 +34,7 @@ type resumableTerminal struct {
 	deadline                *time.Timer
 	err                     error
 	done                    chan struct{}
+	sessionID               string
 }
 
 type terminalConnection interface {
@@ -35,8 +43,8 @@ type terminalConnection interface {
 	CloseResponse() error
 }
 
-func newResumableTerminal(ctx context.Context, cancel context.CancelFunc, until time.Time, open func(context.Context, uint64) (terminalConnection, error)) *resumableTerminal {
-	r := &resumableTerminal{ctx: ctx, cancel: cancel, open: open, notify: make(chan struct{}), commands: make(chan *websshv1.AttachSessionResponse), done: make(chan struct{})}
+func newResumableTerminal(ctx context.Context, cancel context.CancelFunc, until time.Time, sessionID string, open func(context.Context, uint64) (terminalConnection, error)) *resumableTerminal {
+	r := &resumableTerminal{ctx: ctx, cancel: cancel, open: open, notify: make(chan struct{}), commands: make(chan *websshv1.AttachSessionResponse), done: make(chan struct{}), sessionID: sessionID}
 	if until.After(time.Now().Add(30 * time.Second)) {
 		until = time.Now().Add(30 * time.Second)
 	}
@@ -201,21 +209,36 @@ func (r *resumableTerminal) sendLoop(ctx context.Context, stream terminalConnect
 }
 
 func terminalRetryable(err error) bool {
-	if errors.Is(err, io.EOF) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return true
-	}
 	switch connect.CodeOf(err) {
 	case connect.CodeUnavailable, connect.CodeDeadlineExceeded, connect.CodeCanceled:
 		return true
+	case connect.CodePermissionDenied, connect.CodeUnauthenticated, connect.CodeNotFound, connect.CodeFailedPrecondition, connect.CodeInvalidArgument, connect.CodeResourceExhausted:
+		return false
 	}
-	return false
+	// Connect wraps an abruptly truncated stream in CodeInternal, retaining the
+	// underlying io.ErrUnexpectedEOF. Only local transport failures qualify;
+	// an explicit server error must not become retryable because of its text.
+	if connect.IsWireError(err) {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var networkError net.Error
+	return errors.As(err, &networkError)
 }
 
 func (r *resumableTerminal) run() {
 	defer close(r.done)
 	defer r.deadline.Stop()
+	var attempts uint64
 	for r.ctx.Err() == nil {
+		attempts++
 		attempt, cancel := context.WithCancel(r.ctx)
+		// Bound dialing/first Send as well as Receive. Once attached, a silent
+		// half-open stream must be retried before the original retention lease
+		// expires. This timer cancels only this HTTP request, never the PTY.
+		activityTimer := time.AfterFunc(terminalHandshakeTimeout, cancel)
 		r.mu.Lock()
 		command := r.command
 		r.mu.Unlock()
@@ -224,14 +247,14 @@ func (r *resumableTerminal) run() {
 		if err == nil {
 			// Do not send/replay until the authenticated server validates the same
 			// session and returns its existing event cursor and authorization bound.
-			handshakeTimer := time.AfterFunc(10*time.Second, cancel)
 			var first *websshv1.AttachSessionResponse
 			first, err = stream.Receive()
-			handshakeTimer.Stop()
 			if err == nil {
 				err = r.checkpoint(first)
 			}
 			if err == nil {
+				activityTimer.Reset(terminalCheckpointTimeout)
+				log.Printf("WebSSH session=%s stage=transport-attached attempt=%d after_event=%d after_command=%d", r.sessionID, attempts, first.AcceptedEventSequence, command)
 				senderDone = make(chan error, 1)
 				go func() { e := r.sendLoop(attempt, stream); senderDone <- e; cancel() }()
 				for err == nil {
@@ -243,6 +266,7 @@ func (r *resumableTerminal) run() {
 					if err = r.checkpoint(frame); err != nil {
 						break
 					}
+					activityTimer.Reset(terminalCheckpointTimeout)
 					if frame.Command != nil {
 						select {
 						case r.commands <- frame:
@@ -253,6 +277,7 @@ func (r *resumableTerminal) run() {
 				}
 			}
 		}
+		activityTimer.Stop()
 		cancel()
 		if stream != nil {
 			_ = stream.CloseRequest()
@@ -267,7 +292,9 @@ func (r *resumableTerminal) run() {
 		if r.ctx.Err() != nil {
 			return
 		}
-		if !terminalRetryable(err) {
+		retry := terminalRetryable(err)
+		log.Printf("WebSSH session=%s stage=transport-interrupted attempt=%d code=%s retry=%t error=%q", r.sessionID, attempts, connect.CodeOf(err), retry, err)
+		if !retry {
 			r.fail(err)
 			return
 		}
