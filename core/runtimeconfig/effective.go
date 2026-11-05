@@ -6,6 +6,7 @@ import (
 	"github.com/komari-monitor/komari-agent/core/hostops"
 	"github.com/komari-monitor/komari-agent/core/privileged"
 	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
+	"runtime"
 )
 
 // EffectiveConfig is the view used by collectors, capability reports and gates.
@@ -57,7 +58,7 @@ func Inspect(config *flags_pkg.Config, runtimeStore *Store, privilegedStore *pri
 		result.Privileged = privilegedStore.Effective()
 		result.Source = "applied privileged snapshot intersected with signed pending restrictions"
 	}
-	for _, field := range []string{"remote_control_enabled", "webssh_enabled", "execution_enabled", "enable_gpu", "rescue_helper_enabled", "required_privilege_mode"} {
+	for _, field := range []string{"remote_control_enabled", "webssh_enabled", "execution_enabled", "root_execution_allowed", "enable_gpu", "rescue_helper_enabled", "required_privilege_mode"} {
 		result.Sources[field] = result.Source
 	}
 	if config.ServiceManifestFile != "" {
@@ -93,6 +94,7 @@ func Inspect(config *flags_pkg.Config, runtimeStore *Store, privilegedStore *pri
 				s.RemoteControlEnabled = s.RemoteControlEnabled && target.RemoteControlEnabled
 				s.WebSSHEnabled = s.WebSSHEnabled && target.WebSSHEnabled
 				s.ExecutionEnabled = s.ExecutionEnabled && target.ExecutionEnabled
+				s.RootExecutionAllowed = s.RootExecutionAllowed && target.RootExecutionAllowed
 				s.EnableGPU = s.EnableGPU && target.EnableGPU
 				s.RescueHelperEnabled = s.RescueHelperEnabled && target.RescueHelperEnabled
 				result.Sources["host_transition_ceiling"] = fmt.Sprintf("protected host revision r%d", p.HostRevision)
@@ -112,7 +114,11 @@ func Inspect(config *flags_pkg.Config, runtimeStore *Store, privilegedStore *pri
 	}
 	result.Privileged.WebSSHEnabled = result.Privileged.RemoteControlEnabled && result.Privileged.WebSSHEnabled
 	result.Privileged.ExecutionEnabled = result.Privileged.RemoteControlEnabled && result.Privileged.ExecutionEnabled
-	result.Runtime.EnableGPU = result.Privileged.EnableGPU
+	result.Privileged.RootExecutionAllowed = result.Privileged.RemoteControlEnabled && result.Privileged.RootExecutionAllowed
+	result.Runtime.EnableGPU = effectiveGPU(raw, result.Privileged.EnableGPU)
+	if runtime.GOOS == "windows" {
+		result.Sources["enable_gpu"] = "Windows ordinary runtime configuration, default enabled"
+	}
 	result.Runtime.RemoteControlEnabled = result.Privileged.RemoteControlEnabled
 	result.Runtime.DetailedGPU = raw.DetailedGPU && result.Runtime.EnableGPU
 	return result
@@ -122,9 +128,16 @@ func EffectiveForMode(actual reportv1.PrivilegeMode) EffectiveConfig {
 	if required := result.Privileged.RequiredPrivilegeMode; required != 0 && required != actual {
 		result.Privileged = privileged.Settings{}
 		result.Runtime.RemoteControlEnabled = false
-		result.Runtime.EnableGPU = false
-		result.Runtime.DetailedGPU = false
+		result.Runtime.EnableGPU = effectiveGPU(result.Runtime, false)
+		result.Runtime.DetailedGPU = result.Runtime.DetailedGPU && result.Runtime.EnableGPU
 		result.BlockedReason = "actual daemon identity differs from applied privileged snapshot"
 	}
 	return result
+}
+
+func effectiveGPU(snapshot Snapshot, privilegedEnabled bool) bool {
+	if runtime.GOOS != "windows" {
+		return privilegedEnabled
+	}
+	return snapshot.WindowsGPUEnabled == nil || *snapshot.WindowsGPUEnabled
 }

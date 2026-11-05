@@ -4,6 +4,7 @@ import (
 	"context"
 	privilegedconfig "github.com/komari-monitor/komari-agent/core/privileged"
 	"github.com/komari-monitor/komari-agent/core/runtimeconfig"
+	"os/user"
 	"runtime"
 	"time"
 
@@ -52,6 +53,32 @@ func ExecutionAllowed() (bool, string) {
 func WebSSHAllowed() (bool, string) {
 	caps := Detect(runtimeconfig.RemoteControlEnabled())
 	return caps.Webssh.Available, caps.Webssh.Limitation
+}
+
+func RootExecutionAllowed() (bool, string) {
+	mode, _, _ := privilegeState()
+	settings := runtimeconfig.EffectiveForMode(mode).Privileged
+	if !settings.RemoteControlEnabled || !settings.RootExecutionAllowed {
+		return false, "root execution is disabled by effective privileged configuration"
+	}
+	if mode != reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT {
+		return false, "the Agent cannot start a root child from its current OS identity"
+	}
+	return true, ""
+}
+
+func WebSSHAccountAllowed(username string) (bool, string) {
+	if allowed, reason := WebSSHAllowed(); !allowed {
+		return false, reason
+	}
+	account, err := user.Lookup(username)
+	if err != nil {
+		return false, "selected OS account does not exist"
+	}
+	if account.Uid == "0" {
+		return RootExecutionAllowed()
+	}
+	return true, ""
 }
 
 // CancelOnRevocation also terminates existing jobs/sessions, including idle PTYs.
@@ -109,6 +136,10 @@ func detect(remoteControlEnabled bool, privilege reportv1.PrivilegeMode, privile
 		Execution:         execution,
 		Webssh:            webssh,
 		ReturnRouteProbe:  available(),
+	}
+	result.RootExecution = limited("root execution permission or root daemon identity is unavailable")
+	if cfg.Privileged.RemoteControlEnabled && cfg.Privileged.RootExecutionAllowed && privilege == reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT {
+		result.RootExecution = available()
 	}
 	if cfg.Runtime.EnableGPU {
 		result.Gpu = available()

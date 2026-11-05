@@ -13,7 +13,7 @@ import (
 func Subset(a, b Settings) bool {
 	return (a.RequiredPrivilegeMode == b.RequiredPrivilegeMode || a.RequiredPrivilegeMode == 0) &&
 		(!a.RemoteControlEnabled || b.RemoteControlEnabled) && (!a.WebSSHEnabled || b.WebSSHEnabled) &&
-		(!a.ExecutionEnabled || b.ExecutionEnabled) && (!a.EnableGPU || b.EnableGPU) && (!a.RescueHelperEnabled || b.RescueHelperEnabled)
+		(!a.ExecutionEnabled || b.ExecutionEnabled) && (!a.RootExecutionAllowed || b.RootExecutionAllowed) && (!a.EnableGPU || b.EnableGPU) && (!a.RescueHelperEnabled || b.RescueHelperEnabled)
 }
 
 // ValidateApproval checks the complete binding after the transport verifies the
@@ -92,6 +92,7 @@ func (s *Store) Effective() Settings {
 		result.RemoteControlEnabled = result.RemoteControlEnabled && p.RemoteControlEnabled
 		result.WebSSHEnabled = result.WebSSHEnabled && p.WebSSHEnabled
 		result.ExecutionEnabled = result.ExecutionEnabled && p.ExecutionEnabled
+		result.RootExecutionAllowed = result.RootExecutionAllowed && p.RootExecutionAllowed
 		result.EnableGPU = result.EnableGPU && p.EnableGPU
 		result.RescueHelperEnabled = result.RescueHelperEnabled && p.RescueHelperEnabled
 	}

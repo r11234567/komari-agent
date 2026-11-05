@@ -795,7 +795,7 @@ func (c *Client) verifyExecutionAssignment(assignment *execv1.ExecutionAssignmen
 	if err != nil {
 		return nil, fmt.Errorf("verify execution envelope: %w", err)
 	}
-	if instruction.InstructionType != "exec:v1" {
+	if instruction.InstructionType != "exec:v1" && instruction.InstructionType != "exec:identity:v1" {
 		return nil, fmt.Errorf("the signature authorizes %q, not an execution instruction (exec:v1)", instruction.InstructionType)
 	}
 	var spec execv1.ExecutionSpec
@@ -943,13 +943,20 @@ func (c *Client) runRemoteSessions(ctx context.Context) {
 }
 
 func (c *Client) attachRemoteSession(ctx context.Context, assignment *websshv1.SessionAssignment) error {
+	if assignment.LeaseExpiresAt == nil || !assignment.LeaseExpiresAt.IsValid() || !time.Now().Before(assignment.LeaseExpiresAt.AsTime()) {
+		return errors.New("terminal assignment lease expired")
+	}
+	startupAt := time.Now()
+	log.Printf("WebSSH session=%s stage=assignment-received", assignment.SessionId)
 	cols, rows := 80, 24
 	if assignment.Size != nil {
 		cols, rows = int(assignment.Size.Columns), int(assignment.Size.Rows)
 	}
 	pty, err := terminal.OpenSessionAs(cols, rows, assignment.GetSystemUser(), assignment.GetShell(), assignment.GetWorkingDirectory())
 	if err != nil {
-		failed := c.webssh.AttachSession(ctx)
+		failedCtx, failedCancel := context.WithTimeout(ctx, requestDeadline)
+		defer failedCancel()
+		failed := c.webssh.AttachSession(failedCtx)
 		c.authorize(failed.RequestHeader())
 		failed.RequestHeader().Set("X-Komari-Workspace-Identity", "v1")
 		if attachErr := failed.Send(&websshv1.AttachSessionRequest{Message: &websshv1.AttachSessionRequest_Attach{Attach: &websshv1.AgentSessionAttach{AgentId: c.agentIDValue(), AssignmentId: assignment.AssignmentId, SessionId: assignment.SessionId}}}); attachErr == nil {
@@ -959,113 +966,25 @@ func (c *Client) attachRemoteSession(ctx context.Context, assignment *websshv1.S
 		_ = failed.CloseResponse()
 		return err
 	}
+	log.Printf("WebSSH session=%s stage=pty-open elapsed=%s", assignment.SessionId, time.Since(startupAt).Round(time.Millisecond))
 	defer pty.Close()
 	sessionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	go capability.CancelOnRevocation(sessionCtx, cancel, capability.WebSSHAllowed)
-	stream := c.webssh.AttachSession(sessionCtx)
-	c.authorize(stream.RequestHeader())
-	stream.RequestHeader().Set("X-Komari-Workspace-Identity", "v1")
-	if err := stream.Send(&websshv1.AttachSessionRequest{Message: &websshv1.AttachSessionRequest_Attach{Attach: &websshv1.AgentSessionAttach{
-		AgentId: c.agentIDValue(), AssignmentId: assignment.AssignmentId, SessionId: assignment.SessionId,
-	}}}); err != nil {
-		return err
+	accountAllowed := func() (bool, string) { return capability.WebSSHAccountAllowed(assignment.GetSystemUser()) }
+	go capability.CancelOnRevocation(sessionCtx, cancel, accountAllowed)
+	until := time.Now().Add(30 * time.Second)
+	if assignment.LeaseExpiresAt != nil {
+		until = assignment.LeaseExpiresAt.AsTime()
 	}
-	type outbound struct {
-		event *websshv1.AgentSessionEvent
-	}
-	outboundEvents := make(chan outbound, 32)
-	sendErr := make(chan error, 1)
-	var accepted atomic.Uint64
-	go func() {
-		var sequence uint64
-		for {
-			var message outbound
-			select {
-			case message = <-outboundEvents:
-			case <-sessionCtx.Done():
-				return
-			}
-			message.event.AcceptedCommandSequence = accepted.Load()
-			if message.event.Event != nil {
-				sequence++
-				message.event.Sequence = sequence
-				message.event.OccurredAt = timestamppb.Now()
-			}
-			if err := stream.Send(&websshv1.AttachSessionRequest{Message: &websshv1.AttachSessionRequest_Event{Event: message.event}}); err != nil {
-				sendErr <- err
-				return
-			}
-		}
-	}()
-	go func() {
-		buffer := make([]byte, 32<<10)
-		for {
-			n, err := pty.Read(buffer)
-			if n > 0 {
-				data := append([]byte(nil), buffer[:n]...)
-				select {
-				case outboundEvents <- outbound{event: &websshv1.AgentSessionEvent{Event: &websshv1.AgentSessionEvent_Output{Output: data}}}:
-				case <-sessionCtx.Done():
-					return
-				}
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
-	go func() {
-		err := pty.Wait()
-		reason := websshv1.CloseReason_CLOSE_REASON_NORMAL
-		var exitCode *int32
-		if err != nil {
-			reason = websshv1.CloseReason_CLOSE_REASON_FAILED
-			code := int32(-1)
-			exitCode = &code
-		}
-		closed := &websshv1.AgentSessionEvent{Event: &websshv1.AgentSessionEvent_Closed{Closed: &websshv1.SessionClosed{
-			SessionId: assignment.SessionId, Reason: reason, ExitCode: exitCode, ClosedAt: timestamppb.Now(),
-		}}}
-		select {
-		case outboundEvents <- outbound{event: closed}:
-		case <-sessionCtx.Done():
-		}
-	}()
-	for {
-		response, err := stream.Receive()
-		if err != nil {
-			return err
-		}
-		if ok, reason := capability.WebSSHAllowed(); !ok {
-			return fmt.Errorf("WebSSH authorization withdrawn: %s", reason)
-		}
-		switch command := response.Command.(type) {
-		case *websshv1.AttachSessionResponse_Input:
-			_, err = pty.Write(command.Input)
-		case *websshv1.AttachSessionResponse_Resize:
-			if command.Resize != nil {
-				err = pty.Resize(int(command.Resize.Columns), int(command.Resize.Rows))
-			}
-		case *websshv1.AttachSessionResponse_File:
-			err = errors.New("terminal file commands are disabled; use the account-isolated FileService")
-		case *websshv1.AttachSessionResponse_CloseReason:
-			return nil
-		default:
-			err = errors.New("empty remote session command")
-		}
-		if err != nil {
-			return err
-		}
-		accepted.Store(response.Sequence)
-		select {
-		case outboundEvents <- outbound{event: &websshv1.AgentSessionEvent{}}:
-		case err := <-sendErr:
-			return err
-		case <-sessionCtx.Done():
-			return sessionCtx.Err()
-		}
-	}
+	stream := newResumableTerminal(sessionCtx, cancel, until, assignment.SessionId, func(attempt context.Context, after uint64) (terminalConnection, error) {
+		connection := c.webssh.AttachSession(attempt)
+		c.authorize(connection.RequestHeader())
+		connection.RequestHeader().Set("X-Komari-Workspace-Identity", "v1")
+		err := connection.Send(&websshv1.AttachSessionRequest{Message: &websshv1.AttachSessionRequest_Attach{Attach: &websshv1.AgentSessionAttach{AgentId: c.agentIDValue(), AssignmentId: assignment.AssignmentId, SessionId: assignment.SessionId, AfterCommandSequence: after, Resumable: true}}})
+		return connection, err
+	})
+	defer stream.close()
+	return runRemoteTerminal(sessionCtx, cancel, stream, pty, assignment.SessionId, startupAt, accountAllowed)
 }
 
 func isUnsupported(err error) bool {
