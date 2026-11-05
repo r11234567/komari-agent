@@ -17,7 +17,7 @@ require (
 	github.com/shirou/gopsutil/v4 v4.26.9
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
-	golang.org/x/net v0.61.0
+	golang.org/x/net v0.62.0
 	golang.org/x/sys v0.49.0
 	google.golang.org/protobuf v1.36.12
 	gopkg.in/toast.v1 v1.0.0-20180812000517-0a84660828b2
