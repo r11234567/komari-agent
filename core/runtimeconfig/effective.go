@@ -57,7 +57,7 @@ func Inspect(config *flags_pkg.Config, runtimeStore *Store, privilegedStore *pri
 		result.Privileged = privilegedStore.Effective()
 		result.Source = "applied privileged snapshot intersected with signed pending restrictions"
 	}
-	for _, field := range []string{"remote_control_enabled", "webssh_enabled", "execution_enabled", "enable_gpu", "rescue_helper_enabled", "required_privilege_mode"} {
+	for _, field := range []string{"remote_control_enabled", "webssh_enabled", "execution_enabled", "root_execution_allowed", "enable_gpu", "rescue_helper_enabled", "required_privilege_mode"} {
 		result.Sources[field] = result.Source
 	}
 	if config.ServiceManifestFile != "" {
@@ -93,6 +93,7 @@ func Inspect(config *flags_pkg.Config, runtimeStore *Store, privilegedStore *pri
 				s.RemoteControlEnabled = s.RemoteControlEnabled && target.RemoteControlEnabled
 				s.WebSSHEnabled = s.WebSSHEnabled && target.WebSSHEnabled
 				s.ExecutionEnabled = s.ExecutionEnabled && target.ExecutionEnabled
+				s.RootExecutionAllowed = s.RootExecutionAllowed && target.RootExecutionAllowed
 				s.EnableGPU = s.EnableGPU && target.EnableGPU
 				s.RescueHelperEnabled = s.RescueHelperEnabled && target.RescueHelperEnabled
 				result.Sources["host_transition_ceiling"] = fmt.Sprintf("protected host revision r%d", p.HostRevision)
@@ -112,6 +113,7 @@ func Inspect(config *flags_pkg.Config, runtimeStore *Store, privilegedStore *pri
 	}
 	result.Privileged.WebSSHEnabled = result.Privileged.RemoteControlEnabled && result.Privileged.WebSSHEnabled
 	result.Privileged.ExecutionEnabled = result.Privileged.RemoteControlEnabled && result.Privileged.ExecutionEnabled
+	result.Privileged.RootExecutionAllowed = result.Privileged.RemoteControlEnabled && result.Privileged.RootExecutionAllowed
 	result.Runtime.EnableGPU = result.Privileged.EnableGPU
 	result.Runtime.RemoteControlEnabled = result.Privileged.RemoteControlEnabled
 	result.Runtime.DetailedGPU = raw.DetailedGPU && result.Runtime.EnableGPU

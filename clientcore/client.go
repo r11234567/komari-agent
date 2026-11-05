@@ -795,7 +795,7 @@ func (c *Client) verifyExecutionAssignment(assignment *execv1.ExecutionAssignmen
 	if err != nil {
 		return nil, fmt.Errorf("verify execution envelope: %w", err)
 	}
-	if instruction.InstructionType != "exec:v1" {
+	if instruction.InstructionType != "exec:v1" && instruction.InstructionType != "exec:identity:v1" {
 		return nil, fmt.Errorf("the signature authorizes %q, not an execution instruction (exec:v1)", instruction.InstructionType)
 	}
 	var spec execv1.ExecutionSpec
@@ -970,7 +970,8 @@ func (c *Client) attachRemoteSession(ctx context.Context, assignment *websshv1.S
 	defer pty.Close()
 	sessionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	go capability.CancelOnRevocation(sessionCtx, cancel, capability.WebSSHAllowed)
+	accountAllowed := func() (bool, string) { return capability.WebSSHAccountAllowed(assignment.GetSystemUser()) }
+	go capability.CancelOnRevocation(sessionCtx, cancel, accountAllowed)
 	until := time.Now().Add(30 * time.Second)
 	if assignment.LeaseExpiresAt != nil {
 		until = assignment.LeaseExpiresAt.AsTime()
@@ -983,7 +984,7 @@ func (c *Client) attachRemoteSession(ctx context.Context, assignment *websshv1.S
 		return connection, err
 	})
 	defer stream.close()
-	return runRemoteTerminal(sessionCtx, cancel, stream, pty, assignment.SessionId, startupAt, capability.WebSSHAllowed)
+	return runRemoteTerminal(sessionCtx, cancel, stream, pty, assignment.SessionId, startupAt, accountAllowed)
 }
 
 func isUnsupported(err error) bool {

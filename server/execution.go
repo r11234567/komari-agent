@@ -23,28 +23,36 @@ type ExecutionOutput struct {
 }
 
 func RunTypedExecution(ctx context.Context, spec *execv1.ExecutionSpec, emit func(ExecutionOutput) error) (int, error) {
-	if allowed, reason := capability.ExecutionAllowed(); !allowed {
-		return -1, fmt.Errorf("remote control is unavailable: %s", reason)
-	}
 	if spec == nil || strings.TrimSpace(spec.Command) == "" {
 		return -1, errors.New("execution command is required")
+	}
+	allowed := func() (bool, string) {
+		if ok, reason := capability.ExecutionAllowed(); !ok {
+			return false, reason
+		}
+		if spec.RunAsRoot {
+			return capability.RootExecutionAllowed()
+		}
+		return true, ""
+	}
+	if ok, reason := allowed(); !ok {
+		return -1, fmt.Errorf("execution is unavailable: %s", reason)
 	}
 	if emit == nil {
 		return -1, errors.New("execution output handler is required")
 	}
 	processCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	go capability.CancelOnRevocation(processCtx, cancel, capability.ExecutionAllowed)
+	go capability.CancelOnRevocation(processCtx, cancel, allowed)
 	command, cleanup, err := buildTypedCommand(processCtx, spec)
 	if err != nil {
 		return -1, err
 	}
 	defer cleanup()
-	if spec.WorkingDirectory != "" {
-		command.Dir = spec.WorkingDirectory
+	if err := configureExecutionIdentity(command, spec); err != nil {
+		return -1, err
 	}
 	if len(spec.Environment) > 0 {
-		command.Env = append([]string{}, os.Environ()...)
 		for key, value := range spec.Environment {
 			if strings.ContainsAny(key, "=\x00") || strings.ContainsRune(value, '\x00') {
 				return -1, errors.New("execution environment contains an invalid entry")
@@ -135,7 +143,7 @@ func buildTypedCommand(ctx context.Context, spec *execv1.ExecutionSpec) (*exec.C
 		return exec.CommandContext(ctx, spec.Command, spec.Arguments...), func() {}, nil
 	}
 	if runtime.GOOS != "windows" {
-		command := exec.CommandContext(ctx, "sh", "-s")
+		command := exec.CommandContext(ctx, "/bin/sh", "-s")
 		command.Stdin = strings.NewReader(spec.Command)
 		return command, func() {}, nil
 	}

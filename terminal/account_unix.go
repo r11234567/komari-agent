@@ -14,11 +14,13 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/komari-monitor/komari-agent/core/capability"
 	"github.com/komari-monitor/komari-agent/core/osidentity"
 )
 
 func newTerminalAs(username, shell, directory string) (*terminalImpl, error) {
-	identity, err := osidentity.Resolve(username)
+	rootAllowed, _ := capability.RootExecutionAllowed()
+	identity, err := osidentity.ResolveRemote(username, rootAllowed)
 	if err != nil {
 		return nil, err
 	}
@@ -36,6 +38,11 @@ func newTerminalAs(username, shell, directory string) (*terminalImpl, error) {
 		return nil, err
 	}
 	cmd.Env = append(cmd.Env, "SHELL="+shell)
+	if !rootAllowed {
+		if err := osidentity.RestrictPrivilegeGain(cmd); err != nil {
+			return nil, err
+		}
+	}
 	tty, err := pty.Start(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("start terminal as %s: %w", username, err)

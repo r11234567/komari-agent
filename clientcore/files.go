@@ -81,7 +81,11 @@ func (c *Client) attachFileOperation(parent context.Context, assignment *filev1.
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	go capability.CancelOnRevocation(ctx, cancel, capability.WebSSHAllowed)
+	accountAllowed := func() (bool, string) { return capability.WebSSHAccountAllowed(assignment.GetSystemUser()) }
+	if ok, reason := accountAllowed(); !ok {
+		return errors.New(reason)
+	}
+	go capability.CancelOnRevocation(ctx, cancel, accountAllowed)
 
 	stream := c.files.AttachFileOperations(ctx)
 	c.authorize(stream.RequestHeader())
@@ -102,6 +106,9 @@ func (c *Client) attachFileOperation(parent context.Context, assignment *filev1.
 	command := response.GetAssignment()
 	if command == nil {
 		return errors.New("file assignment is missing from the attach response")
+	}
+	if command.GetSystemUser() != assignment.GetSystemUser() {
+		return errors.New("file workspace OS account changed after assignment")
 	}
 	// Read the server side concurrently so grant expiry closes active workers,
 	// including a long transfer, instead of waiting for the operation to finish.
