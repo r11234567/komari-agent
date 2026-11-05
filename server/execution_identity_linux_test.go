@@ -149,3 +149,49 @@ func TestRootWebSSHGrantOverridesNeitherDefaultDenyNorLocalUserList(t *testing.T
 		t.Fatal("remote root permission bypassed the explicit local list")
 	}
 }
+
+func TestRootWebSSHGrantUsesSelectedUIDAndRestrictsOrdinaryPTY(t *testing.T) {
+	rootExecutionFixture(t, true)
+	t.Setenv("KOMARI_WORKSPACE_USERS", "root,komari")
+	for _, name := range []string{"root", "komari"} {
+		t.Run(name, func(t *testing.T) {
+			account, err := user.Lookup(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			session, err := terminal.OpenSessionAs(80, 24, name, "/bin/sh", "/")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer session.Close()
+			_, err = session.Write([]byte("printf '__PTY_UID__%s\\n' \"$(id -u)\"; grep '^NoNewPrivs:' /proc/self/status\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := make(chan string, 1)
+			go func() {
+				var output strings.Builder
+				buffer := make([]byte, 4096)
+				for output.Len() < 64<<10 {
+					n, err := session.Read(buffer)
+					output.Write(buffer[:n])
+					if err != nil || strings.Contains(output.String(), "NoNewPrivs:\t0\r\n") || strings.Contains(output.String(), "NoNewPrivs:\t1\r\n") {
+						break
+					}
+				}
+				result <- output.String()
+			}()
+			select {
+			case output := <-result:
+				if !strings.Contains(output, "__PTY_UID__"+account.Uid+"\r\n") {
+					t.Fatalf("terminal used the wrong account: %q", output)
+				}
+				if name == "komari" && !strings.Contains(output, "NoNewPrivs:\t1") {
+					t.Fatalf("ordinary terminal could elevate after root permission withdrawal: %q", output)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("terminal did not report its OS identity")
+			}
+		})
+	}
+}

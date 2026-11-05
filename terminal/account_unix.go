@@ -38,7 +38,7 @@ func newTerminalAs(username, shell, directory string) (*terminalImpl, error) {
 		return nil, err
 	}
 	cmd.Env = append(cmd.Env, "SHELL="+shell)
-	if !rootAllowed {
+	if identity.User.Uid != "0" {
 		if err := osidentity.RestrictPrivilegeGain(cmd); err != nil {
 			return nil, err
 		}
