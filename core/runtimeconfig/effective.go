@@ -6,6 +6,7 @@ import (
 	"github.com/komari-monitor/komari-agent/core/hostops"
 	"github.com/komari-monitor/komari-agent/core/privileged"
 	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
+	"runtime"
 )
 
 // EffectiveConfig is the view used by collectors, capability reports and gates.
@@ -114,7 +115,10 @@ func Inspect(config *flags_pkg.Config, runtimeStore *Store, privilegedStore *pri
 	result.Privileged.WebSSHEnabled = result.Privileged.RemoteControlEnabled && result.Privileged.WebSSHEnabled
 	result.Privileged.ExecutionEnabled = result.Privileged.RemoteControlEnabled && result.Privileged.ExecutionEnabled
 	result.Privileged.RootExecutionAllowed = result.Privileged.RemoteControlEnabled && result.Privileged.RootExecutionAllowed
-	result.Runtime.EnableGPU = result.Privileged.EnableGPU
+	result.Runtime.EnableGPU = effectiveGPU(raw, result.Privileged.EnableGPU)
+	if runtime.GOOS == "windows" {
+		result.Sources["enable_gpu"] = "Windows ordinary runtime configuration, default enabled"
+	}
 	result.Runtime.RemoteControlEnabled = result.Privileged.RemoteControlEnabled
 	result.Runtime.DetailedGPU = raw.DetailedGPU && result.Runtime.EnableGPU
 	return result
@@ -124,9 +128,16 @@ func EffectiveForMode(actual reportv1.PrivilegeMode) EffectiveConfig {
 	if required := result.Privileged.RequiredPrivilegeMode; required != 0 && required != actual {
 		result.Privileged = privileged.Settings{}
 		result.Runtime.RemoteControlEnabled = false
-		result.Runtime.EnableGPU = false
-		result.Runtime.DetailedGPU = false
+		result.Runtime.EnableGPU = effectiveGPU(result.Runtime, false)
+		result.Runtime.DetailedGPU = result.Runtime.DetailedGPU && result.Runtime.EnableGPU
 		result.BlockedReason = "actual daemon identity differs from applied privileged snapshot"
 	}
 	return result
+}
+
+func effectiveGPU(snapshot Snapshot, privilegedEnabled bool) bool {
+	if runtime.GOOS != "windows" {
+		return privilegedEnabled
+	}
+	return snapshot.WindowsGPUEnabled == nil || *snapshot.WindowsGPUEnabled
 }
