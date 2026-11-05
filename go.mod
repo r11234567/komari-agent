@@ -14,7 +14,7 @@ require (
 	github.com/prometheus-community/pro-bing v0.9.1
 	github.com/r11234567/komari-proto v0.0.0
 	github.com/rhysd/go-github-selfupdate v1.2.3
-	github.com/shirou/gopsutil/v4 v4.26.9
+	github.com/shirou/gopsutil/v4 v4.26.10
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	golang.org/x/net v0.61.0
@@ -24,7 +24,7 @@ require (
 )
 
 require (
-	github.com/ebitengine/purego v0.11.1 // indirect
+	github.com/ebitengine/purego v0.11.2 // indirect
 	github.com/google/go-github/v30 v30.1.0 // indirect
 	github.com/google/go-querystring v1.0.0 // indirect
 	github.com/inconshreveable/go-update v0.0.0-20160112193335-8152e7eb6ccf // indirect
