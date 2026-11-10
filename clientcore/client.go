@@ -95,6 +95,7 @@ type Client struct {
 	agentMu        sync.RWMutex
 	agentID        string
 	sequence       atomic.Uint64
+	gpuAccepted    sync.Once
 	store          *runtimeconfig.Store
 	// privilegedStore is daemon-owned. Only a verified current v2 approval can
 	// activate a same-identity candidate; host actions remain unavailable.
@@ -1107,8 +1108,28 @@ func (c *Client) SubmitMetrics(parent context.Context) error {
 	response, err := c.metrics.SubmitMetrics(ctx, req)
 	if err == nil {
 		c.advanceSequence(response.Msg.AcceptedSequence)
+		c.logGPUAcceptance(req.Msg, response.Msg.AcceptedSequence, response.Msg.AcceptedPoints)
 	}
 	return err
+}
+
+// Log the first acknowledged GPU batch only. This distinguishes successful
+// collection from actual panel acceptance without logging every sample.
+func (c *Client) logGPUAcceptance(batch *metricsv1.SubmitMetricsRequest, acceptedSequence uint64, acceptedPoints uint32) {
+	if acceptedSequence < batch.Sequence || int(acceptedPoints) != len(batch.Points) {
+		return
+	}
+	devices := make(map[string]struct{})
+	for _, point := range batch.Points {
+		if point.Metric == "gpu.device.usage" && point.Labels["device_index"] != "" {
+			devices[point.Labels["device_index"]] = struct{}{}
+		}
+	}
+	if len(devices) > 0 {
+		c.gpuAccepted.Do(func() {
+			log.Printf("GPU metrics accepted by panel: devices=%d points=%d", len(devices), acceptedPoints)
+		})
+	}
 }
 
 func (c *Client) advanceSequence(accepted uint64) {
@@ -1157,6 +1178,7 @@ func (c *Client) runMetricStream(ctx context.Context) error {
 				break
 			}
 			c.advanceSequence(ack.AcceptedSequence)
+			c.logGPUAcceptance(pending, ack.AcceptedSequence, ack.AcceptedPoints)
 			// The stream is delivering. A later interruption starts its backoff
 			// from the base interval rather than from an earlier failure streak.
 			streamRetry.Reset()
