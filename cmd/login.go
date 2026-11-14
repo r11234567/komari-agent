@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
@@ -322,13 +323,14 @@ against the panel before relying on them: this replaces what the Agent trusts.`,
 
 var reauthCmd = &cobra.Command{
 	Use:   "reauth",
-	Short: "Re-authenticate this machine when its sign-in has expired",
-	Long: `Re-authenticate this machine when its sign-in has expired.
+	Short: "Re-authenticate this machine when its sign-in has expired or been rejected",
+	Long: `Re-authenticate this machine when its sign-in has expired or been rejected.
 
-When the refresh token expires (after ~180 days), the Agent can no longer
-renew itself silently. This command starts a new device authorization grant
-that a panel administrator must approve, just like the original login, but
-preserves the machine's identity, keypair, and pinned trust bundle.
+When the refresh token expires (after ~180 days) or is revoked/rejected by
+the panel, the Agent can no longer renew itself silently. This command starts
+a new device authorization grant that a panel administrator must approve, just
+like the original login, but preserves the machine's identity, keypair, and
+pinned trust bundle.
 
 Use this instead of 'logout + login' to avoid losing the machine's history
 and configuration in the panel.`,
@@ -340,15 +342,12 @@ and configuration in the panel.`,
 			return err
 		}
 		identity, ok := store.Identity()
-		if !ok {
+		if !ok || identity.AgentID == "" {
 			return errors.New("this machine is not enrolled; run 'komari-agent login' instead")
 		}
-		if !identity.RefreshExpired(time.Now()) {
-			fmt.Printf("Sign-in for agent %s is still valid (until %s).\n",
-				identity.AgentID, identity.RefreshTokenExpiresAt.Local().Format("2006-01-02 15:04"))
-			fmt.Println("Use 'komari-agent refresh' to renew the access token, or wait until it expires.")
-			return nil
-		}
+		// A local refresh expiry timestamp cannot tell whether the panel has
+		// revoked or rejected the stored refresh token, so never block reauth on
+		// a local deadline.
 
 		client, err := enrollment.New(identity.Endpoint, dnsresolver.GetHTTPClientWithPreference(30*time.Second, flags.PreferIPVersion))
 		if err != nil {
@@ -360,8 +359,11 @@ and configuration in the panel.`,
 		ctx, cancel := context.WithTimeout(ctx, enrollmentTimeout)
 		defer cancel()
 
-		fmt.Printf("Re-authenticating agent %s with %s\n\n", identity.AgentID, client.Endpoint())
-		renewed, err := client.Reauth(ctx, identity, printInstruction)
+		out := cmd.OutOrStdout()
+		fmt.Fprintf(out, "Re-authenticating agent %s with %s\n\n", identity.AgentID, client.Endpoint())
+		renewed, err := client.Reauth(ctx, identity, func(instruction enrollment.Instruction) {
+			printInstructionTo(out, instruction)
+		})
 		if err != nil {
 			return err
 		}
@@ -370,9 +372,9 @@ and configuration in the panel.`,
 			return err
 		}
 
-		fmt.Printf("\nRe-authenticated as agent %s\n", renewed.AgentID)
+		fmt.Fprintf(out, "\nRe-authenticated as agent %s\n", renewed.AgentID)
 		if !renewed.RefreshTokenExpiresAt.IsZero() {
-			fmt.Printf("Sign-in valid until %s (renewed automatically)\n",
+			fmt.Fprintf(out, "Sign-in valid until %s (renewed automatically)\n",
 				renewed.RefreshTokenExpiresAt.Local().Format("2006-01-02 15:04"))
 		}
 		return nil
@@ -397,19 +399,23 @@ func pinTrust(ctx context.Context, client *enrollment.Client, store *credentials
 }
 
 func printInstruction(instruction enrollment.Instruction) {
+	printInstructionTo(os.Stdout, instruction)
+}
+
+func printInstructionTo(out io.Writer, instruction enrollment.Instruction) {
 	target := instruction.VerificationURIComplete
 	if strings.TrimSpace(target) == "" {
 		target = instruction.VerificationURI
 	}
-	fmt.Println("Open this link and sign in to approve this machine:")
-	fmt.Printf("\n    %s\n\n", target)
+	fmt.Fprintln(out, "Open this link and sign in to approve this machine:")
+	fmt.Fprintf(out, "\n    %s\n\n", target)
 	if instruction.UserCode != "" {
-		fmt.Printf("Verification code: %s\n", instruction.UserCode)
+		fmt.Fprintf(out, "Verification code: %s\n", instruction.UserCode)
 	}
 	if !instruction.ExpiresAt.IsZero() {
-		fmt.Printf("The link expires at %s.\n", instruction.ExpiresAt.Local().Format("15:04:05"))
+		fmt.Fprintf(out, "The link expires at %s.\n", instruction.ExpiresAt.Local().Format("15:04:05"))
 	}
-	fmt.Println("\nWaiting for approval...")
+	fmt.Fprintln(out, "\nWaiting for approval...")
 }
 
 func firstNonEmpty(values ...string) string {
