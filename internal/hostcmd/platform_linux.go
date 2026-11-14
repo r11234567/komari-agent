@@ -125,6 +125,9 @@ func update(args []string, out io.Writer) (result error) {
 	if err != nil {
 		return err
 	}
+	if err := ensureExecutionAccount(); err != nil {
+		return err
+	}
 	journal := filepath.Join("/var/lib/komari-host", m.ServiceName)
 	if err = ensureTrustedDir(journal); err != nil {
 		return err
@@ -333,6 +336,9 @@ func migrate(args []string, out io.Writer) error {
 
 	binary, err := verifiedArtifact(*artifact, *digest)
 	if err != nil {
+		return err
+	}
+	if err := ensureExecutionAccount(); err != nil {
 		return err
 	}
 	self, err := os.Executable()

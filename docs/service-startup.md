@@ -91,6 +91,10 @@ sudo tail -n 60 /var/log/komari-agent.log
 
 Windows 安装器目前仅开放普通监控模式：服务固定使用 `LocalService`，强制关闭远程控制、WebSSH、远程执行，不安装救援或提权脚本。无需新版 Agent，使用当前发布的二进制即可；Windows 的特权 v2 初始化、特权配置下发和主机动作仍不受支持。不要用面板的特权配置完成状态判断普通监控是否在线。
 
+Windows 基础 GPU 采集默认开启，可通过普通运行时配置显式关闭；它不需要特权下发，也不改变服务身份。NVIDIA 动态指标使用限时四秒的五字段 `nvidia-smi` CSV 查询，避免完整 XML 中非 UTF-8 内容导致整次采集失败。GPU 型号、显存、利用率和温度使用后端的标准指标名及设备标签上报。
+
+日志首次出现 `GPU metrics accepted by panel: devices=... points=...` 表示面板已确认接收包含 GPU 的完整指标批次，每个客户端实例只记录一次。在装有 NVIDIA 驱动的 Windows 测试机上，可设置 `KOMARI_TEST_NVIDIA_GPU=1` 后运行 `go test -run TestWindowsNVIDIAHardwareMetrics -v ./monitoring`，严格验证真实硬件采集和指标转换。普通 CI 没有显卡时跳过这项硬件测试；CSV 解析及协议回归仍正常运行。
+
 在管理员 PowerShell 执行：
 
 ```powershell

@@ -45,6 +45,7 @@ type Settings struct {
 	RemoteControlEnabled  bool                   `json:"remote_control_enabled"`
 	WebSSHEnabled         bool                   `json:"webssh_enabled"`
 	ExecutionEnabled      bool                   `json:"execution_enabled"`
+	RootExecutionAllowed  bool                   `json:"root_execution_allowed"`
 	EnableGPU             bool                   `json:"enable_gpu"`
 	RescueHelperEnabled   bool                   `json:"rescue_helper_enabled"`
 }
@@ -266,6 +267,7 @@ func settingsFromProto(value *configv1.PrivilegedConfig) Settings {
 		RemoteControlEnabled:  value.GetRemoteControlEnabled(),
 		WebSSHEnabled:         value.GetWebsshEnabled(),
 		ExecutionEnabled:      value.GetExecutionEnabled(),
+		RootExecutionAllowed:  value.GetRootExecutionAllowed(),
 		EnableGPU:             value.GetEnableGpu(),
 		RescueHelperEnabled:   value.GetRescueHelperEnabled(),
 	}

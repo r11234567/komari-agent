@@ -271,18 +271,18 @@ func (data Report) Metrics(observedAt time.Time) []*metricsv1.MetricsPoint {
 		point("system.uptime_seconds", float64(data.Uptime), nil), point("system.process_count", float64(data.Process), nil),
 	}
 	for index, gpu := range data.GPUs {
-		labels := map[string]string{"id": strconv.Itoa(index), "name": gpu.Name}
+		labels := map[string]string{"device_index": strconv.Itoa(index), "device_name": gpu.Name}
 		if gpu.Utilization >= 0 {
-			points = append(points, point("gpu.utilization_percent", gpu.Utilization, labels))
+			points = append(points, point("gpu.device.usage", gpu.Utilization, labels))
 		}
 		if gpu.MemoryUsed != ^uint64(0) {
-			points = append(points, point("gpu.memory_used_bytes", float64(gpu.MemoryUsed), labels))
+			points = append(points, point("gpu.memory.used", float64(gpu.MemoryUsed), labels))
 		}
 		if gpu.MemoryTotal != ^uint64(0) {
-			points = append(points, point("gpu.memory_total_bytes", float64(gpu.MemoryTotal), labels))
+			points = append(points, point("gpu.memory.total", float64(gpu.MemoryTotal), labels))
 		}
 		if gpu.Temperature != ^uint64(0) {
-			points = append(points, point("gpu.temperature_celsius", float64(gpu.Temperature), labels))
+			points = append(points, point("gpu.temperature", float64(gpu.Temperature), labels))
 		}
 	}
 	return points
