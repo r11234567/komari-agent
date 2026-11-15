@@ -12,7 +12,10 @@ import (
 
 func permanentCredentialRejection(err error) bool {
 	code := connect.CodeOf(err)
-	return code == connect.CodeUnauthenticated || code == connect.CodePermissionDenied
+	// HTTP proxies can map HTML 401/403 pages to these codes too. Only a
+	// decoded RPC rejection is authoritative enough to stop renewal. The SDK
+	// records that distinction before we wrap errors with operation context.
+	return connect.IsWireError(err) && (code == connect.CodeUnauthenticated || code == connect.CodePermissionDenied)
 }
 
 // Stable per-machine jitter spreads renewal load without a polling loop.
