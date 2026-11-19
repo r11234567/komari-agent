@@ -47,3 +47,25 @@ func TestLoadAutoDiscoveryConfigTightensExistingFileMode(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadAutoDiscoveryConfigFailsWhenPermissiveChmodFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not enforced on Windows")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "auto-discovery.json")
+	if err := os.WriteFile(path, []byte(`{"uuid":"agent-1","token":"legacy-token"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENT_AUTO_DISCOVERY_FILE", path)
+
+	origChmod := chmodAutoDiscoveryFile
+	chmodAutoDiscoveryFile = func(string, os.FileMode) error {
+		return errors.New("operation not permitted")
+	}
+	t.Cleanup(func() { chmodAutoDiscoveryFile = origChmod })
+
+	if _, err := loadAutoDiscoveryConfig(); err == nil {
+		t.Fatal("expected error when tightening overly permissive 0644 auto-discovery file fails")
+	}
+}

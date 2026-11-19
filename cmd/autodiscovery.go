@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -16,7 +17,10 @@ type AutoDiscoveryConfig struct {
 	Token string `json:"token"`
 }
 
-var errLegacyAutoDiscoveryRemoved = errors.New("legacy /api/clients/register auto-discovery has been removed; enroll this agent using device enrollment instead")
+var (
+	errLegacyAutoDiscoveryRemoved = errors.New("legacy /api/clients/register auto-discovery has been removed; enroll this agent using device enrollment instead")
+	chmodAutoDiscoveryFile        = os.Chmod
+)
 
 // getAutoDiscoveryFilePath returns the legacy auto-discovery config file path.
 func getAutoDiscoveryFilePath() string {
@@ -38,13 +42,20 @@ func getAutoDiscoveryFilePath() string {
 func loadAutoDiscoveryConfig() (*AutoDiscoveryConfig, error) {
 	configPath := getAutoDiscoveryFilePath()
 
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+	info, err := os.Stat(configPath)
+	if os.IsNotExist(err) {
 		return nil, nil
 	} else if err != nil {
 		return nil, fmt.Errorf("failed to stat auto-discovery config: %w", err)
 	}
 
-	if err := os.Chmod(configPath, 0o600); err != nil {
+	if runtime.GOOS != "windows" {
+		if perm := info.Mode().Perm(); perm&0o077 != 0 {
+			if err := chmodAutoDiscoveryFile(configPath, 0o600); err != nil {
+				return nil, fmt.Errorf("auto-discovery config %s has overly permissive mode %04o and failed to tighten to 0600: %w", configPath, perm, err)
+			}
+		}
+	} else if err := chmodAutoDiscoveryFile(configPath, 0o600); err != nil {
 		log.Printf("Warning: failed to tighten permissions on %s: %v", configPath, err)
 	}
 
