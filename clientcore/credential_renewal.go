@@ -1,18 +1,39 @@
 package clientcore
 
 import (
-	"connectrpc.com/connect"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"log"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari-agent/core/credentials"
+	commonv1 "github.com/r11234567/komari-proto/gen/go/komari/common/v1"
 )
+
+func isRefreshRecoveryRequired(err error) bool {
+	var connectErr *connect.Error
+	if !errors.As(err, &connectErr) || connectErr.Code() != connect.CodeFailedPrecondition {
+		return false
+	}
+	for _, detail := range connectErr.Details() {
+		msg, detailErr := detail.Value()
+		if detailErr != nil {
+			continue
+		}
+		if ed, ok := msg.(*commonv1.ErrorDetail); ok && ed.GetCode() == "REFRESH_RECOVERY_REQUIRED" {
+			return true
+		}
+	}
+	return false
+}
 
 func permanentCredentialRejection(err error) bool {
 	code := connect.CodeOf(err)
-	return code == connect.CodeUnauthenticated || code == connect.CodePermissionDenied
+	return code == connect.CodeUnauthenticated ||
+		code == connect.CodePermissionDenied ||
+		isRefreshRecoveryRequired(err)
 }
 
 // Stable per-machine jitter spreads renewal load without a polling loop.

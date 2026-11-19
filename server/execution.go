@@ -152,13 +152,14 @@ func buildTypedCommand(ctx context.Context, spec *execv1.ExecutionSpec) (*exec.C
 		return nil, func() {}, err
 	}
 	cleanup := func() { _ = os.Remove(file.Name()) }
-	if _, err := file.Write([]byte{0xEF, 0xBB, 0xBF}); err == nil {
-		_, err = file.WriteString("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n" + spec.Command)
+	_, writeErr := file.Write([]byte{0xEF, 0xBB, 0xBF})
+	if writeErr == nil {
+		_, writeErr = file.WriteString("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n" + spec.Command)
 	}
 	closeErr := file.Close()
-	if err != nil {
+	if writeErr != nil {
 		cleanup()
-		return nil, func() {}, err
+		return nil, func() {}, writeErr
 	}
 	if closeErr != nil {
 		cleanup()

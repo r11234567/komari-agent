@@ -221,3 +221,65 @@ func TestDPoPTransport_401AutomaticRetry(t *testing.T) {
 		t.Fatalf("expected 2 attempts (initial 401 + retry), got %d", attempts)
 	}
 }
+
+func TestDPoPTransport_401DoesNotReplayStreamBody(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	curToken := "expired-stream-token"
+	identity := credentials.Identity{
+		Endpoint:    "https://panel.example.com",
+		AgentID:     "agent-stream-401",
+		AccessToken: curToken,
+		PrivateKey:  base64.StdEncoding.EncodeToString(priv),
+	}
+
+	attempts := 0
+	refreshed := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	client := WrapWithDPoP(srv.Client(), func() (credentials.Identity, bool) {
+		id := identity
+		id.AccessToken = curToken
+		return id, true
+	}, func() string {
+		return curToken
+	}, func(ctx context.Context, oldToken string) error {
+		refreshed = true
+		curToken = "fresh-stream-token"
+		return nil
+	})
+
+	pr, pw := io.Pipe()
+	go func() {
+		_, _ = pw.Write([]byte("stream-chunk"))
+		_ = pw.Close()
+	}()
+	req, err := http.NewRequest("POST", srv.URL+"/komari.webssh.v1.WebSSHService/AttachSession", pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.ContentLength = -1
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if !refreshed {
+		t.Fatal("expected On401 credential refresh to run on streaming 401")
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected original 401 so caller stream loop reconnects, got %d", resp.StatusCode)
+	}
+	if attempts != 1 {
+		t.Fatalf("streaming request must not be replayed in-place; got %d attempts", attempts)
+	}
+}

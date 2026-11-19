@@ -81,6 +81,12 @@ var RootCmd = &cobra.Command{
 		if (flags.CFAccessClientID == "") != (flags.CFAccessClientSecret == "") {
 			return errors.New("Cloudflare Access client ID and client secret must be configured together")
 		}
+		// Handle --show-warning before acquiring daemon state locks so the
+		// interactive toast helper never contends with the running service.
+		if flags.ShowWarning {
+			ShowToast()
+			os.Exit(0)
+		}
 		privPath := flags.PrivilegedStateFile
 		if privPath == "" {
 			privPath = privileged.DefaultPath()
@@ -117,11 +123,6 @@ var RootCmd = &cobra.Command{
 			log.Printf("shutting down gracefully...")
 			netstatic.Stop()
 		}()
-
-		if flags.ShowWarning {
-			ShowToast()
-			os.Exit(0)
-		}
 
 		if allowed, _ := capability.RemoteControlAllowed(runtimeconfig.RemoteControlEnabled()); allowed {
 			go WarnKomariRunning()

@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,8 +18,11 @@ import (
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari-agent/core/credentials"
+	commonv1 "github.com/r11234567/komari-proto/gen/go/komari/common/v1"
 	enrollmentv1 "github.com/r11234567/komari-proto/gen/go/komari/enrollment/v1"
+	enrollmentconnect "github.com/r11234567/komari-proto/gen/go/komari/enrollment/v1/enrollmentv1connect"
 	securityv1 "github.com/r11234567/komari-proto/gen/go/komari/security/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -221,5 +225,96 @@ func TestCredentialRenewalFinalHorizonDoesNotPoll(t *testing.T) {
 	id.RefreshTokenExpiresAt = now.Add(24 * time.Hour)
 	if delay := credentialRenewalDelay(id, now); delay != 0 {
 		t.Fatalf("ordinary short-lived AT must still refresh early: %s", delay)
+	}
+}
+
+type recoveryRequiredEnrollmentHandler struct {
+	enrollmentconnect.UnimplementedEnrollmentServiceHandler
+	calls *atomic.Int32
+}
+
+func (h *recoveryRequiredEnrollmentHandler) RefreshCredentials(context.Context, *connect.Request[enrollmentv1.RefreshCredentialsRequest]) (*connect.Response[enrollmentv1.RefreshCredentialsResponse], error) {
+	h.calls.Add(1)
+	rpcErr := connect.NewError(connect.CodeFailedPrecondition, errors.New("refresh recovery window expired"))
+	if detail, err := connect.NewErrorDetail(&commonv1.ErrorDetail{Code: "REFRESH_RECOVERY_REQUIRED"}); err == nil {
+		rpcErr.AddDetail(detail)
+	}
+	return nil, rpcErr
+}
+
+func TestCredentialRenewalStopsOnlyOnRefreshRecoveryRequiredDetail(t *testing.T) {
+	recoveryErr := connect.NewError(connect.CodeFailedPrecondition, errors.New("refresh recovery window expired"))
+	detail, err := connect.NewErrorDetail(&commonv1.ErrorDetail{Code: "REFRESH_RECOVERY_REQUIRED"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveryErr.AddDetail(detail)
+	if !permanentCredentialRejection(recoveryErr) {
+		t.Fatal("CodeFailedPrecondition with REFRESH_RECOVERY_REQUIRED detail must halt renewal retries")
+	}
+
+	plainFailedPrecondition := connect.NewError(connect.CodeFailedPrecondition, errors.New("other precondition"))
+	if permanentCredentialRejection(plainFailedPrecondition) {
+		t.Fatal("plain CodeFailedPrecondition without REFRESH_RECOVERY_REQUIRED detail must remain retryable")
+	}
+
+	otherDetailErr := connect.NewError(connect.CodeFailedPrecondition, errors.New("different precondition"))
+	otherDetail, err := connect.NewErrorDetail(&commonv1.ErrorDetail{Code: "OTHER_PRECONDITION"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherDetailErr.AddDetail(otherDetail)
+	if permanentCredentialRejection(otherDetailErr) {
+		t.Fatal("CodeFailedPrecondition with unrelated ErrorDetail code must remain retryable")
+	}
+
+	// End-to-end Connect wire check: runCredentialRenewal must stop after one
+	// server response carrying FailedPrecondition + REFRESH_RECOVERY_REQUIRED.
+	calls := &atomic.Int32{}
+	_, handler := enrollmentconnect.NewEnrollmentServiceHandler(&recoveryRequiredEnrollmentHandler{calls: calls})
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, key, keyID, err := credentials.GenerateKeypair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := credentials.Open(filepath.Join(t.TempDir(), "credentials.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(credentials.Identity{
+		Endpoint:              server.URL,
+		AgentID:               "renewal-node",
+		PublicKey:             pub,
+		PrivateKey:            key,
+		KeyID:                 keyID,
+		AccessToken:           "synthetic-old-access",
+		RefreshToken:          "synthetic-old-refresh",
+		AccessTokenExpiresAt:  time.Now().Add(-time.Minute),
+		RefreshTokenExpiresAt: time.Now().Add(24 * time.Hour),
+		ControlPlaneKeys:      []credentials.PinnedKey{{Algorithm: 1, KeyID: "renewal-panel", Value: base64.StdEncoding.EncodeToString(public)}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	client := &Client{endpoint: server.URL, token: "synthetic-old-access", credentialStore: store}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		client.runCredentialRenewal(ctx)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("runCredentialRenewal did not stop after REFRESH_RECOVERY_REQUIRED response")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("expected exactly 1 refresh attempt before halting, got %d", got)
 	}
 }

@@ -131,6 +131,12 @@ func (d *DPoPTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp, err := d.Base.RoundTrip(req)
 	if err == nil && resp.StatusCode == http.StatusUnauthorized && d.On401 != nil {
 		if refreshErr := d.On401(req.Context(), token); refreshErr == nil {
+			// Streaming request bodies (GetBody == nil) cannot be replayed safely
+			// once handed to the transport. Refresh the credential cache and let
+			// the caller's stream loop establish a fresh connection.
+			if isStream {
+				return resp, err
+			}
 			newToken := ""
 			if d.Token != nil {
 				newToken = d.Token()
@@ -138,7 +144,7 @@ func (d *DPoPTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			if newToken != "" && newToken != token {
 				_ = resp.Body.Close()
 				signRequest(newToken)
-				if !isStream && bodyBytes != nil {
+				if bodyBytes != nil {
 					req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 				}
 				return d.Base.RoundTrip(req)

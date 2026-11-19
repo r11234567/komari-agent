@@ -18,7 +18,13 @@ const (
 )
 
 func (c *Client) runFileOperations(ctx context.Context) {
-	executor := files.NewExecutor(ctx, files.ExecutorOptions{AuthorizeTransfer: c.authorize})
+	executor := files.NewExecutor(ctx, files.ExecutorOptions{
+		AuthorizeTransfer: c.authorize,
+		RootAllowed: func() bool {
+			ok, _ := capability.RootExecutionAllowed()
+			return ok
+		},
+	})
 	defer executor.Close()
 	semaphore := make(chan struct{}, 4)
 	var retry retryPolicy

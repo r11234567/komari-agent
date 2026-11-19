@@ -274,10 +274,9 @@ func launchSelfInSession(sessionID uint32, extraArgs []string) error {
 	defer primary.Close()
 
 	exePath, _ := os.Executable()
-	// 仅保留进程名，去掉已有的 --show-warning，避免递归
-	baseArgs := filterArgs(os.Args[1:], "--show-warning")
-	fullArgs := append([]string{quoteIfNeeded(exePath)}, baseArgs...)
-	fullArgs = append(fullArgs, extraArgs...)
+	// Never forward daemon os.Args (which may contain tokens or secrets) into
+	// an interactive user session; pass only the helper's explicit arguments.
+	fullArgs := append([]string{quoteIfNeeded(exePath)}, extraArgs...)
 	cmdlineStr := strings.Join(fullArgs, " ")
 	cmdline, err := windows.UTF16PtrFromString(cmdlineStr)
 	if err != nil {
@@ -394,15 +393,4 @@ func quoteIfNeeded(s string) string {
 		return "\"" + strings.ReplaceAll(s, "\"", "\\\"") + "\""
 	}
 	return s
-}
-
-func filterArgs(args []string, drop string) []string {
-	out := make([]string, 0, len(args))
-	for i := 0; i < len(args); i++ {
-		if args[i] == drop {
-			continue
-		}
-		out = append(out, args[i])
-	}
-	return out
 }
