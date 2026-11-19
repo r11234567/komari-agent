@@ -9,6 +9,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"runtime"
@@ -28,7 +29,7 @@ type NVIDIAGPUInfo struct {
 	MemoryTotal uint64  // 总显存 (字节)
 	MemoryUsed  uint64  // 已用显存 (字节)
 	Utilization float64 // GPU使用率 (0-100)
-	Temperature float64 // 温度 (摄氏度)
+	Temperature *float64 // 温度 (摄氏度); nil 表示传感器未提供或不可用
 }
 
 func (smi *NvidiaSMI) GatherModel() ([]string, error) {
@@ -156,14 +157,17 @@ func (smi *NvidiaSMI) gatherDetailedInfo() ([]NVIDIAGPUInfo, error) {
 		utilization, _ := parsePercentageValue(gpu.Utilization.GPUUtil)
 		memTotal, _ := parseMemoryValue(gpu.FrameBufferMemoryUsage.Total)
 		memUsed, _ := parseMemoryValue(gpu.FrameBufferMemoryUsage.Used)
-		temp, _ := parseTemperatureValue(gpu.Temperature.GPUTemp)
+		var tempPtr *float64
+		if temp, err := parseTemperatureValue(gpu.Temperature.GPUTemp); err == nil {
+			tempPtr = &temp
+		}
 
 		gpuInfo := NVIDIAGPUInfo{
 			Name:        gpu.ProductName,
 			MemoryTotal: memTotal,
 			MemoryUsed:  memUsed,
 			Utilization: utilization,
-			Temperature: temp,
+			Temperature: tempPtr,
 		}
 
 		gpuInfos = append(gpuInfos, gpuInfo)
@@ -209,19 +213,19 @@ func parseMemoryValue(value string) (uint64, error) {
 	return result * 1024 * 1024, nil
 }
 
-// 解析温度值 (例如 "65.5 C" -> 65.5)
+// 解析温度值 (例如 "65.5 C" -> 65.5；空值或 N/A 返回错误)
 func parseTemperatureValue(value string) (float64, error) {
 	cleaned := strings.TrimSpace(value)
 	cleaned = strings.TrimSuffix(cleaned, "C")
 	cleaned = strings.TrimSpace(cleaned)
 
 	if cleaned == "" {
-		return 0, nil
+		return 0, errors.New("empty NVIDIA temperature value")
 	}
 
 	result, err := strconv.ParseFloat(cleaned, 64)
-	if err != nil {
-		return 0, err
+	if err != nil || math.IsNaN(result) || math.IsInf(result, 0) || result < -273.15 {
+		return 0, errors.New("invalid NVIDIA temperature value")
 	}
 
 	return result, nil

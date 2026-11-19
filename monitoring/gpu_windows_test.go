@@ -26,14 +26,14 @@ func TestWindowsNVIDIAHardwareMetrics(t *testing.T) {
 		if !strings.Contains(device.Name, "NVIDIA") {
 			continue
 		}
-		if device.MemoryTotal == 0 || device.MemoryUsed > device.MemoryTotal || device.Utilization < 0 || device.Utilization > 100 || device.Temperature == 0 {
+		if device.MemoryTotal == 0 || device.MemoryUsed > device.MemoryTotal || device.Utilization < 0 || device.Utilization > 100 || device.Temperature == nil || *device.Temperature == 0 {
 			t.Fatalf("invalid NVIDIA counters: %+v", device)
 		}
 		report.GPUs = append(report.GPUs, GPUDevice{
 			Name: device.Name, MemoryTotal: device.MemoryTotal, MemoryUsed: device.MemoryUsed,
 			Utilization: device.Utilization, Temperature: device.Temperature,
 		})
-		t.Logf("GPU=%s totalMiB=%d usedMiB=%d utilization=%.1f temperature=%.1f", device.Name, device.MemoryTotal>>20, device.MemoryUsed>>20, device.Utilization, device.Temperature)
+		t.Logf("GPU=%s totalMiB=%d usedMiB=%d utilization=%.1f temperature=%.1f", device.Name, device.MemoryTotal>>20, device.MemoryUsed>>20, device.Utilization, *device.Temperature)
 	}
 	if len(report.GPUs) == 0 {
 		t.Fatal("NVIDIA GPU was not collected")
