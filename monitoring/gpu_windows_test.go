@@ -33,7 +33,7 @@ func TestWindowsNVIDIAHardwareMetrics(t *testing.T) {
 			Name: device.Name, MemoryTotal: device.MemoryTotal, MemoryUsed: device.MemoryUsed,
 			Utilization: device.Utilization, Temperature: device.Temperature,
 		})
-		t.Logf("GPU=%s totalMiB=%d usedMiB=%d utilization=%.1f temperature=%d", device.Name, device.MemoryTotal>>20, device.MemoryUsed>>20, device.Utilization, device.Temperature)
+		t.Logf("GPU=%s totalMiB=%d usedMiB=%d utilization=%.1f temperature=%.1f", device.Name, device.MemoryTotal>>20, device.MemoryUsed>>20, device.Utilization, device.Temperature)
 	}
 	if len(report.GPUs) == 0 {
 		t.Fatal("NVIDIA GPU was not collected")

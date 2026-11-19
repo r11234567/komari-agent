@@ -23,7 +23,7 @@ type AMDGPUInfo struct {
 	MemoryTotal uint64  // 总显存 (字节)
 	MemoryUsed  uint64  // 已用显存 (字节)
 	Utilization float64 // GPU使用率 (0-100)
-	Temperature uint64  // 温度 (摄氏度)
+	Temperature float64 // 温度 (摄氏度)
 }
 
 // ROCmSMI JSON响应结构
@@ -227,8 +227,8 @@ func parseAMDMemoryBytes(value string) (uint64, error) {
 	return bytes, nil
 }
 
-// 解析AMD温度值 (例如 "65" -> 65)
-func parseAMDTemperature(value string) (uint64, error) {
+// 解析AMD温度值 (例如 "65.5" 或 "65.5 C" -> 65.5)
+func parseAMDTemperature(value string) (float64, error) {
 	cleaned := strings.TrimSpace(value)
 	cleaned = strings.TrimSuffix(cleaned, "C")
 	cleaned = strings.TrimSpace(cleaned)
@@ -237,7 +237,7 @@ func parseAMDTemperature(value string) (uint64, error) {
 		return 0, nil
 	}
 
-	result, err := strconv.ParseUint(cleaned, 10, 64)
+	result, err := strconv.ParseFloat(cleaned, 64)
 	if err != nil {
 		return 0, err
 	}

@@ -27,7 +27,7 @@ func TestDetailedGPUDetection(t *testing.T) {
 			t.Logf("GPU detailed info collection failed: %v", err)
 		} else {
 			for i, info := range detailedInfo {
-				t.Logf("GPU %d: %s - Memory: %dMB/%dMB, Usage: %.1f%%, Temp: %d°C",
+				t.Logf("GPU %d: %s - Memory: %dMB/%dMB, Usage: %.1f%%, Temp: %.1f°C",
 					i, info.Name, info.MemoryUsed, info.MemoryTotal, info.Utilization, info.Temperature)
 			}
 		}
@@ -53,7 +53,7 @@ func TestDetailedGPUInfo(t *testing.T) {
 		t.Logf("  Memory Used: %d MB", info.MemoryUsed)
 		//t.Logf("  Memory Free: %d MB", info.MemoryFree)
 		t.Logf("  Utilization: %.1f%%", info.Utilization)
-		t.Logf("  Temperature: %d°C", info.Temperature)
+		t.Logf("  Temperature: %.1f°C", info.Temperature)
 
 		// 验证数据的合理性
 		//if info.MemoryTotal > 0 && info.MemoryUsed+info.MemoryFree != info.MemoryTotal {
@@ -63,5 +63,16 @@ func TestDetailedGPUInfo(t *testing.T) {
 		if info.Utilization < 0 || info.Utilization > 100 {
 			t.Errorf("Invalid utilization value for %s: %.1f%%", info.Name, info.Utilization)
 		}
+	}
+}
+
+func TestParseGPUTemperaturePreservesDecimals(t *testing.T) {
+	amdTemp, err := parseAMDTemperature("64.5 C")
+	if err != nil || amdTemp != 64.5 {
+		t.Fatalf("parseAMDTemperature(64.5 C) = %v, %v, want 64.5", amdTemp, err)
+	}
+	nvidiaTemp, err := parseTemperatureValue("51.25 C")
+	if err != nil || nvidiaTemp != 51.25 {
+		t.Fatalf("parseTemperatureValue(51.25 C) = %v, %v, want 51.25", nvidiaTemp, err)
 	}
 }

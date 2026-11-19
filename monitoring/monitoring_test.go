@@ -24,8 +24,8 @@ func TestMetricsPreserveLegacyAggregateSurface(t *testing.T) {
 
 func TestMetricsGPUUsesCanonicalDeviceInventory(t *testing.T) {
 	report := Report{GPUs: []GPUDevice{
-		{Name: "GPU A", Utilization: 25, MemoryUsed: 1 << 30, MemoryTotal: 8 << 30, Temperature: 50},
-		{Name: "GPU B", Utilization: 75, MemoryUsed: 2 << 30, MemoryTotal: 16 << 30, Temperature: 60},
+		{Name: "GPU A", Utilization: 25, MemoryUsed: 1 << 30, MemoryTotal: 8 << 30, Temperature: 50.5},
+		{Name: "GPU B", Utilization: 75, MemoryUsed: 2 << 30, MemoryTotal: 16 << 30, Temperature: 60.25},
 	}}
 	points := report.Metrics(time.Unix(1, 0))
 	wanted := []string{"gpu.device.usage", "gpu.memory.used", "gpu.memory.total", "gpu.temperature"}
@@ -40,7 +40,10 @@ func TestMetricsGPUUsesCanonicalDeviceInventory(t *testing.T) {
 			}
 		}
 	}
-	report.GPUs = []GPUDevice{{Name: "Unavailable counters", Utilization: -1, MemoryUsed: ^uint64(0), MemoryTotal: ^uint64(0), Temperature: ^uint64(0)}}
+	if points[18+3].Value != 50.5 || points[18+4+3].Value != 60.25 {
+		t.Fatalf("fractional GPU temperatures truncated: %v, %v", points[18+3].Value, points[18+4+3].Value)
+	}
+	report.GPUs = []GPUDevice{{Name: "Unavailable counters", Utilization: -1, MemoryUsed: ^uint64(0), MemoryTotal: ^uint64(0), Temperature: UnavailableGPUTemperature}}
 	if points := report.Metrics(time.Unix(1, 0)); len(points) != 18 {
 		t.Fatal("unavailable GPU counters emitted invalid metric points")
 	}
