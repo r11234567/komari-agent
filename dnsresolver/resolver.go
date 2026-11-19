@@ -141,27 +141,7 @@ func buildTransportWithPreference(timeout time.Duration, tlsConfig *tls.Config, 
 		Proxy:     http.ProxyFromEnvironment,
 		Protocols: protocols,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			host, port, err := net.SplitHostPort(addr)
-			if err != nil {
-				return nil, err
-			}
-			ips, err := customResolver.LookupHost(ctx, host)
-			if err != nil {
-				return nil, err
-			}
-			sortIPsByPreference(ips, preferIPVersion)
-			for _, ip := range ips {
-				dialer := &net.Dialer{
-					Timeout:   timeout,
-					KeepAlive: 30 * time.Second,
-					DualStack: true,
-				}
-				conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip, port))
-				if err == nil {
-					return conn, nil
-				}
-			}
-			return nil, fmt.Errorf("failed to dial to any of the resolved IPs")
+			return dialWithPreference(ctx, network, addr, preferIPVersion, timeout, customResolver)
 		},
 		MaxIdleConns:          128,
 		MaxIdleConnsPerHost:   32,
@@ -219,27 +199,7 @@ func GetStreamingHTTPClientWithPreference(preferIPVersion string) *http.Client {
 	h2cTr := &http2.Transport{
 		AllowHTTP: true,
 		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-			host, port, err := net.SplitHostPort(addr)
-			if err != nil {
-				return nil, err
-			}
-			ips, err := customResolver.LookupHost(ctx, host)
-			if err != nil {
-				return nil, err
-			}
-			sortIPsByPreference(ips, preferIPVersion)
-			for _, ip := range ips {
-				dialer := &net.Dialer{
-					Timeout:   15 * time.Second,
-					KeepAlive: 30 * time.Second,
-					DualStack: true,
-				}
-				conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip, port))
-				if err == nil {
-					return conn, nil
-				}
-			}
-			return nil, fmt.Errorf("failed to dial to any of the resolved IPs for h2c")
+			return dialWithPreference(ctx, network, addr, preferIPVersion, 15*time.Second, customResolver)
 		},
 	}
 

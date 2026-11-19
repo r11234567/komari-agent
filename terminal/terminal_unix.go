@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -88,14 +89,35 @@ func buildMotdShellCommand(shell string) *exec.Cmd {
 
 // unixTerminal 实现了 Unix 系统下的终端接口。
 type unixTerminal struct {
-	tty *os.File  // 伪终端设备文件
-	cmd *exec.Cmd // 启动的 shell 进程命令
+	tty       *os.File  // 伪终端设备文件
+	cmd       *exec.Cmd // 启动的 shell 进程命令
+	waitOnce  sync.Once
+	waitDone  chan struct{}
+	waitErr   error
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // Close 关闭终端，并尝试优雅地终止 shell 进程及其子进程。
 func (t *unixTerminal) Close() error {
+	t.closeOnce.Do(func() { t.closeErr = t.close() })
+	return t.closeErr
+}
+
+func (t *unixTerminal) close() error {
+	// Release blocked PTY reads/writes even when the shell has already exited.
+	// The transport owns cancellation; closing the descriptor is unconditional.
+	if t.tty != nil {
+		_ = t.tty.Close()
+	}
 	if t.cmd == nil || t.cmd.Process == nil {
 		return fmt.Errorf("terminal process is already nil or not started")
+	}
+	t.startWait()
+	select {
+	case <-t.waitDone:
+		return nil
+	default:
 	}
 
 	// 获取进程组 ID (PGID)。如果获取失败，则使用进程 PID 作为回退。
@@ -110,14 +132,9 @@ func (t *unixTerminal) Close() error {
 	log.Printf("Sending SIGTERM to process group %d...\n", pgid)
 	_ = syscall.Kill(-pgid, syscall.SIGTERM) // -pgid 表示发送给进程组
 
-	done := make(chan error, 1)
-	go func() {
-		// 等待命令退出。如果命令已经退出，Wait()会立即返回。
-		done <- t.cmd.Wait()
-	}()
-
 	select {
-	case err := <-done:
+	case <-t.waitDone:
+		err := t.waitErr
 		// 进程已退出
 		if err == nil {
 			return nil
@@ -131,7 +148,8 @@ func (t *unixTerminal) Close() error {
 		// 5 秒内未退出，发送 SIGKILL 强制终止
 		_ = syscall.Kill(-pgid, syscall.SIGKILL)
 		// 再次等待，确保进程被杀死，并获取最终的退出状态
-		killErr := <-done
+		<-t.waitDone
+		killErr := t.waitErr
 		if killErr == nil {
 			return nil
 		}
@@ -172,5 +190,19 @@ func (t *unixTerminal) Wait() error {
 	if t.cmd == nil {
 		return fmt.Errorf("command is nil")
 	}
-	return t.cmd.Wait()
+	t.startWait()
+	<-t.waitDone
+	return t.waitErr
+}
+
+// exec.Cmd.Wait is not safe to call twice or concurrently. Close and the
+// transport share one reaper and observe its result through channel closure.
+func (t *unixTerminal) startWait() {
+	t.waitOnce.Do(func() {
+		t.waitDone = make(chan struct{})
+		go func() {
+			t.waitErr = t.cmd.Wait()
+			close(t.waitDone)
+		}()
+	})
 }

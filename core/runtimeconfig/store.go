@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,6 +30,7 @@ type Snapshot struct {
 	Revision             uint64        `json:"revision"`
 	MemoryIncludeCache   bool          `json:"memory_include_cache"`
 	EnableGPU            bool          `json:"enable_gpu"`
+	WindowsGPUEnabled    *bool         `json:"windows_gpu_enabled,omitempty"`
 	DetailedGPU          bool          `json:"detailed_gpu"`
 	IncludeNics          []string      `json:"include_nics,omitempty"`
 	ExcludeNics          []string      `json:"exclude_nics,omitempty"`
@@ -288,6 +290,10 @@ func fromProto(base Snapshot, revision uint64, value *configv1.RuntimeConfig) (S
 	value.ProtoReflect().Range(func(f protoreflect.FieldDescriptor, _ protoreflect.Value) bool {
 		switch f.Number() {
 		case 1, 3, 4, 5, 6, 7, 8, 19:
+		case 2:
+			if runtime.GOOS != "windows" {
+				unsupported = true
+			}
 		default:
 			unsupported = true
 		}
@@ -302,7 +308,8 @@ func fromProto(base Snapshot, revision uint64, value *configv1.RuntimeConfig) (S
 		result.MemoryIncludeCache = *value.MemoryIncludeCache
 	}
 	if value.EnableGpu != nil {
-		return Snapshot{}, errors.New("GPU enablement is install-only and requires reinstalling the Agent")
+		enabled := value.GetEnableGpu()
+		result.WindowsGPUEnabled = &enabled
 	}
 	if value.DetailedGpu != nil {
 		result.DetailedGPU = *value.DetailedGpu
@@ -339,7 +346,7 @@ func validate(value Snapshot) error {
 	if value.TrafficResetDay > 31 {
 		return errors.New("traffic reset day must be between 0 and 31")
 	}
-	// Detailed collection is masked by the effective privileged GPU grant.
+	// Collection is masked by the platform's effective GPU switch.
 	for name, values := range map[string][]string{
 		"include_nics": value.IncludeNics, "exclude_nics": value.ExcludeNics, "include_mountpoints": value.IncludeMountpoints,
 	} {
@@ -377,6 +384,10 @@ func clone(value *Snapshot) *Snapshot {
 		return nil
 	}
 	result := *value
+	if value.WindowsGPUEnabled != nil {
+		enabled := *value.WindowsGPUEnabled
+		result.WindowsGPUEnabled = &enabled
+	}
 	result.IncludeNics = append([]string(nil), value.IncludeNics...)
 	result.ExcludeNics = append([]string(nil), value.ExcludeNics...)
 	result.IncludeMountpoints = append([]string(nil), value.IncludeMountpoints...)

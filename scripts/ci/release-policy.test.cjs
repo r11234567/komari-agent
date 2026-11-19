@@ -26,6 +26,45 @@ test('release blocks failed, cancelled, skipped, pending and rerunning checks', 
   assert.throws(() => check([success, { ...success, run_attempt: 2, status: 'in_progress', conclusion: null }]), /must succeed/);
 });
 
+test('dev policy accepts only exact successful PR or main runs and fails closed', () => {
+  const pr = { ...success, event: 'pull_request', head_branch: 'feature' };
+  assert.equal(requireSuccessfulRun([pr], 'exact-sha', 'build.yml', true), pr);
+  assert.throws(() => check([pr]), /missing/, 'stable releases still require main push');
+  for (const invalid of [
+    { head_sha: 'older-sha' }, { event: 'workflow_dispatch' }, { event: 'schedule' },
+    { event: 'push', head_branch: 'feature' }, { conclusion: 'failure' },
+  ]) {
+    assert.throws(() => requireSuccessfulRun([{ ...pr, ...invalid }], 'exact-sha', 'build.yml', true), /must succeed/);
+  }
+  for (const runs of [[], [{ ...pr, status: 'in_progress', conclusion: null }]]) {
+    assert.throws(() => requireSuccessfulRun(runs, 'exact-sha', 'build.yml', true), error => error.retryable === true);
+  }
+  assert.throws(() => requireSuccessfulRun([{ ...pr, conclusion: 'failure' }], 'exact-sha', 'build.yml', true), error => error.retryable === false);
+});
+
+test('only a dev-tagged prerelease event enables exact PR CI evidence', async () => {
+  const sha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  const artifactDir = mkdtempSync(join(tmpdir(), 'komari-dev-release-'));
+  const summary = { addHeading() { return this; }, addRaw() { return this; }, async write() {} };
+  const base = {
+    artifactDir, core: { info() {}, summary },
+    github: { rest: { actions: { async listWorkflowRuns() {
+      return { data: { workflow_runs: [{ ...success, head_sha: sha, event: 'pull_request', head_branch: 'feature' }] } };
+    } } } },
+  };
+  const release = { prerelease: true, tag_name: '1.2.97-dev.20261103.1' };
+  const context = { sha, eventName: 'release', repo: { owner: 'example', repo: 'agent' }, payload: { release } };
+  try {
+    await releaseGate({ ...base, context });
+    for (const invalid of [
+      { ...context, eventName: 'workflow_dispatch' },
+      { ...context, payload: { release: { ...release, prerelease: false } } },
+      { ...context, payload: { release: { ...release, tag_name: '1.2.97' } } },
+      { ...context, payload: { release: { ...release, tag_name: 'Snapshot-2611031234' } } },
+    ]) await assert.rejects(releaseGate({ ...base, context: invalid }), /must succeed/);
+  } finally { rmSync(artifactDir, { recursive: true, force: true }); }
+});
+
 test('release checks all required workflows and retains API failures as evidence', async () => {
   const sha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
   const artifactDir = mkdtempSync(join(tmpdir(), 'komari-release-gate-'));

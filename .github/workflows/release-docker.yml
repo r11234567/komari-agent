@@ -15,7 +15,7 @@ env:
 
 jobs:
   build-and-push-multi-arch:
-    if: ${{ github.event_name == 'workflow_dispatch' || !github.event.release.prerelease }}
+    if: ${{ github.event_name == 'workflow_dispatch' || !github.event.release.prerelease || contains(github.event.release.tag_name, '-dev.') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -28,11 +28,20 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Require successful main CI for the exact image commit
+      - name: Require successful CI for the exact image commit
         uses: actions/github-script@v9
         with:
           script: |
-            await require('./scripts/ci/release-gate.cjs')({ github, context, core });
+            const gate = require('./scripts/ci/release-gate.cjs');
+            const attempts = context.payload.release?.prerelease ? 40 : 1;
+            for (let attempt = 1; ; attempt++) {
+              try { await gate({ github, context, core }); break; }
+              catch (error) {
+                if (attempt >= attempts || !error.retryable) throw error;
+                core.info(`Waiting for exact-commit CI (${attempt}/${attempts}): ${error.message}`);
+                await new Promise(resolve => setTimeout(resolve, 30000));
+              }
+            }
 
       - name: Retain CI gate evidence including failures
         uses: actions/upload-artifact@v4
@@ -85,9 +94,10 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: latest=false
           tags: |
             type=raw,value=${{ github.event.release.tag_name || github.sha }}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0

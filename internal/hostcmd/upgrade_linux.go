@@ -87,6 +87,9 @@ func upgradeInstalledRescue(args []string, out io.Writer) (result error) {
 	if ReleaseVersion != "" && ReleaseVersion != *version {
 		return errors.New("target Host release differs from the selected upgrade version")
 	}
+	if err := ensureExecutionAccount(); err != nil {
+		return err
+	}
 	var originals [][]byte
 	var cfg rescue.Config
 	configPath := helperConfig(m)

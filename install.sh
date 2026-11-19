@@ -274,26 +274,28 @@ if [ "$runtime_identity" = "service-account" ] && [ "$EUID" -ne 0 ]; then
     log_error "service-account runtime requires running the installer as root"
     exit 1
 fi
-if [ "$uninstall_only" != true ] && [ "$install_mode" = fresh ] && [ "$runtime_identity" = "service-account" ] && [ "$os_name" = "linux" ]; then
+if [ "$uninstall_only" != true ] && [ "$os_name" = "linux" ]; then
     create_linux_service_account() {
-    if ! id -u "$service_user" >/dev/null 2>&1; then
-        log_info "Creating the unprivileged ${service_user} service user..."
+    local execution_account="${1:-$service_user}"
+    local nologin_shell user_shell
+    if ! id -u "$execution_account" >/dev/null 2>&1; then
+        log_info "Creating the unprivileged ${execution_account} service user..."
         if command -v useradd >/dev/null 2>&1; then
             nologin_shell=$(command -v nologin || printf '/usr/sbin/nologin')
-            useradd --system --no-create-home --home-dir /nonexistent --shell "$nologin_shell" "$service_user" || exit 1
+            useradd --system --no-create-home --home-dir /nonexistent --shell "$nologin_shell" "$execution_account" || exit 1
         elif command -v adduser >/dev/null 2>&1; then
-            adduser -S -D -H -h /nonexistent -s /sbin/nologin "$service_user" || exit 1
+            adduser -S -D -H -h /nonexistent -s /sbin/nologin "$execution_account" || exit 1
         else
             log_error "Cannot create the unprivileged komari user: useradd/adduser is unavailable"
             exit 1
         fi
-    elif [ "$(id -u "$service_user")" -eq 0 ]; then
+    elif [ "$(id -u "$execution_account")" -eq 0 ]; then
         log_error "The existing komari account is privileged; refusing a non-privileged installation"
         exit 1
-    elif id -nG "$service_user" | tr ' ' '\n' | grep -Eq '^(sudo|wheel|admin)$'; then
+    elif id -nG "$execution_account" | tr ' ' '\n' | grep -Eq '^(sudo|wheel|admin)$'; then
         log_error "The existing komari account belongs to an administrative group; refusing installation"
         exit 1
-    elif user_shell=$(getent passwd "$service_user" | cut -d: -f7) && [ "$user_shell" != "/usr/sbin/nologin" ] && [ "$user_shell" != "/sbin/nologin" ] && [ "$user_shell" != "/bin/false" ]; then
+    elif user_shell=$(getent passwd "$execution_account" | cut -d: -f7) && [ "$user_shell" != "/usr/sbin/nologin" ] && [ "$user_shell" != "/sbin/nologin" ] && [ "$user_shell" != "/bin/false" ]; then
         log_error "The existing komari account has a login shell; refusing installation"
         exit 1
     fi
@@ -568,7 +570,7 @@ if [ "$uninstall_only" != true ]; then
     if [ -e "$installer_lock" ] || [ -L "$installer_lock" ]; then ensure_root_file "$installer_lock"; fi
     exec 9>"$installer_lock"
     flock -n 9 || { log_error "Another installer is running"; exit 1; }
-    if [ "$install_mode" = fresh ] && [ "$runtime_identity" = service-account ]; then create_linux_service_account; fi
+    create_linux_service_account komari
     if [ "$install_mode" = fresh ]; then
         prepare_state_parent
         if [ -e "/var/lib/komari/$service_name" ] || [ -L "/var/lib/komari/$service_name" ]; then

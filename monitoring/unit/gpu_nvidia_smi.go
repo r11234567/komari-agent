@@ -4,12 +4,17 @@ package monitoring
 // Original License: MIT
 
 import (
+	"context"
+	"encoding/csv"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type NvidiaSMI struct {
@@ -47,8 +52,51 @@ func (smi *NvidiaSMI) Start() error {
 		}
 		smi.BinPath = binPath
 	}
-	smi.data = smi.pollNvidiaSMI()
+	if runtime.GOOS == "windows" {
+		// Full XML includes process names that Windows drivers can encode using
+		// the local code page. Query only GPU fields, excluding that process list.
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		defer cancel()
+		data, err := exec.CommandContext(ctx, smi.BinPath,
+			"--query-gpu=name,utilization.gpu,memory.total,memory.used,temperature.gpu",
+			"--format=csv,noheader,nounits").Output()
+		if err != nil {
+			return fmt.Errorf("query NVIDIA GPU counters: %w", err)
+		}
+		smi.data = data
+	} else {
+		smi.data = smi.pollNvidiaSMI()
+	}
 	return nil
+}
+
+func (smi *NvidiaSMI) stats() (nvidiaSMIXMLResult, error) {
+	if runtime.GOOS == "windows" {
+		return parseNvidiaGPUCSV(smi.data)
+	}
+	var stats nvidiaSMIXMLResult
+	err := xml.Unmarshal(smi.data, &stats)
+	return stats, err
+}
+
+func parseNvidiaGPUCSV(data []byte) (nvidiaSMIXMLResult, error) {
+	reader := csv.NewReader(strings.NewReader(string(data)))
+	reader.FieldsPerRecord = 5
+	reader.TrimLeadingSpace = true
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nvidiaSMIXMLResult{}, fmt.Errorf("parse NVIDIA GPU counters: %w", err)
+	}
+	var result nvidiaSMIXMLResult
+	for _, fields := range records {
+		gpu := nvidiaSMIGPU{ProductName: strings.TrimSpace(fields[0])}
+		gpu.Utilization.GPUUtil = fields[1]
+		gpu.FrameBufferMemoryUsage.Total = fields[2]
+		gpu.FrameBufferMemoryUsage.Used = fields[3]
+		gpu.Temperature.GPUTemp = fields[4]
+		result.GPUs = append(result.GPUs, gpu)
+	}
+	return result, nil
 }
 
 func (smi *NvidiaSMI) pollNvidiaSMI() []byte {
@@ -61,10 +109,10 @@ func (smi *NvidiaSMI) pollNvidiaSMI() []byte {
 }
 
 func (smi *NvidiaSMI) gatherModel() ([]string, error) {
-	var stats nvidiaSMIXMLResult
+	stats, err := smi.stats()
 	var models []string
 
-	if err := xml.Unmarshal(smi.data, &stats); err != nil {
+	if err != nil {
 		return nil, err
 	}
 
@@ -78,10 +126,10 @@ func (smi *NvidiaSMI) gatherModel() ([]string, error) {
 }
 
 func (smi *NvidiaSMI) gatherUsage() ([]float64, error) {
-	var stats nvidiaSMIXMLResult
+	stats, err := smi.stats()
 	var usageList []float64
 
-	if err := xml.Unmarshal(smi.data, &stats); err != nil {
+	if err != nil {
 		return nil, err
 	}
 
@@ -97,10 +145,10 @@ func (smi *NvidiaSMI) gatherUsage() ([]float64, error) {
 }
 
 func (smi *NvidiaSMI) gatherDetailedInfo() ([]NVIDIAGPUInfo, error) {
-	var stats nvidiaSMIXMLResult
+	stats, err := smi.stats()
 	var gpuInfos []NVIDIAGPUInfo
 
-	if err := xml.Unmarshal(smi.data, &stats); err != nil {
+	if err != nil {
 		return nil, err
 	}
 

@@ -13,7 +13,7 @@ import (
 
 func SettingsFromProto(p *configv1.PrivilegedConfig) Settings { return settingsFromProto(p) }
 func (s Settings) Proto() *configv1.PrivilegedConfig {
-	return &configv1.PrivilegedConfig{RemoteControlEnabled: &s.RemoteControlEnabled, WebsshEnabled: &s.WebSSHEnabled, ExecutionEnabled: &s.ExecutionEnabled, EnableGpu: &s.EnableGPU, RescueHelperEnabled: &s.RescueHelperEnabled, RequiredPrivilegeMode: s.RequiredPrivilegeMode}
+	return &configv1.PrivilegedConfig{RemoteControlEnabled: &s.RemoteControlEnabled, WebsshEnabled: &s.WebSSHEnabled, ExecutionEnabled: &s.ExecutionEnabled, RootExecutionAllowed: &s.RootExecutionAllowed, EnableGpu: &s.EnableGPU, RescueHelperEnabled: &s.RescueHelperEnabled, RequiredPrivilegeMode: s.RequiredPrivilegeMode}
 }
 func Hash(s Settings) string {
 	b := []byte("komari.privileged-settings.v1\x00")
@@ -25,6 +25,9 @@ func Hash(s Settings) string {
 		}
 	}
 	b = binary.BigEndian.AppendUint32(b, uint32(s.RequiredPrivilegeMode))
+	if s.RootExecutionAllowed {
+		b = append(b, []byte("\x00root_execution_allowed\x01")...)
+	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
@@ -49,7 +52,7 @@ func (s *Store) AdoptBaseline(r *configv1.PrivilegedRevision, local Settings, ac
 	if !r.GetInstallationBaseline() || r.GetRevision() != 1 || r.GetProtocolVersion() != 2 || r.GetApprovalGeneration() != 1 {
 		return errors.New("invalid initial baseline revision")
 	}
-	if local.RequiredPrivilegeMode != actual || local.RescueHelperEnabled || settingsFromProto(r.Privileged) != local || r.ConfigHash != Hash(local) {
+	if local.RequiredPrivilegeMode != actual || local.RescueHelperEnabled || local.RootExecutionAllowed || settingsFromProto(r.Privileged) != local || r.ConfigHash != Hash(local) {
 		return errors.New("baseline exceeds protected installation authorization or actual identity")
 	}
 	if r.Authorization == nil || len(r.Authorization.Actions) != 0 || r.Authorization.ServiceId == "" {

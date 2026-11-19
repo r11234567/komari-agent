@@ -26,6 +26,8 @@ name = 'TestRescueAuthorizationWatchSurvivesThirtySeconds'
 failed = [e for e in events if e.get('Test') == name and e.get('Action') == 'fail']
 output = ''.join(e.get('Output', '') for e in events if e.get('Test') == name)
 assert int(sys.argv[2]) != 0 and failed, 'Old timeout did not fail the actual runtime test (a build failure is insufficient)'
-assert 'stream ended at' in output and 'Client.Timeout' in output, output
+assert 'stream ended at' in output, output
+assert 'Client.Timeout' in output or 'deadline_exceeded: context deadline exceeded' in output, output
+assert 29 <= failed[0].get('Elapsed', 0) < 32, 'Expected the injected 30s client timeout to end the stream'
 print('Negative control detected the original HTTP total-timeout failure; complete failing logs retained.')
 PY

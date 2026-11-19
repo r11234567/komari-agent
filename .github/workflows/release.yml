@@ -10,17 +10,29 @@ permissions:
 
 jobs:
   signing-preflight:
-    if: ${{ !github.event.release.prerelease }}
+    if: ${{ !github.event.release.prerelease || contains(github.event.release.tag_name, '-dev.') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
-      - name: Require successful main CI for the exact release commit
+      - name: Require successful CI for the exact release commit
         uses: actions/github-script@v9
         with:
           script: |
-            await require('./scripts/ci/release-gate.cjs')({ github, context, core });
+            const gate = require('./scripts/ci/release-gate.cjs');
+            // A dev publication can arrive before the just-pushed PR checks finish.
+            // Wait here without weakening the exact-commit or signing requirements.
+            const attempts = context.payload.release?.prerelease ? 40 : 1;
+            for (let attempt = 1; ; attempt++) {
+              try { await gate({ github, context, core }); break; }
+              catch (error) {
+                if (attempt >= attempts || !error.retryable) throw error;
+                core.info(`Waiting for exact-commit CI (${attempt}/${attempts}): ${error.message}`);
+                await new Promise(resolve => setTimeout(resolve, 30000));
+              }
+            }
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod

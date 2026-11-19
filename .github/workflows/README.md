@@ -9,6 +9,11 @@ The important design split is:
 - Snapshot builds use GitHub prereleases named `Snapshot-yymmddhhMM`.
 - The Docker snapshot image intentionally uses the mutable tag `snapshot`.
 - Stable auto-update must not consume snapshot prereleases.
+- Explicit development releases use `X.Y.Z-dev.YYYYMMDD.N`, remain prereleases,
+  and publish versioned binaries/images without changing Docker `latest`.
+  They require successful exact-commit PR (or main-push) build, privileged audit
+  and CodeQL checks. The release jobs wait up to 20 minutes for pending checks;
+  failed checks stop publication. Rescue helper signing remains mandatory.
 
 ## Workflow Summary
 
@@ -16,8 +21,8 @@ The important design split is:
 | --- | --- | --- | --- |
 | `build.yml` | Pull request, push to `main`, manual dispatch | CI build artifacts for the checked commit | Not a release workflow |
 | `snapshot.yml` | Push to `main`, manual dispatch | One snapshot prerelease plus `ghcr.io/...:snapshot` | Creates prereleases only |
-| `release.yml` | Published GitHub release | Release binary assets | Skips prereleases |
-| `release-docker.yml` | Published GitHub release, manual dispatch | Stable Docker image tags | Skips prerelease release events |
+| `release.yml` | Published GitHub release | Release binary assets | Supports explicit dev prereleases; skips snapshots |
+| `release-docker.yml` | Published GitHub release, manual dispatch | Versioned Docker images; stable latest | Supports explicit dev prereleases without latest |
 | `generate-release-notes.yml` | Published GitHub release, manual dispatch | Generated release notes | Skips prerelease release events |
 
 ## Common Build Conventions

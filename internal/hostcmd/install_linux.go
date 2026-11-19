@@ -65,6 +65,9 @@ func install(args []string, out io.Writer) error {
 		return errors.New("service account must not be UID 0")
 	}
 	stateDir := filepath.Join("/var/lib/komari", *service)
+	if err := ensureExecutionAccount(); err != nil {
+		return err
+	}
 	m := hostops.Manifest{Version: 2, ServiceName: *service, ServiceUser: *account, InitSystem: "systemd", Executable: filepath.Join(*bindir, "komari-agent"), HostTool: filepath.Join(*bindir, "komari-host"), HostPolicyFile: filepath.Join(hostops.Registry, *service+".policy.json"), CredentialsFile: filepath.Join(stateDir, "credentials.json"), RuntimeStateFile: filepath.Join(stateDir, "runtime-config.json"), PrivilegedStateFile: filepath.Join(stateDir, "privileged.json"), ReplayStateFile: filepath.Join(stateDir, "nonces.json")}
 	argv := fs.Args()
 	mode := int32(2)

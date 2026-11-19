@@ -52,6 +52,11 @@ jobs:
       - name: Compile complete agent
         if: ${{ !cancelled() }}
         run: bash scripts/ci/run-audit-check.sh compile go build -trimpath -o ci-artifacts/agent-audit .
+      - name: Real root-to-komari execution and default-deny WebSSH boundary
+        if: runner.os == 'Linux'
+        run: |
+          id -u komari >/dev/null 2>&1 || sudo useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin komari
+          sudo env PATH="$PATH" GOTOOLCHAIN=local GOMODCACHE="$(go env GOMODCACHE)" GOCACHE="$(go env GOCACHE)" GITHUB_ACTIONS=true KOMARI_ROOT_EXECUTION_TEST=1 bash scripts/ci/run-audit-check.sh root-execution bash scripts/ci/run-go-tests.sh -race -run 'TestRemoteExecutionDropsRoot|TestRootWebSSHGrant|TestRootExecutionRevocation|TestEnsureExecutionAccount' ./server ./internal/hostcmd
       - name: Retain logs even if tests or compilation fail
         if: always()
         uses: actions/upload-artifact@v4
