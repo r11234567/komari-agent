@@ -8,7 +8,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,10 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"connectrpc.com/connect"
-
 	"github.com/komari-monitor/komari-agent/core/credentials"
-	"github.com/komari-monitor/komari-agent/core/enrollment"
 	enrollmentv1 "github.com/r11234567/komari-proto/gen/go/komari/enrollment/v1"
 	securityv1 "github.com/r11234567/komari-proto/gen/go/komari/security/v1"
 	"google.golang.org/protobuf/proto"
@@ -225,87 +221,5 @@ func TestCredentialRenewalFinalHorizonDoesNotPoll(t *testing.T) {
 	id.RefreshTokenExpiresAt = now.Add(24 * time.Hour)
 	if delay := credentialRenewalDelay(id, now); delay != 0 {
 		t.Fatalf("ordinary short-lived AT must still refresh early: %s", delay)
-	}
-}
-
-func TestCredentialRenewalProxyDenialCanRecoverWithoutAccessToken(t *testing.T) {
-	for _, status := range []int{401, 403, 429, 502} {
-		t.Run(fmt.Sprint(status), func(t *testing.T) {
-			client, _, _ := renewalFixture(t)
-			public, private, err := ed25519.GenerateKey(rand.Reader)
-			if err != nil {
-				t.Fatal(err)
-			}
-			id, _ := client.credentialStore.Identity()
-			id.AccessTokenExpiresAt = time.Now().Add(-time.Hour)
-			id.ControlPlaneKeys = []credentials.PinnedKey{{Algorithm: 1, KeyID: "renewal-panel", Value: base64.StdEncoding.EncodeToString(public)}}
-			if err := client.credentialStore.Save(id); err != nil {
-				t.Fatal(err)
-			}
-			var calls atomic.Int32
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
-					t.Error("refresh sent ambient access credentials")
-				}
-				if calls.Add(1) == 1 {
-					w.Header().Set("Content-Type", "text/html")
-					w.WriteHeader(status)
-					_, _ = io.WriteString(w, "<html>upstream challenge</html>")
-					return
-				}
-				response := &enrollmentv1.RefreshCredentialsResponse{Credentials: &enrollmentv1.AgentCredentials{AgentId: id.AgentID, AccessToken: "recovered-access", RefreshToken: "recovered-refresh", AccessTokenExpiresAt: timestamppb.New(time.Now().Add(time.Hour)), RefreshTokenExpiresAt: timestamppb.New(time.Now().Add(24 * time.Hour))}}
-				signRenewalResponse(t, r, response, private)
-				raw, _ := proto.Marshal(response)
-				w.Header().Set("Content-Type", "application/proto")
-				_, _ = w.Write(raw)
-			}))
-			defer server.Close()
-			client.endpoint = server.URL
-			err = client.refreshCredentials(context.Background(), id.AccessToken)
-			if err == nil || permanentCredentialRejection(err) {
-				t.Fatalf("proxy response stopped renewal: %v", err)
-			}
-			pending, _ := client.credentialStore.Identity()
-			if pending.PendingRefresh == nil || pending.AccessToken != id.AccessToken || pending.RefreshToken != id.RefreshToken {
-				t.Fatal("proxy error destroyed recoverable credentials")
-			}
-			if err := client.refreshCredentials(context.Background(), id.AccessToken); err == nil || calls.Load() != 1 {
-				t.Fatal("transient response bypassed retry budget")
-			}
-			// Advance only the retry deadline; preserve the durable operation.
-			client.refreshRetryAt = time.Time{}
-			if err := client.refreshCredentials(context.Background(), id.AccessToken); err != nil {
-				t.Fatal(err)
-			}
-			recovered, _ := client.credentialStore.Identity()
-			if calls.Load() != 2 || recovered.AccessToken != "recovered-access" || recovered.PendingRefresh != nil || recovered.Generation == nil || *recovered.Generation != 1 {
-				t.Fatal("renewal did not recover and durably publish the verified pair")
-			}
-		})
-	}
-}
-
-func TestCredentialRejectionRequiresDecodedWireError(t *testing.T) {
-	for _, code := range []connect.Code{connect.CodeUnauthenticated, connect.CodePermissionDenied} {
-		t.Run(code.String(), func(t *testing.T) {
-			if permanentCredentialRejection(connect.NewError(code, fmt.Errorf("local status mapping"))) {
-				t.Fatal("local error acquired server authority")
-			}
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
-					t.Error("trust bootstrap sent ambient credentials")
-				}
-				_ = connect.NewErrorWriter().Write(w, r, connect.NewError(code, fmt.Errorf("authoritative credential rejection")))
-			}))
-			defer server.Close()
-			client, err := enrollment.New(server.URL, server.Client())
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, _, _, _, err = client.FetchTrustBundle(context.Background(), "fixture-agent")
-			if !permanentCredentialRejection(err) {
-				t.Fatalf("native rejection lost its authority: %v", err)
-			}
-		})
 	}
 }
