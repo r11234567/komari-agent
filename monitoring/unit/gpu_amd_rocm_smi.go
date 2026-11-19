@@ -6,6 +6,7 @@ package monitoring
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"os/exec"
 	"strconv"
@@ -23,7 +24,7 @@ type AMDGPUInfo struct {
 	MemoryTotal uint64  // 总显存 (字节)
 	MemoryUsed  uint64  // 已用显存 (字节)
 	Utilization float64 // GPU使用率 (0-100)
-	Temperature uint64  // 温度 (摄氏度)
+	Temperature *float64 // 温度 (摄氏度); nil 表示传感器未提供或不可用
 }
 
 // ROCmSMI JSON响应结构
@@ -175,11 +176,11 @@ func (rsmi *ROCmSMI) gatherDetailedInfo() ([]AMDGPUInfo, error) {
 					}
 				}
 
-				// 获取温度信息
+				// 获取温度信息（缺失或不可解析时保持 nil，不伪造 0°C）
 				if tempData, exists := cardData["Temperature (Sensor junction) (C)"]; exists {
 					if tempStr, ok := tempData.(string); ok {
 						if temp, err := parseAMDTemperature(tempStr); err == nil {
-							gpuInfo.Temperature = temp
+							gpuInfo.Temperature = &temp
 						}
 					}
 				}
@@ -227,19 +228,19 @@ func parseAMDMemoryBytes(value string) (uint64, error) {
 	return bytes, nil
 }
 
-// 解析AMD温度值 (例如 "65" -> 65)
-func parseAMDTemperature(value string) (uint64, error) {
+// 解析AMD温度值 (例如 "65.5" 或 "65.5 C" -> 65.5；空值或 N/A 返回错误)
+func parseAMDTemperature(value string) (float64, error) {
 	cleaned := strings.TrimSpace(value)
 	cleaned = strings.TrimSuffix(cleaned, "C")
 	cleaned = strings.TrimSpace(cleaned)
 
 	if cleaned == "" {
-		return 0, nil
+		return 0, errors.New("empty AMD temperature value")
 	}
 
-	result, err := strconv.ParseUint(cleaned, 10, 64)
-	if err != nil {
-		return 0, err
+	result, err := strconv.ParseFloat(cleaned, 64)
+	if err != nil || math.IsNaN(result) || math.IsInf(result, 0) || result < -273.15 {
+		return 0, errors.New("invalid AMD temperature value")
 	}
 
 	return result, nil

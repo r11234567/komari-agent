@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"runtime"
 	"strconv"
@@ -71,12 +72,16 @@ type gpuReport struct {
 	DetailedInfo []GPUDevice `json:"detailed_info"`
 }
 
+func hasGPUTemperature(value *float64) bool {
+	return value != nil && !math.IsNaN(*value) && !math.IsInf(*value, 0) && *value >= -273.15
+}
+
 type GPUDevice struct {
-	Name        string  `json:"name"`
-	MemoryTotal uint64  `json:"memory_total"`
-	MemoryUsed  uint64  `json:"memory_used"`
-	Utilization float64 `json:"utilization"`
-	Temperature uint64  `json:"temperature"`
+	Name        string   `json:"name"`
+	MemoryTotal uint64   `json:"memory_total"`
+	MemoryUsed  uint64   `json:"memory_used"`
+	Utilization float64  `json:"utilization"`
+	Temperature *float64 `json:"temperature,omitempty"`
 }
 
 func CollectReport() Report {
@@ -207,8 +212,8 @@ func (data Report) Proto(agentID string, sequence uint64) *reportv1.AgentReport 
 		if gpu.MemoryTotal != ^uint64(0) {
 			item.MemoryTotalBytes = &gpu.MemoryTotal
 		}
-		if gpu.Temperature != ^uint64(0) {
-			temperature := float64(gpu.Temperature)
+		if hasGPUTemperature(gpu.Temperature) {
+			temperature := *gpu.Temperature
 			item.TemperatureCelsius = &temperature
 		}
 		resources.Gpus = append(resources.Gpus, item)
@@ -281,8 +286,8 @@ func (data Report) Metrics(observedAt time.Time) []*metricsv1.MetricsPoint {
 		if gpu.MemoryTotal != ^uint64(0) {
 			points = append(points, point("gpu.memory.total", float64(gpu.MemoryTotal), labels))
 		}
-		if gpu.Temperature != ^uint64(0) {
-			points = append(points, point("gpu.temperature", float64(gpu.Temperature), labels))
+		if hasGPUTemperature(gpu.Temperature) {
+			points = append(points, point("gpu.temperature", *gpu.Temperature, labels))
 		}
 	}
 	return points

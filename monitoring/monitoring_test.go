@@ -22,10 +22,12 @@ func TestMetricsPreserveLegacyAggregateSurface(t *testing.T) {
 	}
 }
 
+func floatPtr(v float64) *float64 { return &v }
+
 func TestMetricsGPUUsesCanonicalDeviceInventory(t *testing.T) {
 	report := Report{GPUs: []GPUDevice{
-		{Name: "GPU A", Utilization: 25, MemoryUsed: 1 << 30, MemoryTotal: 8 << 30, Temperature: 50},
-		{Name: "GPU B", Utilization: 75, MemoryUsed: 2 << 30, MemoryTotal: 16 << 30, Temperature: 60},
+		{Name: "GPU A", Utilization: 25, MemoryUsed: 1 << 30, MemoryTotal: 8 << 30, Temperature: floatPtr(50.5)},
+		{Name: "GPU B", Utilization: 75, MemoryUsed: 2 << 30, MemoryTotal: 16 << 30, Temperature: floatPtr(0.0)},
 	}}
 	points := report.Metrics(time.Unix(1, 0))
 	wanted := []string{"gpu.device.usage", "gpu.memory.used", "gpu.memory.total", "gpu.temperature"}
@@ -40,7 +42,26 @@ func TestMetricsGPUUsesCanonicalDeviceInventory(t *testing.T) {
 			}
 		}
 	}
-	report.GPUs = []GPUDevice{{Name: "Unavailable counters", Utilization: -1, MemoryUsed: ^uint64(0), MemoryTotal: ^uint64(0), Temperature: ^uint64(0)}}
+	if points[18+3].Value != 50.5 || points[18+4+3].Value != 0.0 {
+		t.Fatalf("GPU temperatures lost decimal or true zero: %v, %v", points[18+3].Value, points[18+4+3].Value)
+	}
+	// Missing temperature (nil) on an otherwise measured GPU must NOT emit a fake 0°C metric or proto field.
+	report.GPUs = []GPUDevice{{Name: "GPU NoTemp", Utilization: 40, MemoryUsed: 1 << 30, MemoryTotal: 8 << 30, Temperature: nil}}
+	noTempPoints := report.Metrics(time.Unix(1, 0))
+	if len(noTempPoints) != 18+3 {
+		t.Fatalf("expected 3 GPU metrics without temperature, got %d", len(noTempPoints)-18)
+	}
+	for _, pt := range noTempPoints[18:] {
+		if pt.Metric == "gpu.temperature" {
+			t.Fatalf("missing GPU temperature emitted fake metric point: %+v", pt)
+		}
+	}
+	typedReport := report.Proto("agent-1", 1)
+	if len(typedReport.Resources.Gpus) != 1 || typedReport.Resources.Gpus[0].TemperatureCelsius != nil {
+		t.Fatalf("missing GPU temperature emitted non-nil TemperatureCelsius: %+v", typedReport.Resources.Gpus)
+	}
+
+	report.GPUs = []GPUDevice{{Name: "Unavailable counters", Utilization: -1, MemoryUsed: ^uint64(0), MemoryTotal: ^uint64(0), Temperature: nil}}
 	if points := report.Metrics(time.Unix(1, 0)); len(points) != 18 {
 		t.Fatal("unavailable GPU counters emitted invalid metric points")
 	}
