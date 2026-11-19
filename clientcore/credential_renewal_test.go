@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari-agent/core/credentials"
 	enrollmentv1 "github.com/r11234567/komari-proto/gen/go/komari/enrollment/v1"
 	securityv1 "github.com/r11234567/komari-proto/gen/go/komari/security/v1"
@@ -221,5 +223,12 @@ func TestCredentialRenewalFinalHorizonDoesNotPoll(t *testing.T) {
 	id.RefreshTokenExpiresAt = now.Add(24 * time.Hour)
 	if delay := credentialRenewalDelay(id, now); delay != 0 {
 		t.Fatalf("ordinary short-lived AT must still refresh early: %s", delay)
+	}
+}
+
+func TestCredentialRenewalStopsOnFailedPreconditionRecoveryRequired(t *testing.T) {
+	err := connect.NewError(connect.CodeFailedPrecondition, errors.New("refresh recovery window expired"))
+	if !permanentCredentialRejection(err) {
+		t.Fatal("CodeFailedPrecondition (REFRESH_RECOVERY_REQUIRED) must halt renewal retries")
 	}
 }

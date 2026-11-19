@@ -12,7 +12,9 @@ import (
 
 func permanentCredentialRejection(err error) bool {
 	code := connect.CodeOf(err)
-	return code == connect.CodeUnauthenticated || code == connect.CodePermissionDenied
+	return code == connect.CodeUnauthenticated ||
+		code == connect.CodePermissionDenied ||
+		code == connect.CodeFailedPrecondition
 }
 
 // Stable per-machine jitter spreads renewal load without a polling loop.
