@@ -1,15 +1,12 @@
-name: Build on Main
-
+name: CI
 on:
   pull_request:
-  workflow_dispatch:
   push:
     branches:
       - main
-
+  workflow_dispatch:
 permissions:
   contents: read
-
 jobs:
   protocol-and-release-policy:
     runs-on: ubuntu-latest
@@ -52,132 +49,95 @@ jobs:
             } finally {
               require('node:fs').writeFileSync('ci-artifacts/release-discovery.json', JSON.stringify({ sha, observations }, null, 2));
             }
+        if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: protocol-and-release-policy-${{ github.run_id }}-${{ github.run_attempt }}
           path: ci-artifacts/
           retention-days: 30
-
   build:
     needs: protocol-and-release-policy
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
-        exclude:
-          - goos: windows
-            goarch: arm
-          - goos: darwin
-            goarch: 386
-          - goos: darwin
-            goarch: arm
         include:
           - goos: linux
-            goarch: loong64
-        goos: [windows, linux, darwin, freebsd]
-        goarch: [amd64, arm64, 386, arm]
-
+            arches: amd64 arm64 386 arm loong64
+          - goos: windows
+            arches: amd64 arm64 386
+          - goos: darwin
+            arches: amd64 arm64
+          - goos: freebsd
+            arches: amd64 arm64 386 arm
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
         with:
           submodules: recursive
-
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-
-      - name: Validate Windows installer syntax
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: '[scriptblock]::Create((Get-Content ./install.ps1 -Raw)) | Out-Null'
-
       - name: Run transport and runtime contract tests
-        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        if: matrix.goos == 'linux'
         run: bash scripts/ci/run-go-tests.sh ./core/... ./clientcore ./server ./monitoring/unit ./terminal ./cmd
-
-      - name: Build binary
+      - name: Build all architectures for this OS
         env:
           GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 0
+          TARGET_ARCHES: ${{ matrix.arches }}
+          CGO_ENABLED: '0'
           VERSION: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          mkdir -p ci-artifacts
-          exec > >(tee ci-artifacts/build.log) 2>&1
-          trap 'echo "$?" > ci-artifacts/build-exit.txt' EXIT
-          BINARY_NAME=komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            BINARY_NAME=${BINARY_NAME}.exe
-          fi
-          go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}" -o $BINARY_NAME
-
-          RESCUE_BINARY_NAME=komari-agent-rescue-${{ matrix.goos }}-${{ matrix.goarch }}
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            RESCUE_BINARY_NAME=${RESCUE_BINARY_NAME}.exe
-          fi
-          go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}" -o $RESCUE_BINARY_NAME ./cmd/komari-agent-rescue
-
-          HOST_BINARY_NAME=komari-host-${{ matrix.goos }}-${{ matrix.goarch }}
-          if [ "${{ matrix.goos }}" = "windows" ]; then HOST_BINARY_NAME=${HOST_BINARY_NAME}.exe; fi
-          go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/internal/hostcmd.ReleaseVersion=${VERSION}" -o "$HOST_BINARY_NAME" ./cmd/komari-host
-          sha256sum "$BINARY_NAME" > "$BINARY_NAME.sha256"
-          sha256sum "$HOST_BINARY_NAME" > "$HOST_BINARY_NAME.sha256"
-
-
-      - name: Upload artifact
+        run: bash scripts/ci/build-targets.sh
+      - name: Upload amd64 binaries
+        if: contains(format(' {0} ', matrix.arches), ' amd64 ')
         uses: actions/upload-artifact@v7
         with:
-          name: komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: |
-            komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}*
-            komari-agent-rescue-${{ matrix.goos }}-${{ matrix.goarch }}*
-            komari-host-${{ matrix.goos }}-${{ matrix.goarch }}*
-
-      - name: Retain build and test logs including failures
+          name: komari-agent-${{ matrix.goos }}-amd64
+          path: build/${{ matrix.goos }}-amd64/
+          if-no-files-found: error
+      - name: Upload arm64 binaries
+        if: contains(format(' {0} ', matrix.arches), ' arm64 ')
+        uses: actions/upload-artifact@v7
+        with:
+          name: komari-agent-${{ matrix.goos }}-arm64
+          path: build/${{ matrix.goos }}-arm64/
+          if-no-files-found: error
+      - name: Upload 386 binaries
+        if: contains(format(' {0} ', matrix.arches), ' 386 ')
+        uses: actions/upload-artifact@v7
+        with:
+          name: komari-agent-${{ matrix.goos }}-386
+          path: build/${{ matrix.goos }}-386/
+          if-no-files-found: error
+      - name: Upload arm binaries
+        if: contains(format(' {0} ', matrix.arches), ' arm ')
+        uses: actions/upload-artifact@v7
+        with:
+          name: komari-agent-${{ matrix.goos }}-arm
+          path: build/${{ matrix.goos }}-arm/
+          if-no-files-found: error
+      - name: Upload loong64 binaries
+        if: contains(format(' {0} ', matrix.arches), ' loong64 ')
+        uses: actions/upload-artifact@v7
+        with:
+          name: komari-agent-${{ matrix.goos }}-loong64
+          path: build/${{ matrix.goos }}-loong64/
+          if-no-files-found: error
+      - name: Retain main-build-logs-${{ matrix.goos }}
+        if: always()
         uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: main-build-logs-${{ matrix.goos }}-${{ matrix.goarch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: main-build-logs-${{ matrix.goos }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ci-artifacts/
           retention-days: 30
-
-  capability-fixtures:
+    name: Cross-compile / ${{ matrix.goos }}
+    timeout-minutes: 90
+  platform:
     needs: protocol-and-release-policy
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            fixture: linux-non-root
-          - os: windows-latest
-            fixture: windows-standard-user
-          - os: windows-latest
-            fixture: windows-administrator
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          submodules: recursive
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-      - name: Build capability packages
-        shell: bash
-        run: bash scripts/ci/run-go-tests.sh ./core/capability ./core/runtimeconfig ./clientcore
-      - name: Validate recovery entrypoint
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p ci-artifacts
-          exec > >(tee ci-artifacts/recovery-entrypoint.log) 2>&1
-          go build -o komari-agent${{ runner.os == 'Windows' && '.exe' || '' }} .
-          ./komari-agent${{ runner.os == 'Windows' && '.exe' || '' }} recover diagnostics
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: capability-logs-${{ matrix.fixture }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ci-artifacts/
-          retention-days: 30
+    uses: ./.github/workflows/platform-checks.yml
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}

@@ -1,0 +1,396 @@
+name: Agent platform checks
+on:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  linux:
+    name: Linux runtime, installer and security checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 95
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v7
+        if: runner.os == 'Linux'
+        with:
+          node-version: '24'
+      - name: Snapshot Linux installer assets and checksum regressions
+        if: runner.os == 'Linux'
+        run: bash scripts/ci/run-audit-check.sh snapshot-assets node --test scripts/ci/snapshot-assets.test.cjs
+        shell: bash
+        env:
+          GOMAXPROCS: '2'
+          GOMEMLIMIT: 3GiB
+      - name: Record protocol and tool versions
+        run: bash scripts/ci/run-audit-check.sh protocol bash -c 'go version; node scripts/ci/check-protocol.cjs --resolve-go'
+        shell: bash
+        env:
+          GOMAXPROCS: '2'
+          GOMEMLIMIT: 3GiB
+      - name: File operations, raw transfer, upload commit and cancellation
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh files bash scripts/ci/run-go-tests.sh ./files
+        shell: bash
+        env:
+          GOMAXPROCS: '2'
+          GOMEMLIMIT: 3GiB
+      - name: Client lifecycle, terminal, GPU and host capability regression
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh runtime bash scripts/ci/run-go-tests.sh ./clientcore ./terminal ./monitoring/... ./core/capability
+        shell: bash
+        env:
+          GOMAXPROCS: '2'
+          GOMEMLIMIT: 3GiB
+      - name: Compile complete agent
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh compile go build -trimpath -o ci-artifacts/agent-audit .
+        shell: bash
+        env:
+          GOMAXPROCS: '2'
+          GOMEMLIMIT: 3GiB
+      - name: Real root-to-komari execution and default-deny WebSSH boundary
+        if: runner.os == 'Linux'
+        run: |
+          id -u komari >/dev/null 2>&1 || sudo useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin komari
+          sudo env PATH="$PATH" GOTOOLCHAIN=local GOMODCACHE="$(go env GOMODCACHE)" GOCACHE="$(go env GOCACHE)" GITHUB_ACTIONS=true KOMARI_ROOT_EXECUTION_TEST=1 bash scripts/ci/run-audit-check.sh root-execution bash scripts/ci/run-go-tests.sh -race -run 'TestRemoteExecutionDropsRoot|TestRootWebSSHGrant|TestRootExecutionRevocation|TestEnsureExecutionAccount' ./server ./internal/hostcmd
+        shell: bash
+        env:
+          GOMAXPROCS: '2'
+          GOMEMLIMIT: 3GiB
+      - name: Retain logs even if tests or compilation fail
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: feature-audit-agent-linux-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Start a fresh log directory after runtime
+        if: always()
+        shell: bash
+        run: |-
+          if [ -d ci-artifacts ]; then mv ci-artifacts "$RUNNER_TEMP/runtime-ci-artifacts"; fi
+          mkdir -p ci-artifacts
+      - name: Build capability packages
+        shell: bash
+        run: bash scripts/ci/run-go-tests.sh ./core/capability ./core/runtimeconfig ./clientcore
+      - name: Validate recovery entrypoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ci-artifacts
+          exec > >(tee ci-artifacts/recovery-entrypoint.log) 2>&1
+          go build -o komari-agent${{ runner.os == 'Windows' && '.exe' || '' }} .
+          ./komari-agent${{ runner.os == 'Windows' && '.exe' || '' }} recover diagnostics
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: capability-logs-linux-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+      - name: Start a fresh log directory after capability
+        if: always()
+        shell: bash
+        run: |-
+          if [ -d ci-artifacts ]; then mv ci-artifacts "$RUNNER_TEMP/capability-ci-artifacts"; fi
+          mkdir -p ci-artifacts
+      - name: Real DPoP request and signed stream past 30s, cancellation and existing denial boundaries
+        run: bash scripts/ci/run-audit-check.sh rescue-watch bash scripts/ci/run-go-tests.sh -race ./rescue ./requestheaders
+      - name: Require actual non-skipped runtime evidence
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh rescue-watch-evidence python3 scripts/ci/check-rescue-watch-results.py ci-artifacts/rescue-watch-go
+      - name: Prove regression test fails when the old 30s timeout is restored
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh rescue-watch-negative-control bash scripts/ci/test-rescue-watch-negative-control.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rescue-watch-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+          if-no-files-found: error
+      - name: Start a fresh log directory after rescue-watch
+        if: always()
+        shell: bash
+        run: |-
+          if [ -d ci-artifacts ]; then mv ci-artifacts "$RUNNER_TEMP/rescue-watch-ci-artifacts"; fi
+          mkdir -p ci-artifacts
+      - name: File relay HTTPS, HTTP2, refreshed credentials, streaming and cancellation
+        run: bash scripts/ci/run-audit-check.sh workspace-transfer bash scripts/ci/run-go-tests.sh -race -run 'Test(WorkerTransferRelay|WorkspaceTransferClient|TransferFailureReason)'
+          ./files
+      - name: Race regressions for identity, file workers and terminal
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh workspace-identity bash scripts/ci/run-go-tests.sh -race ./core/osidentity ./files ./terminal
+          ./clientcore ./dnsresolver
+      - name: Build isolated worker test binary
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh build-worker go test -c -o /tmp/komari-workspace-worker.test ./files
+      - name: Build selected-account PTY checkpoint
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh build-terminal go test -c -o /tmp/komari-workspace-terminal.test ./terminal
+      - name: Real root-to-nonroot permissions on a disposable hosted runner
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          sudo useradd --create-home --shell /bin/bash komari-workspace-ci
+          chmod 755 /tmp/komari-workspace-worker.test
+          bash scripts/ci/run-audit-check.sh real-uid sudo env KOMARI_IDENTITY_TEST_USER=komari-workspace-ci /tmp/komari-workspace-worker.test -test.v -test.run '^TestWorker(RealOSPermissionsAndScope|TransfersPreserveUploadStateAndOSAccount)$'
+      - name: Real selected-account login profile, prompt, home and secret isolation
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' 'echo WORKSPACE_LOGIN_PROFILE_LOADED' 'PS1="\u@\h:\w\$ "' | sudo tee /home/komari-workspace-ci/.bash_profile > /dev/null
+          sudo chown komari-workspace-ci:komari-workspace-ci /home/komari-workspace-ci/.bash_profile
+          chmod 755 /tmp/komari-workspace-terminal.test
+          bash scripts/ci/run-audit-check.sh real-pty sudo env KOMARI_TERMINAL_TEST_USER=komari-workspace-ci /tmp/komari-workspace-terminal.test -test.v -test.run '^TestSelectedAccountInteractiveLoginPTY$'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: workspace-identity-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+      - name: Start a fresh log directory after identity
+        if: always()
+        shell: bash
+        run: |-
+          if [ -d ci-artifacts ]; then mv ci-artifacts "$RUNNER_TEMP/identity-ci-artifacts"; fi
+          mkdir -p ci-artifacts
+      - name: Race-check real credential files, signed responses, renewal owner and cancellation
+        run: bash scripts/ci/run-audit-check.sh credential-agent bash scripts/ci/run-go-tests.sh -race ./core/credentials ./core/enrollment ./clientcore
+          ./rescue
+        env:
+          GOMAXPROCS: '2'
+          GOMEMLIMIT: 3GiB
+          CGO_ENABLED: '1'
+      - name: Build isolated root handoff checkpoint
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh credential-handoff-build go test -race -c -o /tmp/credential-rescue.test ./rescue
+        env:
+          GOMAXPROCS: '2'
+          GOMEMLIMIT: 3GiB
+          CGO_ENABLED: '1'
+      - name: Real protected files and signed DPoP rescue handoff on disposable runner
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh credential-handoff sudo env KOMARI_CREDENTIAL_ROOT_TEST=1 /tmp/credential-rescue.test -test.v
+          -test.run '^TestCredentialHandoff|^TestRescueAuthorization'
+        env:
+          GOMAXPROCS: '2'
+          GOMEMLIMIT: 3GiB
+          CGO_ENABLED: '1'
+      - name: Reject missing skipped or failed phase assertions
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh credential-agent-evidence python3 scripts/ci/check-credential-lifecycle.py
+        env:
+          GOMAXPROCS: '2'
+          GOMEMLIMIT: 3GiB
+          CGO_ENABLED: '1'
+      - name: Prove handoff test fails when file notifications are disabled
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh credential-handoff-negative bash scripts/ci/test-credential-handoff-negative.sh
+        env:
+          GOMAXPROCS: '2'
+          GOMEMLIMIT: 3GiB
+          CGO_ENABLED: '1'
+      - name: Prove the old two-second deadline fails actual jitter runtime assertions
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh credential-jitter-negative bash scripts/ci/test-rescue-jitter-negative.sh
+        env:
+          GOMAXPROCS: '2'
+          GOMEMLIMIT: 3GiB
+          CGO_ENABLED: '1'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: credential-agent-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+          if-no-files-found: error
+      - name: Start a fresh log directory after stage-two
+        if: always()
+        shell: bash
+        run: |-
+          if [ -d ci-artifacts ]; then mv ci-artifacts "$RUNNER_TEMP/stage-two-ci-artifacts"; fi
+          mkdir -p ci-artifacts
+      - name: Compile host and daemon contracts before executing tests
+        run: bash scripts/ci/check-stage6-compile.sh
+      - name: Release signing configuration and end-to-end verification
+        env:
+          KOMARI_TEST_LOG_DIR: ci-artifacts/release-signing
+        run: scripts/ci/run-go-tests.sh scripts/sign-helper-release.go scripts/sign-helper-release_test.go
+      - name: Existing behavior regression tests
+        run: scripts/ci/run-go-tests.sh ./cmd ./cmd/flags ./core/hostops ./core/statelock ./internal/hostcmd ./core/runtimeconfig ./core/privileged
+          ./core/capability ./core/localauth ./clientcore ./server ./terminal ./rescue ./update ./monitoring/unit
+      - name: Public CLI surface, redaction and read-only inspection
+        run: bash scripts/ci/test-cli-surface.sh
+      - name: Signed approval, protected policy, final gates and lost ACK recovery
+        run: scripts/ci/test-approved-delivery.sh
+      - name: Trusted installation and migration on disposable systemd runner
+        run: scripts/ci/test-trusted-install.sh
+      - name: Real PAM, rescue coexistence, pending approval and interrupted upgrade recovery
+        run: bash scripts/ci/test-host-transactions.sh
+      - name: Cross-platform host tool compilation
+        run: |
+          for target in windows darwin freebsd; do
+            GOOS=$target GOARCH=amd64 go build -p=2 -o ci-artifacts/komari-host-$target ./cmd/komari-host
+            GOOS=$target GOARCH=amd64 go build -p=2 -o ci-artifacts/komari-agent-$target .
+          done
+      - name: Mandatory formerly failing audit regressions
+        if: success() || failure()
+        run: python3 scripts/ci/run-privileged-audit.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: privileged-agent-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+      - name: Start a fresh log directory after audit
+        if: always()
+        shell: bash
+        run: |-
+          if [ -d ci-artifacts ]; then mv ci-artifacts "$RUNNER_TEMP/audit-ci-artifacts"; fi
+          mkdir -p ci-artifacts
+      - name: Check installer syntax and service definition regressions
+        shell: bash
+        run: |
+          mkdir -p ci-artifacts
+          bash -n install.sh
+          bash -n scripts/ci/test-installer-recovery.sh
+          python3 scripts/test_installers.py 2>&1 | tee ci-artifacts/installer-unit-tests.log
+      - name: Build installer fixtures with retained build logs
+        shell: bash
+        env:
+          GOMAXPROCS: '2'
+        run: |
+          go build -p=2 -o ci-artifacts/komari-host ./cmd/komari-host 2>&1 | tee ci-artifacts/installer-host-build.log
+          go build -p=2 -o ci-artifacts/komari-agent . 2>&1 | tee ci-artifacts/installer-agent-build.log
+      - name: Install, pending-transaction preflight, signed rescue upgrade and rollback
+        run: bash scripts/ci/test-installer-recovery.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: installer-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+  windows:
+    name: Windows runtime, installer and security checks
+    runs-on: windows-latest
+    timeout-minutes: 95
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Record protocol and tool versions
+        run: bash scripts/ci/run-audit-check.sh protocol bash -c 'go version; node scripts/ci/check-protocol.cjs --resolve-go'
+        shell: bash
+        env:
+          GOMAXPROCS: '2'
+          GOMEMLIMIT: 3GiB
+      - name: File operations, raw transfer, upload commit and cancellation
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh files bash scripts/ci/run-go-tests.sh ./files
+        shell: bash
+        env:
+          GOMAXPROCS: '2'
+          GOMEMLIMIT: 3GiB
+      - name: Client lifecycle, terminal, GPU and host capability regression
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh runtime bash scripts/ci/run-go-tests.sh ./clientcore ./terminal ./monitoring/... ./core/capability
+        shell: bash
+        env:
+          GOMAXPROCS: '2'
+          GOMEMLIMIT: 3GiB
+      - name: Compile complete agent
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/run-audit-check.sh compile go build -trimpath -o ci-artifacts/agent-audit .
+        shell: bash
+        env:
+          GOMAXPROCS: '2'
+          GOMEMLIMIT: 3GiB
+      - name: Retain logs even if tests or compilation fail
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: feature-audit-agent-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Start a fresh log directory after runtime
+        if: always()
+        shell: bash
+        run: |-
+          if [ -d ci-artifacts ]; then mv ci-artifacts "$RUNNER_TEMP/runtime-ci-artifacts"; fi
+          mkdir -p ci-artifacts
+      - name: Build capability packages
+        shell: bash
+        run: bash scripts/ci/run-go-tests.sh ./core/capability ./core/runtimeconfig ./clientcore
+      - name: Validate recovery entrypoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ci-artifacts
+          exec > >(tee ci-artifacts/recovery-entrypoint.log) 2>&1
+          go build -o komari-agent${{ runner.os == 'Windows' && '.exe' || '' }} .
+          ./komari-agent${{ runner.os == 'Windows' && '.exe' || '' }} recover diagnostics
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: capability-logs-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+      - name: Start a fresh log directory after capability
+        if: always()
+        shell: bash
+        run: |-
+          if [ -d ci-artifacts ]; then mv ci-artifacts "$RUNNER_TEMP/capability-ci-artifacts"; fi
+          mkdir -p ci-artifacts
+      - name: Windows metadata, baseline reconnect, state persistence and process locks
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force ci-artifacts | Out-Null
+          $env:GOMAXPROCS = '2'
+          go test -p=2 -json -count=1 -timeout=5m ./core/statelock ./core/privileged ./core/runtimeconfig ./core/hostops ./core/installation ./clientcore 2> ci-artifacts/windows-build.log | Tee-Object -FilePath ci-artifacts/windows-tests.jsonl
+          $testExit = $LASTEXITCODE
+          $testExit | Out-File ci-artifacts/windows-exit.txt
+          exit $testExit
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: privileged-windows-state-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
+      - name: Start a fresh log directory after windows-state-regressions
+        if: always()
+        shell: bash
+        run: |-
+          if [ -d ci-artifacts ]; then mv ci-artifacts "$RUNNER_TEMP/windows-state-regressions-ci-artifacts"; fi
+          mkdir -p ci-artifacts
+      - name: Validate installer and test its actual argument gate
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force ci-artifacts | Out-Null
+          [scriptblock]::Create((Get-Content ./install.ps1 -Raw)) | Out-Null
+          python scripts/test_installers.py WindowsInstallerTests 2>&1 | Tee-Object ci-artifacts/windows-installer-unit.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install released monitoring Agent and verify real SCM child process
+        shell: powershell
+        run: ./scripts/ci/test-windows-monitoring-install.ps1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-monitoring-installer-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30

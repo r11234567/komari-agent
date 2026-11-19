@@ -1,7 +1,7 @@
 const { execFileSync } = require('node:child_process');
 const { mkdirSync, writeFileSync } = require('node:fs');
 const { join } = require('node:path');
-const REQUIRED = Object.freeze(['build.yml', 'privileged-audit.yml', 'codeql.yml']);
+const REQUIRED = Object.freeze(['build.yml', 'codeql.yml']);
 const MAX_PAGES = 10;
 
 function matchesRun(run, sha, dev = false) {

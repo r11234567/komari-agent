@@ -1,4 +1,4 @@
-name: Publish Snapshot
+name: Release / Publish Snapshot
 
 on:
   workflow_dispatch:
@@ -76,88 +76,91 @@ jobs:
   build-and-attach-binaries:
     needs: prepare
     runs-on: ubuntu-latest
-
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
-        exclude:
-          - goos: windows
-            goarch: arm
-          - goos: darwin
-            goarch: 386
-          - goos: darwin
-            goarch: arm
         include:
           - goos: linux
-            goarch: loong64
-        goos: [windows, linux, darwin, freebsd]
-        goarch: [amd64, arm64, 386, arm]
-
+            arches: amd64 arm64 386 arm loong64
+          - goos: windows
+            arches: amd64 arm64 386
+          - goos: darwin
+            arches: amd64 arm64
+          - goos: freebsd
+            arches: amd64 arm64 386 arm
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
         with:
           submodules: recursive
-
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-
-      - name: Build binary
+      - name: Build all architectures for this OS
         env:
           GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 0
+          TARGET_ARCHES: ${{ matrix.arches }}
+          CGO_ENABLED: '0'
           VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          set -euo pipefail
-          mkdir -p ci-artifacts
-          exec > >(tee ci-artifacts/build.log) 2>&1
-          trap 'echo "$?" > ci-artifacts/build-exit.txt' EXIT
-          BINARY_NAME=komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            BINARY_NAME=${BINARY_NAME}.exe
-          fi
-          go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}" -o $BINARY_NAME
-
-          RESCUE_BINARY_NAME=komari-agent-rescue-${{ matrix.goos }}-${{ matrix.goarch }}
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            RESCUE_BINARY_NAME=${RESCUE_BINARY_NAME}.exe
-          fi
-          go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}" -o $RESCUE_BINARY_NAME ./cmd/komari-agent-rescue
-
-          HOST_BINARY_NAME=komari-host-${{ matrix.goos }}-${{ matrix.goarch }}
-          if [ "${{ matrix.goos }}" = "windows" ]; then HOST_BINARY_NAME=${HOST_BINARY_NAME}.exe; fi
-          go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/internal/hostcmd.ReleaseVersion=${VERSION}" -o "$HOST_BINARY_NAME" ./cmd/komari-host
-          sha256sum "$BINARY_NAME" > "$BINARY_NAME.sha256"
-          sha256sum "$HOST_BINARY_NAME" > "$HOST_BINARY_NAME.sha256"
-          sha256sum "$RESCUE_BINARY_NAME" > "$RESCUE_BINARY_NAME.sha256"
-
+        run: bash scripts/ci/build-targets.sh
       - name: Sign Linux rescue for the exact Snapshot release
         if: matrix.goos == 'linux'
         env:
           KOMARI_RELEASE_SIGNING_KEY: ${{ secrets.KOMARI_RELEASE_SIGNING_KEY }}
           KOMARI_RELEASE_SIGNING_KEY_ID: ${{ vars.KOMARI_RELEASE_SIGNING_KEY_ID }}
           SNAPSHOT_VERSION: ${{ needs.prepare.outputs.version }}
-          SNAPSHOT_ARCH: ${{ matrix.goarch }}
-        run: bash scripts/ci/run-audit-check.sh snapshot-rescue-signing go run scripts/sign-helper-release.go "komari-agent-rescue-linux-$SNAPSHOT_ARCH" "$SNAPSHOT_VERSION" linux "$SNAPSHOT_ARCH"
-
-      - name: Upload binary as artifact
+          TARGET_ARCHES: ${{ matrix.arches }}
+        run: |-
+          set -euo pipefail
+          for arch in $TARGET_ARCHES; do
+            binary="build/linux-$arch/komari-agent-rescue-linux-$arch"
+            bash scripts/ci/run-audit-check.sh "snapshot-sign-$arch" go run scripts/sign-helper-release.go "$binary" "$SNAPSHOT_VERSION" linux "$arch"
+          done
+      - name: Upload amd64 binaries
+        if: contains(format(' {0} ', matrix.arches), ' amd64 ')
         uses: actions/upload-artifact@v7
         with:
-          name: komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: |
-            komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}*
-            komari-agent-rescue-${{ matrix.goos }}-${{ matrix.goarch }}*
-            komari-host-${{ matrix.goos }}-${{ matrix.goarch }}*
-
-      - uses: actions/upload-artifact@v4
-        if: always()
+          name: komari-agent-${{ matrix.goos }}-amd64
+          path: build/${{ matrix.goos }}-amd64/
+          if-no-files-found: error
+      - name: Upload arm64 binaries
+        if: contains(format(' {0} ', matrix.arches), ' arm64 ')
+        uses: actions/upload-artifact@v7
         with:
-          name: snapshot-build-logs-${{ matrix.goos }}-${{ matrix.goarch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: komari-agent-${{ matrix.goos }}-arm64
+          path: build/${{ matrix.goos }}-arm64/
+          if-no-files-found: error
+      - name: Upload 386 binaries
+        if: contains(format(' {0} ', matrix.arches), ' 386 ')
+        uses: actions/upload-artifact@v7
+        with:
+          name: komari-agent-${{ matrix.goos }}-386
+          path: build/${{ matrix.goos }}-386/
+          if-no-files-found: error
+      - name: Upload arm binaries
+        if: contains(format(' {0} ', matrix.arches), ' arm ')
+        uses: actions/upload-artifact@v7
+        with:
+          name: komari-agent-${{ matrix.goos }}-arm
+          path: build/${{ matrix.goos }}-arm/
+          if-no-files-found: error
+      - name: Upload loong64 binaries
+        if: contains(format(' {0} ', matrix.arches), ' loong64 ')
+        uses: actions/upload-artifact@v7
+        with:
+          name: komari-agent-${{ matrix.goos }}-loong64
+          path: build/${{ matrix.goos }}-loong64/
+          if-no-files-found: error
+      - name: Retain snapshot-build-logs-${{ matrix.goos }}
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshot-build-logs-${{ matrix.goos }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ci-artifacts/
           retention-days: 30
+    timeout-minutes: 90
 
   publish-snapshot-release:
     needs: [prepare, build-and-attach-binaries]

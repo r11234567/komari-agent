@@ -86,9 +86,9 @@ test('release checks all required workflows and retains API failures as evidence
   const evidence = () => JSON.parse(readFileSync(join(artifactDir, 'release-gate.json'), 'utf8'));
   try {
     await releaseGate(options);
-    assert.deepEqual(requests, ['build.yml', 'privileged-audit.yml', 'codeql.yml']);
+    assert.deepEqual(requests, ['build.yml', 'codeql.yml']);
     assert.equal(evidence().result, 'success');
-    assert.equal(evidence().evidence.length, 3);
+    assert.equal(evidence().evidence.length, 2);
     options.github.rest.actions.listWorkflowRuns = async () => { throw new Error('API unavailable'); };
     await assert.rejects(releaseGate(options), /API unavailable/);
     assert.equal(evidence().result, 'failure');
@@ -120,8 +120,8 @@ test('release discovery pages workflow history without API search filters', asyn
   const evidence = () => JSON.parse(readFileSync(join(artifactDir, 'release-gate.json'), 'utf8'));
   try {
     await releaseGate(options);
-    assert.deepEqual(requests.map(r => r.page), [1, 2, 1, 2, 1, 2]);
-    assert.equal(evidence().observations.length, 6);
+    assert.deepEqual(requests.map(r => r.page), [1, 2, 1, 2]);
+    assert.equal(evidence().observations.length, 4);
     for (const invalid of [
       { head_sha: 'another-sha' }, { event: 'pull_request' }, { head_branch: 'feature' },
       { conclusion: 'failure' }, { status: 'in_progress', conclusion: null },

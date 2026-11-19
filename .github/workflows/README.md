@@ -11,7 +11,7 @@ The important design split is:
 - Stable auto-update must not consume snapshot prereleases.
 - Explicit development releases use `X.Y.Z-dev.YYYYMMDD.N`, remain prereleases,
   and publish versioned binaries/images without changing Docker `latest`.
-  They require successful exact-commit PR (or main-push) build, privileged audit
+  They require successful exact-commit PR (or main-push) CI (including privileged audit)
   and CodeQL checks. The release jobs wait up to 20 minutes for pending checks;
   failed checks stop publication. Rescue helper signing remains mandatory.
 
@@ -129,7 +129,7 @@ Binary release job:
   built from the same commit with the same Snapshot version.
 - Keeps the inventory, checksum and publication logs, including failures, as
   Actions artifacts for 30 days.
-- Asset regression tests run in the existing Linux `feature-audit.yml` job.
+- Asset regression tests run in the existing Linux job of `platform-checks.yml`.
   Snapshot binaries are built and published only through this `snapshot.yml`
   flow; there is no separate attachment repair workflow.
 
@@ -207,8 +207,8 @@ for a snapshot.
 
 Jobs:
 
-- Before accessing the signing key, requires successful `build.yml`,
-  `privileged-audit.yml` and `codeql.yml` main-push runs for the exact checked-out
+- Before accessing the signing key, requires successful `build.yml` (including privileged delivery checks)
+  and `codeql.yml` main-push runs for the exact checked-out
   release SHA. Missing or unfinished checks fail closed; the latest run/attempt
   must succeed. PR checks and checks for an older SHA do not qualify. The same
   gate runs before stable Docker publishing, including manual dispatches.
@@ -277,7 +277,7 @@ dispatch. Notes are generated only for an empty release body.
 
 ## Stable release procedure
 
-Wait for the actual main-push Build on Main, Privileged delivery audit and CodeQL
+Wait for the actual main-push CI (including privileged delivery) and CodeQL
 runs to succeed before publishing a stable GitHub release. The release event is
 already public when these workflows start: the gate prevents asset and stable
 Docker publication, but cannot undo a manually published release record. Keep
