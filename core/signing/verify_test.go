@@ -155,3 +155,17 @@ func TestVerifyIgnoresUnimplementedAlgorithm(t *testing.T) {
 		t.Fatal("Verify() treated an algorithm it cannot check as verified")
 	}
 }
+
+func TestVerifyRejectsDuplicateSignatureForMinimumThreshold(t *testing.T) {
+	f := newFixture(t)
+	f.identity.PolicyMinimumSignatures = 2
+	envelope := f.envelope(t, nil)
+	envelope.Signatures = append(envelope.Signatures, &securityv1.Signature{
+		Algorithm: envelope.Signatures[0].Algorithm,
+		KeyId:     envelope.Signatures[0].KeyId,
+		Value:     append([]byte(nil), envelope.Signatures[0].Value...),
+	})
+	if _, err := New(f.identity, f.replay).Verify(envelope); err == nil {
+		t.Fatal("Verify() counted duplicate signature from the same key twice toward MinimumSignatures")
+	}
+}

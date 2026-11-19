@@ -62,12 +62,16 @@ type Executor struct {
 	mu                sync.Mutex
 	workers           map[string]*fileWorker
 	authorizeTransfer func(http.Header)
+	rootAllowed       func() bool
 }
 
 type ExecutorOptions struct {
 	// Evaluated in the parent for each transfer, after token refreshes. The
 	// callback and its credentials are never sent to account workers.
 	AuthorizeTransfer func(http.Header)
+	// Evaluated when starting a worker to align root workspace file access with
+	// remote root execution policy instead of diverging from WebSSH.
+	RootAllowed func() bool
 }
 type fileWorker struct {
 	username string
@@ -86,6 +90,7 @@ func NewExecutor(ctx context.Context, options ...ExecutorOptions) *Executor {
 	e := &Executor{ctx: ctx, workers: make(map[string]*fileWorker)}
 	if len(options) > 0 {
 		e.authorizeTransfer = options[0].AuthorizeTransfer
+		e.rootAllowed = options[0].RootAllowed
 	}
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
@@ -165,8 +170,12 @@ func (e *Executor) Execute(ctx context.Context, scope, username, requestID strin
 		}
 	}
 	if w == nil {
+		rootAllowed := false
+		if e.rootAllowed != nil {
+			rootAllowed = e.rootAllowed()
+		}
 		var err error
-		w, err = startFileWorker(e.ctx, username)
+		w, err = startFileWorker(e.ctx, username, rootAllowed)
 		if err != nil {
 			e.mu.Unlock()
 			return failure(err)
@@ -209,8 +218,8 @@ func (e *Executor) Execute(ctx context.Context, scope, username, requestID strin
 	}
 }
 
-func startFileWorker(ctx context.Context, username string) (*fileWorker, error) {
-	identity, err := osidentity.Resolve(username)
+func startFileWorker(ctx context.Context, username string, rootAllowed bool) (*fileWorker, error) {
+	identity, err := osidentity.ResolveRemote(username, rootAllowed)
 	if err != nil {
 		return nil, err
 	}
@@ -221,6 +230,11 @@ func startFileWorker(ctx context.Context, username string) (*fileWorker, error) 
 	cmd := exec.CommandContext(ctx, executable, WorkerArgument)
 	if err := identity.Configure(cmd, ""); err != nil {
 		return nil, err
+	}
+	if identity.User.Uid != "0" {
+		if err := osidentity.RestrictPrivilegeGain(cmd); err != nil {
+			return nil, err
+		}
 	}
 	// Never inherit Agent environment/secrets, nor put transfer tokens in argv.
 	input, err := cmd.StdinPipe()

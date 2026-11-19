@@ -160,6 +160,7 @@ func (v *Verifier) verifySignatures(payload []byte, signatures []*securityv1.Sig
 	verified := make(map[int32]bool)
 	present := make(map[int32]bool)
 	verifiedKeyIDs := make([]string, 0, len(signatures))
+	seenKeys := make(map[string]struct{}, len(signatures))
 
 	for _, signature := range signatures {
 		algorithm := int32(signature.GetAlgorithm())
@@ -176,6 +177,14 @@ func (v *Verifier) verifySignatures(payload []byte, signatures []*securityv1.Sig
 		}
 		if verifyOne(algorithm, key, payload, signature.GetValue()) {
 			verified[algorithm] = true
+			// Deduplicate by algorithm + raw key material so duplicating a single
+			// valid signature (or reusing the same key under two IDs) never satisfies
+			// MinimumSignatures >= 2.
+			materialKey := fmt.Sprintf("%d:%x", algorithm, key)
+			if _, duplicate := seenKeys[materialKey]; duplicate {
+				continue
+			}
+			seenKeys[materialKey] = struct{}{}
 			verifiedKeyIDs = append(verifiedKeyIDs, signature.GetKeyId())
 		}
 	}

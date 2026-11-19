@@ -89,8 +89,8 @@ func saveAutoDiscoveryConfig(config *AutoDiscoveryConfig) error {
 		return fmt.Errorf("failed to marshal auto-discovery config: %v", err)
 	}
 
-	// 写入文件
-	if err := os.WriteFile(configPath, data, 0644); err != nil {
+	// 写入文件（仅所有者可读，避免向同机其他用户暴露 token）
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
 		return fmt.Errorf("failed to write auto-discovery config: %v", err)
 	}
 
