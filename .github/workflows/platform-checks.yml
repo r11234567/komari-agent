@@ -251,12 +251,20 @@ jobs:
           name: privileged-agent-${{ github.run_id }}-${{ github.run_attempt }}
           path: ci-artifacts/
           retention-days: 30
-      - name: Start a fresh log directory after audit
-        if: always()
-        shell: bash
-        run: |-
-          if [ -d ci-artifacts ]; then mv ci-artifacts "$RUNNER_TEMP/audit-ci-artifacts"; fi
-          mkdir -p ci-artifacts
+  linux-installer:
+    name: Linux installer recovery on pristine runner
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
       - name: Check installer syntax and service definition regressions
         shell: bash
         run: |
