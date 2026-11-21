@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"path/filepath"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -49,5 +50,20 @@ func TestHandleSessionOutcome_FatalFailuresMustExit(t *testing.T) {
 	shouldExit, exitErr = handleSessionOutcome(clientcore.ErrPermissionDenied)
 	if !shouldExit || !errors.Is(exitErr, clientcore.ErrPermissionDenied) {
 		t.Fatalf("expected ErrPermissionDenied to cause exit (shouldExit=%v, err=%v)", shouldExit, exitErr)
+	}
+}
+
+func TestShowWarningSkipsConfigReadInPersistentPreRunE(t *testing.T) {
+	origShow := flags.ShowWarning
+	origConfig := flags.ConfigFile
+	t.Cleanup(func() {
+		flags.ShowWarning = origShow
+		flags.ConfigFile = origConfig
+	})
+
+	flags.ShowWarning = true
+	flags.ConfigFile = filepath.Join(t.TempDir(), "nonexistent-restricted-config.json")
+	if err := RootCmd.PersistentPreRunE(RootCmd, nil); err != nil {
+		t.Fatalf("PersistentPreRunE must short-circuit when --show-warning is set, got %v", err)
 	}
 }

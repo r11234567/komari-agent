@@ -9,12 +9,13 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari-agent/core/credentials"
+	"github.com/komari-monitor/komari-agent/core/enrollment"
 	commonv1 "github.com/r11234567/komari-proto/gen/go/komari/common/v1"
 )
 
 func isRefreshRecoveryRequired(err error) bool {
 	var connectErr *connect.Error
-	if !errors.As(err, &connectErr) || connectErr.Code() != connect.CodeFailedPrecondition {
+	if !errors.As(err, &connectErr) || connectErr.Code() != connect.CodeFailedPrecondition || !connect.IsWireError(err) {
 		return false
 	}
 	for _, detail := range connectErr.Details() {
@@ -30,10 +31,8 @@ func isRefreshRecoveryRequired(err error) bool {
 }
 
 func permanentCredentialRejection(err error) bool {
-	code := connect.CodeOf(err)
-	return code == connect.CodeUnauthenticated ||
-		code == connect.CodePermissionDenied ||
-		isRefreshRecoveryRequired(err)
+	var rejected *enrollment.CredentialRejectedError
+	return errors.As(err, &rejected) || isRefreshRecoveryRequired(err)
 }
 
 // Stable per-machine jitter spreads renewal load without a polling loop.

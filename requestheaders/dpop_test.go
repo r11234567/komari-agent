@@ -283,3 +283,58 @@ func TestDPoPTransport_401DoesNotReplayStreamBody(t *testing.T) {
 		t.Fatalf("streaming request must not be replayed in-place; got %d attempts", attempts)
 	}
 }
+
+type trackingReadCloser struct {
+	io.Reader
+	closed bool
+}
+
+func (r *trackingReadCloser) Close() error {
+	r.closed = true
+	return nil
+}
+
+func TestDPoPTransport_DoesNotMutateRequestAndClosesBody(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := credentials.Identity{
+		Endpoint:    "https://panel.example.com",
+		AgentID:     "agent-immutable",
+		AccessToken: "immutable-access-token",
+		PrivateKey:  base64.StdEncoding.EncodeToString(priv),
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	client := WrapWithStaticDPoP(srv.Client(), identity)
+	tracked := &trackingReadCloser{Reader: strings.NewReader(`{"metric":1}`)}
+	req, err := http.NewRequest("POST", srv.URL+"/komari.metrics.v1.MetricsService/SubmitMetrics", tracked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Custom", "keep")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if !tracked.closed {
+		t.Fatal("expected DPoPTransport to close original unary request body")
+	}
+	for _, h := range []string{"Authorization", "X-Komari-Signature", "X-Komari-Timestamp", "X-Komari-Nonce", "X-Komari-Body-Mode"} {
+		if got := req.Header.Get(h); got != "" {
+			t.Fatalf("RoundTrip mutated original request header %s=%q", h, got)
+		}
+	}
+	if req.Header.Get("X-Custom") != "keep" {
+		t.Fatal("original custom header was lost")
+	}
+}
