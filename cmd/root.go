@@ -36,6 +36,9 @@ var RootCmd = &cobra.Command{
 	Short: "komari agent",
 	Long:  `komari agent`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		if flags.ShowWarning {
+			return nil
+		}
 		executable, err := os.Executable()
 		if err != nil {
 			return err

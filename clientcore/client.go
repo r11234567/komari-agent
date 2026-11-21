@@ -387,8 +387,8 @@ func (c *Client) Run(ctx context.Context) error {
 		if err == nil {
 			break
 		}
-		if isPermissionDenied(err) {
-			log.Printf("[FATAL] Panel revoked credentials or permission was denied (HTTP 403 / PERMISSION_DENIED). Stopping. Please re-enroll via 'komari-agent login'")
+		if permanentCredentialRejection(err) {
+			log.Printf("[FATAL] The enrollment service rejected refresh credentials. Stopping. Please re-enroll via 'komari-agent login'")
 			return classify(err)
 		}
 		if !isTransientRejection(err) {
@@ -404,8 +404,8 @@ func (c *Client) Run(ctx context.Context) error {
 		if err == nil {
 			break
 		}
-		if isPermissionDenied(err) {
-			log.Printf("[FATAL] Panel revoked credentials or permission was denied (HTTP 403 / PERMISSION_DENIED). Stopping. Please re-enroll via 'komari-agent login'")
+		if permanentCredentialRejection(err) {
+			log.Printf("[FATAL] The enrollment service rejected refresh credentials. Stopping. Please re-enroll via 'komari-agent login'")
 			return classify(err)
 		}
 		if !isTransientRejection(err) {
@@ -1228,8 +1228,8 @@ func (c *Client) runUnaryMetricLoop(ctx context.Context) error {
 	var retry retryPolicy
 	for {
 		if err := c.SubmitMetrics(ctx); err != nil {
-			if isPermissionDenied(err) {
-				log.Printf("[FATAL] Panel revoked credentials or permission was denied (HTTP 403 / PERMISSION_DENIED). Stopping all probes and polling. Please re-enroll via 'komari-agent login'")
+			if permanentCredentialRejection(err) {
+				log.Printf("[FATAL] The enrollment service rejected refresh credentials. Stopping all probes and polling. Please re-enroll via 'komari-agent login'")
 				c.cancelProbes()
 				return classify(err)
 			}
@@ -1237,12 +1237,12 @@ func (c *Client) runUnaryMetricLoop(ctx context.Context) error {
 				oldToken := c.tokenValue()
 				if refreshErr := c.refreshCredentials(ctx, oldToken); refreshErr != nil {
 					log.Printf("Credential refresh failed after auth rejection: %v", refreshErr)
-					if isPermissionDenied(refreshErr) {
-						log.Printf("[FATAL] Panel revoked credentials during refresh (HTTP 403 / PERMISSION_DENIED). Stopping all probes and polling.")
+					if permanentCredentialRejection(refreshErr) {
+						log.Printf("[FATAL] The enrollment service rejected refresh credentials. Stopping all probes and polling.")
 						c.cancelProbes()
 						return classify(refreshErr)
 					}
-					if isAuthRejection(refreshErr) || errors.Is(refreshErr, context.Canceled) {
+					if errors.Is(refreshErr, context.Canceled) {
 						return classify(refreshErr)
 					}
 					if c.credentialStore == nil || !c.credentialStore.Enrolled() {
@@ -1267,8 +1267,8 @@ func (c *Client) runUnaryMetricLoop(ctx context.Context) error {
 	metricsDone:
 		if !time.Now().Before(nextInfoReport) {
 			if err := c.SubmitReport(ctx); err != nil {
-				if isPermissionDenied(err) {
-					log.Printf("[FATAL] Panel revoked credentials or permission was denied (HTTP 403 / PERMISSION_DENIED). Stopping all probes and polling. Please re-enroll via 'komari-agent login'")
+				if permanentCredentialRejection(err) {
+					log.Printf("[FATAL] The enrollment service rejected refresh credentials. Stopping all probes and polling. Please re-enroll via 'komari-agent login'")
 					c.cancelProbes()
 					return classify(err)
 				}
@@ -1276,12 +1276,12 @@ func (c *Client) runUnaryMetricLoop(ctx context.Context) error {
 					oldToken := c.tokenValue()
 					if refreshErr := c.refreshCredentials(ctx, oldToken); refreshErr != nil {
 						log.Printf("Credential refresh failed after auth rejection: %v", refreshErr)
-						if isPermissionDenied(refreshErr) {
-							log.Printf("[FATAL] Panel revoked credentials during refresh (HTTP 403 / PERMISSION_DENIED). Stopping all probes and polling.")
+						if permanentCredentialRejection(refreshErr) {
+							log.Printf("[FATAL] The enrollment service rejected refresh credentials. Stopping all probes and polling.")
 							c.cancelProbes()
 							return classify(refreshErr)
 						}
-						if isAuthRejection(refreshErr) || errors.Is(refreshErr, context.Canceled) {
+						if errors.Is(refreshErr, context.Canceled) {
 							return classify(refreshErr)
 						}
 						if c.credentialStore == nil || !c.credentialStore.Enrolled() {
@@ -1426,7 +1426,7 @@ func classify(err error) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
-	if isPermissionDenied(err) {
+	if permanentCredentialRejection(err) {
 		return fmt.Errorf("%w: %v", ErrPermissionDenied, err)
 	}
 	var connectErr *connect.Error
@@ -1444,12 +1444,4 @@ func classify(err error) error {
 		return fmt.Errorf("%w: %v", ErrLegacyFallback, err)
 	}
 	return err
-}
-
-func isPermissionDenied(err error) bool {
-	var connectErr *connect.Error
-	if errors.As(err, &connectErr) {
-		return connectErr.Code() == connect.CodePermissionDenied
-	}
-	return false
 }
