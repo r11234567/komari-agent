@@ -163,8 +163,6 @@ func runRemoteTerminal(sessionCtx context.Context, cancel context.CancelFunc, st
 			if command.Resize != nil {
 				err = pty.Resize(int(command.Resize.Columns), int(command.Resize.Rows))
 			}
-		case *websshv1.AttachSessionResponse_File:
-			err = errors.New("terminal file commands are disabled; use the account-isolated FileService")
 		case *websshv1.AttachSessionResponse_CloseReason:
 			return nil
 		default:

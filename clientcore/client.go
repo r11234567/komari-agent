@@ -108,6 +108,7 @@ type Client struct {
 	// persisted so a restart cannot reopen the window.
 	replayGuard *signing.ReplayGuard
 	cfg         *flags_pkg.Config
+	dpopNonces  *requestheaders.NonceStore
 
 	probeCancelMu sync.Mutex
 	probeCancel   context.CancelFunc
@@ -219,13 +220,13 @@ func (c *Client) refreshCredentials(ctx context.Context, oldToken string) (resul
 }
 
 func wrapWithDPoP(httpClient *http.Client, client *Client) *http.Client {
-	return requestheaders.WrapWithDPoP(httpClient, func() (credentials.Identity, bool) {
+	return requestheaders.WrapWithDPoPAndNonces(httpClient, func() (credentials.Identity, bool) {
 		return client.identity()
 	}, func() string {
 		return client.tokenValue()
 	}, func(ctx context.Context, oldToken string) error {
 		return client.refreshCredentials(ctx, oldToken)
-	})
+	}, client.dpopNonces)
 }
 
 func (c *Client) agentIDValue() string {
@@ -316,6 +317,7 @@ func New(config *flags_pkg.Config, store *runtimeconfig.Store) (*Client, error) 
 		credentialStore: credentialStore,
 		replayGuard:     signing.NewReplayGuard(config.ReplayStateFile),
 		cfg:             config,
+		dpopNonces:      requestheaders.NewNonceStore(),
 	}
 	httpClient := dnsresolver.GetHTTPClientWithPreference(requestDeadline, config.PreferIPVersion)
 	networkHTTPClient := dnsresolver.GetHTTPClientWithPreference(35*time.Second, config.PreferIPVersion)
@@ -532,6 +534,9 @@ func (c *Client) runAgentEvents(ctx context.Context) {
 		received := false
 		for stream.Receive() {
 			received = true
+			if stream.Msg().GetHeartbeat() {
+				continue
+			}
 			event := stream.Msg().Event
 			if event == nil {
 				continue
@@ -583,6 +588,9 @@ func (c *Client) runConfigUpdates(ctx context.Context) {
 		received := false
 		for stream.Receive() {
 			received = true
+			if stream.Msg().GetHeartbeat() {
+				continue
+			}
 			desired := stream.Msg().Desired
 			if desired == nil {
 				continue
@@ -626,6 +634,9 @@ func (c *Client) runPrivilegedUpdates(ctx context.Context) {
 		received := false
 		for stream.Receive() {
 			received = true
+			if stream.Msg().GetHeartbeat() {
+				continue
+			}
 			revision := stream.Msg().GetRevision()
 			if revision == nil {
 				continue
@@ -698,6 +709,9 @@ func (c *Client) runExecutions(ctx context.Context) {
 		for stream.Receive() {
 			received = true
 			message := stream.Msg()
+			if message.GetHeartbeat() {
+				continue
+			}
 			if cancellation := message.Cancellation; cancellation != nil {
 				if value, ok := jobs.Load(cancellation.ExecutionId); ok {
 					value.(context.CancelFunc)()

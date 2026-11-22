@@ -45,6 +45,9 @@ func (c *Client) runFileOperations(ctx context.Context) {
 		received := false
 		for stream.Receive() {
 			received = true
+			if stream.Msg().GetHeartbeat() {
+				continue
+			}
 			assignment := stream.Msg().Assignment
 			if assignment == nil {
 				continue
@@ -121,40 +124,7 @@ func (c *Client) attachFileOperation(parent context.Context, assignment *filev1.
 	remoteClosed := make(chan struct{})
 	go func() { defer close(remoteClosed); _, _ = stream.Receive(); cancel() }()
 
-	args := map[string]any{}
-	if command.GetArguments() != nil {
-		for key, value := range command.GetArguments().AsMap() {
-			args[key] = value
-		}
-	}
-	putString := func(key, value string) {
-		if value != "" {
-			if _, exists := args[key]; !exists {
-				args[key] = value
-			}
-		}
-	}
-	putString("path", command.GetPath())
-	putString("destination", command.GetDestination())
-	putString("source", command.GetPath())
-	putString("mode", command.GetMode())
-	putString("owner", command.GetOwner())
-	putString("group", command.GetGroup())
-	putString("query", command.GetQuery())
-	if command.GetRecursive() {
-		args["recursive"] = true
-	}
-	if command.GetOverwrite() {
-		args["overwrite"] = true
-	}
-	if command.GetContentSearch() {
-		args["content"] = true
-	}
-	if command.GetMaxResults() > 0 {
-		args["max_results"] = float64(command.GetMaxResults())
-	}
-
-	event := executor.Execute(ctx, command.GetWorkspaceId(), command.GetSystemUser(), command.GetRequestId(), command.GetOperation(), args)
+	event := executor.ExecuteAssignment(ctx, command)
 	event.RequestId = command.GetRequestId()
 	if event.GetOperation() == filev1.FileOperation_FILE_OPERATION_UNSPECIFIED {
 		event.Operation = command.GetOperation()

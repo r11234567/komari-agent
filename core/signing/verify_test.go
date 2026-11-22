@@ -148,9 +148,10 @@ func TestVerifyRejectsReplayAcrossRestart(t *testing.T) {
 func TestVerifyIgnoresUnimplementedAlgorithm(t *testing.T) {
 	f := newFixture(t)
 	envelope := f.envelope(t, nil)
-	envelope.Signatures[0].Algorithm = securityv1.SignatureAlgorithm_SIGNATURE_ALGORITHM_ML_DSA_65
-	f.identity.ControlPlaneKeys[0].Algorithm = int32(securityv1.SignatureAlgorithm_SIGNATURE_ALGORITHM_ML_DSA_65)
-	f.identity.PolicyAlgorithms = []int32{int32(securityv1.SignatureAlgorithm_SIGNATURE_ALGORITHM_ML_DSA_65)}
+	const unknownAlg = securityv1.SignatureAlgorithm(99)
+	envelope.Signatures[0].Algorithm = unknownAlg
+	f.identity.ControlPlaneKeys[0].Algorithm = int32(unknownAlg)
+	f.identity.PolicyAlgorithms = []int32{int32(unknownAlg)}
 	if _, err := New(f.identity, f.replay).Verify(envelope); err == nil {
 		t.Fatal("Verify() treated an algorithm it cannot check as verified")
 	}

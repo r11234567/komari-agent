@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
+	filev1 "github.com/r11234567/komari-proto/gen/go/komari/file/v1"
 )
 
 func preserveAgentConfig(t *testing.T, endpoint string) {
@@ -318,4 +319,126 @@ func TestCancelUploadStreamsInterruptsActiveStream(t *testing.T) {
 	}
 	end()
 	waitUploadStreams("cancel-active")
+}
+
+func TestUploadManifestSurvivesWorkerEvictionAndEnforcesWorkspaceScope(t *testing.T) {
+	resetUploadStreamState(t)
+	root := t.TempDir()
+	target := filepath.Join(root, "resumed.bin")
+	spec := uploadStreamSpec{
+		WorkspaceID: "ws-alpha",
+		Path:        resolveFilePath(target),
+		UploadID:    "persisted-upload",
+		ChunkIndex:  0,
+		ChunkCount:  2,
+		TotalSize:   8,
+		ChunkSize:   4,
+		Expected:    4,
+		First:       true,
+	}
+	if _, err := writeUploadStreamChunk(spec, bytes.NewReader([]byte("part"))); err != nil {
+		t.Fatalf("chunk 0 failed: %v", err)
+	}
+	manifestPath := uploadManifestPathFor(spec.Path, spec.UploadID)
+	if _, err := os.Stat(manifestPath); err != nil {
+		t.Fatalf("expected persisted upload manifest at %s: %v", manifestPath, err)
+	}
+
+	// Simulate 3-minute idle eviction discarding all in-memory chunk state.
+	uploadChunksMu.Lock()
+	uploadChunks = make(map[string]uploadChunkState)
+	uploadChunksMu.Unlock()
+
+	// Another workspace must NOT resume or commit the persisted upload.
+	wrongSecond := spec
+	wrongSecond.WorkspaceID = "ws-beta"
+	wrongSecond.Offset = 4
+	wrongSecond.ChunkIndex = 1
+	wrongSecond.First = false
+	if _, err := writeUploadStreamChunk(wrongSecond, bytes.NewReader([]byte("-two"))); err == nil {
+		t.Fatal("other workspace resumed persisted upload")
+	}
+
+	// Same workspace resumes cleanly after memory wipe.
+	second := spec
+	second.Offset = 4
+	second.ChunkIndex = 1
+	second.First = false
+	if _, err := writeUploadStreamChunk(second, bytes.NewReader([]byte("-two"))); err != nil {
+		t.Fatalf("chunk 1 after memory eviction failed: %v", err)
+	}
+
+	// Simulate another idle eviction before upload_commit.
+	uploadChunksMu.Lock()
+	uploadChunks = make(map[string]uploadChunkState)
+	uploadChunksMu.Unlock()
+
+	if _, err := commitFileUploadScoped("ws-beta", map[string]any{
+		"path":        target,
+		"upload_id":   spec.UploadID,
+		"chunk_count": int64(2),
+		"total_size":  int64(8),
+		"chunk_size":  int64(4),
+	}); err == nil {
+		t.Fatal("other workspace committed persisted upload")
+	}
+
+	if _, err := commitFileUploadScoped("ws-alpha", map[string]any{
+		"path":        target,
+		"upload_id":   spec.UploadID,
+		"chunk_count": int64(2),
+		"total_size":  int64(8),
+		"chunk_size":  int64(4),
+	}); err != nil {
+		t.Fatalf("commit after memory eviction failed: %v", err)
+	}
+
+	got, err := os.ReadFile(target)
+	if err != nil || string(got) != "part-two" {
+		t.Fatalf("committed target = %q err=%v, want %q", got, err, "part-two")
+	}
+	if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
+		t.Fatalf("manifest still exists after commit: %v", err)
+	}
+}
+
+func TestExecuteAssignmentTypedPayloadAndRejectsUnderscoreOp(t *testing.T) {
+	resetUploadStreamState(t)
+	root := t.TempDir()
+	path := filepath.Join(root, "typed.txt")
+
+	created := ExecuteAssignment(&filev1.FileAssignment{
+		RequestId:   "req-create",
+		WorkspaceId: "ws-typed",
+		Operation:   filev1.FileOperation_FILE_OPERATION_CREATE,
+		Payload: &filev1.FileAssignment_Create{Create: &filev1.FileCreatePayload{
+			Path: path,
+			Mode: "0600",
+		}},
+	})
+	if !created.GetSuccess() || created.GetRequestId() != "req-create" {
+		t.Fatalf("typed create failed: %+v", created)
+	}
+
+	// Mismatched operation vs payload variant must fail.
+	mismatch := ExecuteAssignment(&filev1.FileAssignment{
+		RequestId: "req-mismatch",
+		Operation: filev1.FileOperation_FILE_OPERATION_STAT,
+		Payload:   &filev1.FileAssignment_List{List: &filev1.FileListPayload{Path: root}},
+	})
+	if mismatch.GetSuccess() {
+		t.Fatal("mismatched operation and typed payload succeeded")
+	}
+
+	// Legacy _op override in Execute must be ignored cleanly.
+	noOpOverride := Execute(filev1.FileOperation_FILE_OPERATION_STAT, map[string]any{
+		"_op":  "delete",
+		"path": path,
+	})
+	if !noOpOverride.GetSuccess() {
+		t.Fatalf("stat with ignored _op failed: %+v", noOpOverride)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("_op=delete deleted file unexpectedly: %v", err)
+	}
 }

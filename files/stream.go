@@ -42,15 +42,16 @@ type uploadStreamLifecycle struct {
 }
 
 type uploadStreamSpec struct {
-	Path       string
-	UploadID   string
-	Offset     int64
-	ChunkIndex int64
-	ChunkCount int64
-	TotalSize  int64
-	ChunkSize  int64
-	Expected   int64
-	First      bool
+	WorkspaceID string
+	Path        string
+	UploadID    string
+	Offset      int64
+	ChunkIndex  int64
+	ChunkCount  int64
+	TotalSize   int64
+	ChunkSize   int64
+	Expected    int64
+	First       bool
 }
 
 func buildFileTransferURL(args map[string]interface{}) (string, error) {
@@ -98,10 +99,11 @@ func sendDownloadStream(args map[string]interface{}) (json.RawMessage, error) {
 	if err != nil {
 		return nil, fmt.Errorf("download_stream: build transfer URL: %w", err)
 	}
-	info, err := os.Stat(path)
+	file, info, err := openRegularNoSymlinks(path, os.O_RDONLY, 0)
 	if err != nil {
-		return nil, fmt.Errorf("download_stream: stat %q: %w", path, err)
+		return nil, fmt.Errorf("download_stream: open %q: %w", path, err)
 	}
+	defer file.Close()
 	if info.IsDir() {
 		return nil, errors.New("download_stream: cannot download a directory")
 	}
@@ -116,12 +118,6 @@ func sendDownloadStream(args map[string]interface{}) (json.RawMessage, error) {
 			return nil, errors.New("download_stream: file changed while opening stream")
 		}
 	}
-
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("download_stream: open %q: %w", path, err)
-	}
-	defer file.Close()
 	streamContext, cancel := context.WithTimeout(context.Background(), fileStreamHTTPTimeout)
 	defer cancel()
 	if err := acquireFileStreamSlot(streamContext); err != nil {
@@ -161,7 +157,11 @@ func sendDownloadStream(args map[string]interface{}) (json.RawMessage, error) {
 }
 
 func receiveUploadStream(args map[string]interface{}) (json.RawMessage, error) {
-	spec, err := parseUploadStreamSpec(args)
+	return receiveUploadStreamScoped("", args)
+}
+
+func receiveUploadStreamScoped(scope string, args map[string]interface{}) (json.RawMessage, error) {
+	spec, err := parseUploadStreamSpecScoped(scope, args)
 	if err != nil {
 		return nil, fmt.Errorf("upload_stream: invalid metadata: %w", err)
 	}
@@ -342,15 +342,20 @@ func pruneUploadLifecyclesLocked(now time.Time) {
 }
 
 func parseUploadStreamSpec(args map[string]interface{}) (uploadStreamSpec, error) {
+	return parseUploadStreamSpecScoped("", args)
+}
+
+func parseUploadStreamSpecScoped(scope string, args map[string]interface{}) (uploadStreamSpec, error) {
 	spec := uploadStreamSpec{
-		Path:       resolveFilePath(argString(args, "path")),
-		UploadID:   strings.TrimSpace(argString(args, "upload_id")),
-		Offset:     argInt64(args, "offset"),
-		ChunkIndex: argInt64(args, "chunk_index"),
-		ChunkCount: argInt64(args, "chunk_count"),
-		TotalSize:  argInt64(args, "total_size"),
-		ChunkSize:  argInt64(args, "chunk_size"),
-		First:      argBool(args, "first"),
+		WorkspaceID: scope,
+		Path:        resolveFilePath(argString(args, "path")),
+		UploadID:    strings.TrimSpace(argString(args, "upload_id")),
+		Offset:      argInt64(args, "offset"),
+		ChunkIndex:  argInt64(args, "chunk_index"),
+		ChunkCount:  argInt64(args, "chunk_count"),
+		TotalSize:   argInt64(args, "total_size"),
+		ChunkSize:   argInt64(args, "chunk_size"),
+		First:       argBool(args, "first"),
 	}
 	if spec.ChunkSize == 0 {
 		spec.ChunkSize = defaultTransferChunkSize
@@ -402,18 +407,24 @@ func forgetUploadWriteLock(uploadID string) {
 
 func writeUploadStreamChunk(spec uploadStreamSpec, source io.Reader) (json.RawMessage, error) {
 	uploadChunksMu.Lock()
-	state, exists := uploadChunks[spec.UploadID]
+	state, exists, restoreErr := restoreUploadSessionLocked(spec.WorkspaceID, spec.Path, spec.UploadID)
+	if restoreErr != nil {
+		uploadChunksMu.Unlock()
+		return nil, restoreErr
+	}
 	if spec.First {
 		if !exists {
 			state = uploadChunkState{
+				WorkspaceID:  spec.WorkspaceID,
 				ExpectedSize: spec.TotalSize,
 				ChunkSize:    spec.ChunkSize,
 				TargetPath:   spec.Path,
 				PartCount:    spec.ChunkCount,
 				Parts:        make(map[int64]struct{}),
+				CreatedAt:    time.Now().UTC(),
 			}
 			partPath := uploadPartPathFor(spec.Path, spec.UploadID)
-			file, openErr := os.OpenFile(partPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+			file, openErr := openUploadPartSafe(partPath, true)
 			if openErr != nil {
 				uploadChunksMu.Unlock()
 				return nil, openErr
@@ -452,7 +463,7 @@ func writeUploadStreamChunk(spec uploadStreamSpec, source io.Reader) (json.RawMe
 	}
 	uploadChunksMu.Unlock()
 
-	file, err := os.OpenFile(partPath, os.O_WRONLY|os.O_CREATE, 0o600)
+	file, err := openUploadPartSafe(partPath, false)
 	if err != nil {
 		return nil, err
 	}
@@ -482,6 +493,7 @@ func writeUploadStreamChunk(spec uploadStreamSpec, source io.Reader) (json.RawMe
 		uploadChunksMu.Unlock()
 		return nil, errors.New("upload session was cancelled while receiving the stream")
 	}
+	state.WorkspaceID = spec.WorkspaceID
 	state.ExpectedSize = spec.TotalSize
 	state.ChunkSize = spec.ChunkSize
 	state.PartCount = spec.ChunkCount
@@ -494,9 +506,20 @@ func writeUploadStreamChunk(spec uploadStreamSpec, source io.Reader) (json.RawMe
 	}
 	state.Parts[spec.ChunkIndex] = struct{}{}
 	state.TempPath = partPath
-	state.CreatedAt = time.Now()
+	if state.CreatedAt.IsZero() {
+		state.CreatedAt = time.Now().UTC()
+	}
 	uploadChunks[spec.UploadID] = state
+	snapshot := cloneUploadStateLocked(state)
 	uploadChunksMu.Unlock()
+
+	manifestMu := uploadManifestLock(spec.UploadID)
+	manifestMu.Lock()
+	manifestErr := saveUploadManifest(spec.UploadID, snapshot)
+	manifestMu.Unlock()
+	if manifestErr != nil {
+		return nil, fmt.Errorf("persist upload manifest: %w", manifestErr)
+	}
 
 	return json.Marshal(map[string]any{
 		"received": written,

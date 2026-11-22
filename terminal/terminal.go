@@ -2,12 +2,8 @@ package terminal
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sync"
-	"time"
-
-	"github.com/gorilla/websocket"
 
 	"github.com/komari-monitor/komari-agent/core/capability"
 )
@@ -92,103 +88,4 @@ func (s *Session) Close() error {
 		err = s.term.Close()
 	})
 	return err
-}
-
-// StartTerminal 启动终端并处理 WebSocket 通信
-func StartTerminal(conn *websocket.Conn) {
-	_ = conn.WriteMessage(websocket.TextMessage, []byte("Legacy terminal is disabled. Use the account-isolated Connect workspace."))
-	_ = conn.Close()
-}
-
-// gracefulShutdown 尝试优雅地关闭终端
-func gracefulShutdown(term Terminal) {
-	//  Ctrl+C
-	for i := 0; i < 3; i++ {
-		if _, err := term.Write([]byte{3}); err != nil {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	time.Sleep(200 * time.Millisecond)
-
-	//  Ctrl+D (EOF)
-	term.Write([]byte{4})
-	time.Sleep(100 * time.Millisecond)
-
-	term.Write([]byte("exit\n"))
-	time.Sleep(100 * time.Millisecond)
-}
-
-// handleWebSocketInput 处理 WebSocket 输入
-func handleWebSocketInput(conn *websocket.Conn, term Terminal, errChan chan<- error, done <-chan struct{}) {
-	for {
-		select {
-		case <-done:
-			return
-		default:
-		}
-
-		t, p, err := conn.ReadMessage()
-		if err != nil {
-			select {
-			case errChan <- err:
-			default:
-			}
-			return
-		}
-		if t == websocket.TextMessage {
-			var cmd struct {
-				Type  string `json:"type"`
-				Cols  int    `json:"cols,omitempty"`
-				Rows  int    `json:"rows,omitempty"`
-				Input string `json:"input,omitempty"`
-			}
-			if err := json.Unmarshal(p, &cmd); err == nil {
-				switch cmd.Type {
-				case "resize":
-					if cmd.Cols > 0 && cmd.Rows > 0 {
-						term.Resize(cmd.Cols, cmd.Rows)
-					}
-				case "input":
-					if cmd.Input != "" {
-						term.Write([]byte(cmd.Input))
-					}
-				}
-			} else {
-				term.Write(p)
-			}
-		}
-		if t == websocket.BinaryMessage {
-			term.Write(p)
-		}
-	}
-}
-
-// handleTerminalOutput 处理终端输出
-func handleTerminalOutput(conn *websocket.Conn, term Terminal, errChan chan<- error, done <-chan struct{}) {
-	buf := make([]byte, 4096)
-	for {
-		select {
-		case <-done:
-			return
-		default:
-		}
-
-		n, err := term.Read(buf)
-		if err != nil {
-			select {
-			case errChan <- err:
-			default:
-			}
-			return
-		}
-		if err := conn.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
-			select {
-			case errChan <- err:
-			default:
-			}
-			return
-		}
-	}
 }

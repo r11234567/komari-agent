@@ -6,7 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"fmt"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -21,6 +21,48 @@ import (
 	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
 	configconnect "github.com/r11234567/komari-proto/gen/go/komari/config/v1/configv1connect"
 )
+
+func verifyRescueDPoPRequest(r *http.Request, body []byte, token string, public ed25519.PublicKey) bool {
+	if r.Header.Get("Authorization") != "DPoP "+token {
+		return false
+	}
+	parts := strings.Split(r.Header.Get("DPoP"), ".")
+	if len(parts) != 3 {
+		return false
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil || !ed25519.Verify(public, []byte(parts[0]+"."+parts[1]), sig) {
+		return false
+	}
+	hdrRaw, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return false
+	}
+	var hdr struct {
+		Typ string `json:"typ"`
+		Alg string `json:"alg"`
+	}
+	if err := json.Unmarshal(hdrRaw, &hdr); err != nil || hdr.Typ != "dpop+jwt" || hdr.Alg != "EdDSA" {
+		return false
+	}
+	claimsRaw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return false
+	}
+	var claims struct {
+		HTM string `json:"htm"`
+		ATH string `json:"ath"`
+		BH  string `json:"bh"`
+	}
+	if err := json.Unmarshal(claimsRaw, &claims); err != nil {
+		return false
+	}
+	tokDigest := sha256.Sum256([]byte(token))
+	bodyDigest := sha256.Sum256(body)
+	return claims.HTM == r.Method &&
+		claims.ATH == base64.RawURLEncoding.EncodeToString(tokDigest[:]) &&
+		claims.BH == base64.RawURLEncoding.EncodeToString(bodyDigest[:])
+}
 
 type continuousHeartbeatPanel struct {
 	configconnect.UnimplementedPrivilegedDeliveryServiceHandler
@@ -63,10 +105,7 @@ func TestRescueAuthorizationWatchSurvivesThirtySeconds(t *testing.T) {
 			return
 		}
 		r.Body = io.NopCloser(strings.NewReader(string(body)))
-		payload := fmt.Sprintf("%s\n%s\n%s\n%s\n%x\n%x", r.Method, r.URL.Path,
-			r.Header.Get("X-Komari-Timestamp"), r.Header.Get("X-Komari-Nonce"), sha256.Sum256([]byte(id.AccessToken)), sha256.Sum256(body))
-		sig, err := base64.StdEncoding.DecodeString(r.Header.Get("X-Komari-Signature"))
-		if err != nil || !ed25519.Verify(public, []byte(payload), sig) || r.Header.Get("Authorization") != "Bearer "+id.AccessToken {
+		if !verifyRescueDPoPRequest(r, body, id.AccessToken, public) {
 			http.Error(w, "invalid synthetic DPoP", http.StatusUnauthorized)
 			return
 		}

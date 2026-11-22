@@ -9,7 +9,6 @@ require (
 	github.com/creack/pty v1.1.24
 	github.com/go-ole/go-ole v1.2.6
 	github.com/google/uuid v1.6.0
-	github.com/gorilla/websocket v1.5.3
 	github.com/klauspost/cpuid/v2 v2.4.2
 	github.com/prometheus-community/pro-bing v0.9.1
 	github.com/r11234567/komari-proto v0.0.0
