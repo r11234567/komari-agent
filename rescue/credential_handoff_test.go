@@ -47,6 +47,12 @@ func TestCredentialHandoffPreservesFreshLeaseAndHonorsRevocation(t *testing.T) {
 	var newRequests atomic.Int32
 	_, handler := configconnect.NewPrivilegedDeliveryServiceHandler(panel)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/ping" {
+			w.Header().Set("X-Komari-Agent-Proof", "dpop-jwt-v1")
+			w.Header().Set("DPoP-Nonce", "test-panel-nonce")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "DPoP ")
 		if token != "synthetic-old-at" && token != "synthetic-new-at" {
 			http.Error(w, "unauthorized", 401)

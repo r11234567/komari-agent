@@ -284,6 +284,12 @@ func TestDPoPRequestSigningAndBodyHash(t *testing.T) {
 	var capturedAuth, capturedProof string
 	var capturedBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/ping" {
+			w.Header().Set("X-Komari-Agent-Proof", "dpop-jwt-v1")
+			w.Header().Set("DPoP-Nonce", "test-panel-nonce")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		capturedAuth = r.Header.Get("Authorization")
 		capturedProof = r.Header.Get("DPoP")
 		capturedBody, _ = io.ReadAll(r.Body)
@@ -399,6 +405,10 @@ func TestDPoP_AutoRefreshOn401(t *testing.T) {
 	var serverURL string
 	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/ping":
+			w.Header().Set("X-Komari-Agent-Proof", "dpop-jwt-v1")
+			w.Header().Set("DPoP-Nonce", "test-panel-nonce")
+			w.WriteHeader(http.StatusOK)
 		case "/komari.enrollment.v1.EnrollmentService/RefreshCredentials":
 			// Return a real request-bound signed refresh result.
 			respMsg := &enrollmentv1.RefreshCredentialsResponse{

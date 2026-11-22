@@ -220,13 +220,13 @@ func (c *Client) refreshCredentials(ctx context.Context, oldToken string) (resul
 }
 
 func wrapWithDPoP(httpClient *http.Client, client *Client) *http.Client {
-	return requestheaders.WrapWithDPoPAndNonces(httpClient, func() (credentials.Identity, bool) {
+	return requestheaders.WithProtocolNegotiation(requestheaders.WrapWithDPoPAndNonces(httpClient, func() (credentials.Identity, bool) {
 		return client.identity()
 	}, func() string {
 		return client.tokenValue()
 	}, func(ctx context.Context, oldToken string) error {
 		return client.refreshCredentials(ctx, oldToken)
-	}, client.dpopNonces)
+	}, client.dpopNonces))
 }
 
 func (c *Client) agentIDValue() string {

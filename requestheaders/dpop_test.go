@@ -461,3 +461,55 @@ func TestDPoPTransport_DoesNotMutateRequestAndClosesBody(t *testing.T) {
 		t.Fatal("original custom header was lost")
 	}
 }
+
+func TestNegotiatedAgentProofAcrossPanelUpgradeAndRollback(t *testing.T) {
+	pub, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const token = "synthetic-agent-token"
+	const nonce = "synthetic-server-nonce"
+	const procedure = "/komari.example.v1.AgentService/Check"
+	for _, jwt := range []bool{false, true, false} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/ping" {
+				if r.Header.Get("Authorization") != "" || r.Header.Get("X-Komari-Agent-Nonce-For") != "test-agent" {
+					t.Error("probe carried a credential or used the wrong agent identifier")
+				}
+				if jwt {
+					w.Header().Set("X-Komari-Agent-Proof", "dpop-jwt-v1")
+					w.Header().Set("DPoP-Nonce", nonce)
+				}
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			if r.URL.Path != procedure {
+				t.Errorf("unexpected request path %q", r.URL.Path)
+			}
+			if jwt {
+				if r.Header.Get("Authorization") != "DPoP "+token {
+					t.Error("JWT-capable Panel did not receive the DPoP scheme")
+				}
+				if claims := parseAndVerifyDPoPProof(t, r, nil, token, pub, false); claims.Nonce != nonce {
+					t.Error("first signed request did not use the probe nonce")
+				}
+			} else if r.Header.Get("Authorization") != "Bearer "+token ||
+				r.Header.Get("X-Komari-Signature") == "" || r.Header.Get("DPoP") != "" {
+				t.Error("old Panel did not receive a legacy signed request")
+			}
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		identity := credentials.Identity{AgentID: "test-agent", AccessToken: token, PrivateKey: base64.StdEncoding.EncodeToString(key)}
+		client := WithProtocolNegotiation(WrapWithStaticDPoP(server.Client(), identity))
+		resp, err := client.Get(server.URL + procedure)
+		if err != nil {
+			server.Close()
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		server.Close()
+		if resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("request status = %d", resp.StatusCode)
+		}
+	}
+}

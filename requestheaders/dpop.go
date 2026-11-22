@@ -6,9 +6,13 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +33,11 @@ const (
 type NonceStore struct {
 	mu     sync.RWMutex
 	nonces map[string]string
+
+	probeMu   sync.Mutex
+	probeKey  string
+	probeJWT  bool
+	probeTill time.Time
 }
 
 // NewNonceStore returns an empty origin-keyed DPoP-Nonce store.
@@ -78,11 +87,12 @@ func validDPoPNonce(nonce string) bool {
 // DPoPTransport signs HTTP requests using EdDSA (Ed25519) RFC 9449 DPoP proof
 // JWTs and handles DPoP-Nonce challenges as well as 401 token refreshes.
 type DPoPTransport struct {
-	Base     http.RoundTripper
-	Identity func() (credentials.Identity, bool)
-	Token    func() string
-	On401    func(ctx context.Context, oldToken string) error
-	Nonces   *NonceStore
+	Base      http.RoundTripper
+	Identity  func() (credentials.Identity, bool)
+	Token     func() string
+	On401     func(ctx context.Context, oldToken string) error
+	Nonces    *NonceStore
+	Negotiate bool
 
 	nonceOnce     sync.Once
 	fallbackNonce *NonceStore
@@ -112,16 +122,34 @@ func WrapWithDPoPAndNonces(httpClient *http.Client, identityProvider func() (cre
 	if transport == nil {
 		transport = http.DefaultTransport
 	}
-	return &http.Client{
-		Transport: &DPoPTransport{
-			Base:     transport,
-			Identity: identityProvider,
-			Token:    tokenProvider,
-			On401:    on401,
-			Nonces:   nonces,
-		},
-		Timeout: httpClient.Timeout,
+	wrapped := *httpClient
+	wrapped.Transport = &DPoPTransport{
+		Base: transport, Identity: identityProvider, Token: tokenProvider,
+		On401: on401, Nonces: nonces,
 	}
+	wrapped.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) > 0 {
+			origin, _ := requestOriginAndHTU(req)
+			initial, _ := requestOriginAndHTU(via[0])
+			if origin != initial || len(via) >= 10 {
+				return http.ErrUseLastResponse
+			}
+		}
+		if httpClient.CheckRedirect != nil {
+			return httpClient.CheckRedirect(req, via)
+		}
+		return nil
+	}
+	return &wrapped
+}
+
+// WithProtocolNegotiation enables the old-Panel compatibility probe on a new
+// DPoP client before it is used.
+func WithProtocolNegotiation(client *http.Client) *http.Client {
+	if transport, ok := client.Transport.(*DPoPTransport); ok {
+		transport.Negotiate = true
+	}
+	return client
 }
 
 // WrapWithStaticDPoP wraps an http.Client with RFC 9449 DPoP request signing using a fixed identity.
@@ -224,6 +252,71 @@ func isDPoPNonceChallenge(resp *http.Response, sentNonce string) bool {
 	return strings.Contains(wwwAuth, "use_dpop_nonce")
 }
 
+func (s *NonceStore) negotiateProof(base http.RoundTripper, req *http.Request, agentID string) (bool, error) {
+	origin, _ := requestOriginAndHTU(req)
+	probeKey := origin + "\x00" + agentID
+	s.probeMu.Lock()
+	defer s.probeMu.Unlock()
+	if s.probeKey == probeKey && time.Now().Before(s.probeTill) {
+		return s.probeJWT, nil
+	}
+	endpoint := *req.URL
+	prefix, _, _ := strings.Cut(endpoint.Path, "/komari.")
+	endpoint.Path = strings.TrimRight(prefix, "/") + "/ping"
+	endpoint.RawPath, endpoint.RawQuery, endpoint.Fragment = "", "", ""
+	endpoint.ForceQuery = false
+	ctx, cancel := context.WithTimeout(req.Context(), 5*time.Second)
+	defer cancel()
+	probe, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return false, err
+	}
+	probe.Host = req.Host
+	probe.Header.Set("X-Komari-Agent-Nonce-For", agentID)
+	probe.Header.Set("Cache-Control", "no-cache")
+	for _, header := range []string{"CF-Access-Client-Id", "CF-Access-Client-Secret"} {
+		if value := req.Header.Get(header); value != "" {
+			probe.Header.Set(header, value)
+		}
+	}
+	response, err := base.RoundTrip(probe)
+	if err != nil {
+		return false, fmt.Errorf("negotiate Agent request proof: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusNotFound {
+		return false, fmt.Errorf("Agent request proof probe returned HTTP %d", response.StatusCode)
+	}
+	jwt := response.StatusCode == http.StatusOK && response.Header.Get("X-Komari-Agent-Proof") == "dpop-jwt-v1"
+	if jwt {
+		nonce := response.Header.Get("DPoP-Nonce")
+		if !validDPoPNonce(nonce) {
+			return false, errors.New("Agent request proof probe lacks a valid server nonce")
+		}
+		s.Set(origin, nonce)
+	}
+	s.probeKey, s.probeJWT, s.probeTill = probeKey, jwt, time.Now().Add(30*time.Second)
+	return jwt, nil
+}
+
+func signLegacyProof(req *http.Request, key ed25519.PrivateKey, token string, body []byte, stream bool) {
+	tokenDigest := sha256.Sum256([]byte(token))
+	bodyDigest := sha256.Sum256(body)
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	nonce := uuid.NewString()
+	input := strings.Join([]string{req.Method, req.URL.Path, timestamp, nonce,
+		hex.EncodeToString(tokenDigest[:]), hex.EncodeToString(bodyDigest[:])}, "\n")
+	req.Header.Del("DPoP")
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Komari-Signature", base64.StdEncoding.EncodeToString(ed25519.Sign(key, []byte(input))))
+	req.Header.Set("X-Komari-Timestamp", timestamp)
+	req.Header.Set("X-Komari-Nonce", nonce)
+	req.Header.Del("X-Komari-Body-Mode")
+	if stream {
+		req.Header.Set("X-Komari-Body-Mode", "stream")
+	}
+}
+
 // RoundTrip signs the request with RFC 9449 DPoP headers before passing it to the underlying transport.
 func (d *DPoPTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if d.Identity == nil {
@@ -260,6 +353,19 @@ func (d *DPoPTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return d.Base.RoundTrip(req)
 	}
 
+	origin, _ := requestOriginAndHTU(req)
+	nonces := d.nonceStore()
+	jwt := true
+	if d.Negotiate && identity.AgentID != "" && strings.Contains(req.URL.Path, "/komari.") {
+		jwt, err = nonces.negotiateProof(d.Base, req, identity.AgentID)
+		if err != nil {
+			if req.Body != nil {
+				_ = req.Body.Close()
+			}
+			return nil, err
+		}
+	}
+
 	// Detect client-streaming body.
 	isStream := req.Body != nil && req.Body != http.NoBody && req.ContentLength < 0 && req.GetBody == nil
 
@@ -282,10 +388,11 @@ func (d *DPoPTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		bodyHash = base64.RawURLEncoding.EncodeToString(bodyDigest[:])
 	}
 
-	origin, _ := requestOriginAndHTU(req)
-	nonces := d.nonceStore()
-
 	signRequest := func(target *http.Request, curToken, nonce string) error {
+		if !jwt {
+			signLegacyProof(target, privKey, curToken, bodyBytes, isStream)
+			return nil
+		}
 		_, htu := requestOriginAndHTU(target)
 		proof, signErr := buildDPoPProofJWT(privKey, target.Method, htu, curToken, nonce, bodyHash, isStream)
 		if signErr != nil {
@@ -293,6 +400,9 @@ func (d *DPoPTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 		target.Header.Set("Authorization", "DPoP "+curToken)
 		target.Header.Set("DPoP", proof)
+		for _, header := range []string{"X-Komari-Signature", "X-Komari-Timestamp", "X-Komari-Nonce", "X-Komari-Body-Mode"} {
+			target.Header.Del(header)
+		}
 		return nil
 	}
 

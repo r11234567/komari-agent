@@ -97,6 +97,12 @@ func TestRescueAuthorizationWatchSurvivesThirtySeconds(t *testing.T) {
 	panel := &continuousHeartbeatPanel{sign: sign}
 	_, handler := configconnect.NewPrivilegedDeliveryServiceHandler(panel)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/ping" {
+			w.Header().Set("X-Komari-Agent-Proof", "dpop-jwt-v1")
+			w.Header().Set("DPoP-Nonce", "test-panel-nonce")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		// Verify that the dedicated production client still signs the actual
 		// HTTP request. Only isolated synthetic credentials are used here.
 		body, err := io.ReadAll(r.Body)
