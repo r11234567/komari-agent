@@ -47,7 +47,7 @@ func TestCredentialHandoffPreservesFreshLeaseAndHonorsRevocation(t *testing.T) {
 	var newRequests atomic.Int32
 	_, handler := configconnect.NewPrivilegedDeliveryServiceHandler(panel)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "DPoP ")
 		if token != "synthetic-old-at" && token != "synthetic-new-at" {
 			http.Error(w, "unauthorized", 401)
 			return
