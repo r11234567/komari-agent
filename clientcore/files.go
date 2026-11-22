@@ -15,6 +15,7 @@ import (
 const (
 	fileOperationTimeout     = 5 * time.Minute
 	fileStreamOperationLimit = 30 * time.Minute
+	typedFilePayloadHeader   = "X-Komari-File-Payload"
 )
 
 func (c *Client) runFileOperations(ctx context.Context) {
@@ -35,6 +36,7 @@ func (c *Client) runFileOperations(ctx context.Context) {
 		req := connect.NewRequest(&filev1.LeaseFileOperationsRequest{AgentId: c.agentIDValue()})
 		c.authorize(req.Header())
 		req.Header().Set("X-Komari-Workspace-Identity", "v1")
+		req.Header().Set(typedFilePayloadHeader, "1")
 		stream, err := c.files.LeaseFileOperations(ctx, req)
 		if err != nil {
 			if isUnsupported(err) || !retry.Wait(ctx, err) {
@@ -99,6 +101,7 @@ func (c *Client) attachFileOperation(parent context.Context, assignment *filev1.
 	stream := c.files.AttachFileOperations(ctx)
 	c.authorize(stream.RequestHeader())
 	stream.RequestHeader().Set("X-Komari-Workspace-Identity", "v1")
+	stream.RequestHeader().Set(typedFilePayloadHeader, "1")
 	if err := stream.Send(&filev1.AttachFileOperationsRequest{
 		Message: &filev1.AttachFileOperationsRequest_Attach{Attach: &filev1.AgentFileAttach{
 			AgentId:      c.agentIDValue(),
@@ -116,8 +119,12 @@ func (c *Client) attachFileOperation(parent context.Context, assignment *filev1.
 	if command == nil {
 		return errors.New("file assignment is missing from the attach response")
 	}
-	if command.GetSystemUser() != assignment.GetSystemUser() {
-		return errors.New("file workspace OS account changed after assignment")
+	if command.GetSystemUser() != assignment.GetSystemUser() ||
+		command.GetWorkspaceId() != assignment.GetWorkspaceId() ||
+		command.GetRequestId() != assignment.GetRequestId() ||
+		command.GetAssignmentId() != assignment.GetAssignmentId() ||
+		command.GetOperation() != assignment.GetOperation() {
+		return errors.New("file assignment binding changed before attach")
 	}
 	// Read the server side concurrently so grant expiry closes active workers,
 	// including a long transfer, instead of waiting for the operation to finish.

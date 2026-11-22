@@ -14,6 +14,7 @@ import (
 
 	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
 	filev1 "github.com/r11234567/komari-proto/gen/go/komari/file/v1"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 func preserveAgentConfig(t *testing.T, endpoint string) {
@@ -468,5 +469,28 @@ func TestExecuteAssignmentTypedPayloadAndRejectsUnderscoreOp(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("_op=delete deleted file unexpectedly: %v", err)
+	}
+}
+
+func TestLegacyAssignmentOnlyAcceptsTheKnownWireShapes(t *testing.T) {
+	for _, check := range []struct {
+		enum filev1.FileOperation
+		name string
+		want filev1.FileOperation
+		ok   bool
+	}{
+		{filev1.FileOperation_FILE_OPERATION_STAT, "stat", filev1.FileOperation_FILE_OPERATION_STAT, true},
+		{filev1.FileOperation_FILE_OPERATION_STAT, "delete", 0, false},
+		{filev1.FileOperation_FILE_OPERATION_UPLOAD_STREAM, "upload_commit", filev1.FileOperation_FILE_OPERATION_UPLOAD_COMMIT, true},
+		{filev1.FileOperation_FILE_OPERATION_UPLOAD_STREAM, "upload_cancel", filev1.FileOperation_FILE_OPERATION_UPLOAD_CANCEL, true},
+	} {
+		args, err := structpb.NewStruct(map[string]any{"_op": check.name, "path": "/tmp/test"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		op, decoded, err := decodeAssignment(&filev1.FileAssignment{Operation: check.enum, Arguments: args})
+		if (err == nil) != check.ok || (check.ok && (op != check.want || decoded["_op"] != nil)) {
+			t.Errorf("decode %s/%s = %s, %#v, %v", check.enum, check.name, op, decoded, err)
+		}
 	}
 }

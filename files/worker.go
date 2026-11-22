@@ -130,12 +130,12 @@ func (e *Executor) Close() {
 }
 
 // ExecuteAssignment validates a strongly-typed FileAssignment and runs it inside
-// the workspace OS-account worker without consulting untyped Arguments or _op.
+// the workspace OS-account worker using the validated wire operation.
 func (e *Executor) ExecuteAssignment(ctx context.Context, assignment *filev1.FileAssignment) *filev1.AgentFileEvent {
 	if assignment == nil {
 		return &filev1.AgentFileEvent{Error: "file assignment is required"}
 	}
-	args, err := assignmentArgs(assignment)
+	operation, args, err := decodeAssignment(assignment)
 	if err != nil {
 		return &filev1.AgentFileEvent{
 			RequestId: assignment.GetRequestId(),
@@ -143,7 +143,7 @@ func (e *Executor) ExecuteAssignment(ctx context.Context, assignment *filev1.Fil
 			Error:     err.Error(),
 		}
 	}
-	event := e.Execute(ctx, assignment.GetWorkspaceId(), assignment.GetSystemUser(), assignment.GetRequestId(), assignment.GetOperation(), args)
+	event := e.Execute(ctx, assignment.GetWorkspaceId(), assignment.GetSystemUser(), assignment.GetRequestId(), operation, args)
 	event.RequestId = assignment.GetRequestId()
 	return event
 }

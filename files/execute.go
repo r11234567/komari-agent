@@ -11,13 +11,12 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// ExecuteAssignment executes one strongly-typed FileAssignment without reading
-// deprecated untyped Arguments or _op overrides.
+// ExecuteAssignment prefers the typed contract for every new assignment.
 func ExecuteAssignment(assignment *filev1.FileAssignment) *filev1.AgentFileEvent {
 	if assignment == nil {
 		return &filev1.AgentFileEvent{Error: "file assignment is required"}
 	}
-	args, err := assignmentArgs(assignment)
+	operation, args, err := decodeAssignment(assignment)
 	if err != nil {
 		return &filev1.AgentFileEvent{
 			RequestId: assignment.GetRequestId(),
@@ -25,9 +24,34 @@ func ExecuteAssignment(assignment *filev1.FileAssignment) *filev1.AgentFileEvent
 			Error:     err.Error(),
 		}
 	}
-	event := ExecuteWithScope(assignment.GetWorkspaceId(), assignment.GetOperation(), args)
+	event := ExecuteWithScope(assignment.GetWorkspaceId(), operation, args)
 	event.RequestId = assignment.GetRequestId()
 	return event
+}
+
+func decodeAssignment(assignment *filev1.FileAssignment) (filev1.FileOperation, map[string]any, error) {
+	op := assignment.GetOperation()
+	if assignment.GetPayload() != nil || assignment.GetArguments() == nil {
+		args, err := assignmentArgs(assignment)
+		return op, args, err
+	}
+	args := assignment.GetArguments().AsMap()
+	legacyName := argString(args, "_op")
+	delete(args, "_op")
+	if op == filev1.FileOperation_FILE_OPERATION_UPLOAD_STREAM {
+		// These two values used the upload enum before they got their own
+		// typed operation numbers. No other operation may change kinds.
+		switch legacyName {
+		case "upload_commit":
+			return filev1.FileOperation_FILE_OPERATION_UPLOAD_COMMIT, args, nil
+		case "upload_cancel":
+			return filev1.FileOperation_FILE_OPERATION_UPLOAD_CANCEL, args, nil
+		}
+	}
+	if operationName(op) == "" || legacyName != operationName(op) {
+		return op, nil, errors.New("legacy file operation does not match its enum")
+	}
+	return op, args, nil
 }
 
 // Execute runs one file control or stream operation and converts its JSON
