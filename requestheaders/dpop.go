@@ -96,20 +96,20 @@ func (d *DPoPTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if !isStream && req.Body != nil && req.Body != http.NoBody {
 		var readErr error
 		bodyBytes, readErr = io.ReadAll(req.Body)
+		_ = req.Body.Close()
 		if readErr != nil {
 			return nil, readErr
 		}
-		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	}
 
-	signRequest := func(curToken string) {
+	signRequest := func(target *http.Request, curToken string) {
 		tokenDigest := sha256.Sum256([]byte(curToken))
 		tokenHash := hex.EncodeToString(tokenDigest[:])
 		var bodyHash string
 		if isStream {
 			bodyDigest := sha256.Sum256(nil)
 			bodyHash = hex.EncodeToString(bodyDigest[:])
-			req.Header.Set("X-Komari-Body-Mode", "stream")
+			target.Header.Set("X-Komari-Body-Mode", "stream")
 		} else {
 			bodyDigest := sha256.Sum256(bodyBytes)
 			bodyHash = hex.EncodeToString(bodyDigest[:])
@@ -117,18 +117,22 @@ func (d *DPoPTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		tsStr := strconv.FormatInt(time.Now().Unix(), 10)
 		nonce := uuid.NewString()
 
-		payload := fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n%s", req.Method, req.URL.Path, tsStr, nonce, tokenHash, bodyHash)
+		payload := fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n%s", target.Method, target.URL.Path, tsStr, nonce, tokenHash, bodyHash)
 		sig := ed25519.Sign(privKey, []byte(payload))
 
-		req.Header.Set("Authorization", "Bearer "+curToken)
-		req.Header.Set("X-Komari-Signature", base64.StdEncoding.EncodeToString(sig))
-		req.Header.Set("X-Komari-Timestamp", tsStr)
-		req.Header.Set("X-Komari-Nonce", nonce)
+		target.Header.Set("Authorization", "Bearer "+curToken)
+		target.Header.Set("X-Komari-Signature", base64.StdEncoding.EncodeToString(sig))
+		target.Header.Set("X-Komari-Timestamp", tsStr)
+		target.Header.Set("X-Komari-Nonce", nonce)
 	}
 
-	signRequest(token)
+	outReq := req.Clone(req.Context())
+	if !isStream && req.Body != nil && req.Body != http.NoBody {
+		outReq.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	}
+	signRequest(outReq, token)
 
-	resp, err := d.Base.RoundTrip(req)
+	resp, err := d.Base.RoundTrip(outReq)
 	if err == nil && resp.StatusCode == http.StatusUnauthorized && d.On401 != nil {
 		if refreshErr := d.On401(req.Context(), token); refreshErr == nil {
 			// Streaming request bodies (GetBody == nil) cannot be replayed safely
@@ -143,11 +147,12 @@ func (d *DPoPTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			}
 			if newToken != "" && newToken != token {
 				_ = resp.Body.Close()
-				signRequest(newToken)
+				retryReq := req.Clone(req.Context())
 				if bodyBytes != nil {
-					req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+					retryReq.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 				}
-				return d.Base.RoundTrip(req)
+				signRequest(retryReq, newToken)
+				return d.Base.RoundTrip(retryReq)
 			}
 		}
 	}

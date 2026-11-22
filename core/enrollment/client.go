@@ -261,7 +261,7 @@ func (c *Client) Refresh(ctx context.Context, identity credentials.Identity) (cr
 	}
 	response, err := c.service.RefreshCredentials(ctx, connect.NewRequest(&enrollmentv1.RefreshCredentialsRequest{RefreshToken: identity.RefreshToken, Proof: proof}))
 	if err != nil {
-		return identity, fmt.Errorf("refresh credentials: %w", err)
+		return identity, fmt.Errorf("refresh credentials: %w", refreshError(err))
 	}
 	issued := response.Msg.GetCredentials()
 	generation, err := verifyRefreshV2Response(response.Msg.GetProof(), identity, issued)
