@@ -32,9 +32,6 @@ func resetUploadStreamState(t *testing.T) {
 	uploadChunksMu.Lock()
 	uploadChunks = make(map[string]uploadChunkState)
 	uploadChunksMu.Unlock()
-	uploadWriteLocksMu.Lock()
-	uploadWriteLocks = make(map[string]*sync.Mutex)
-	uploadWriteLocksMu.Unlock()
 	uploadLifecycleMu.Lock()
 	uploadLifecycles = make(map[string]*uploadStreamLifecycle)
 	uploadLifecycleMu.Unlock()
@@ -399,6 +396,34 @@ func TestUploadManifestSurvivesWorkerEvictionAndEnforcesWorkspaceScope(t *testin
 	}
 	if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
 		t.Fatalf("manifest still exists after commit: %v", err)
+	}
+}
+
+func TestUploadManifestWriteFailureDoesNotAcknowledgeChunk(t *testing.T) {
+	resetUploadStreamState(t)
+	spec := uploadStreamSpec{
+		Path: filepath.Join(t.TempDir(), "retry.bin"), UploadID: "failed-manifest",
+		ChunkCount: 1, TotalSize: 4, ChunkSize: 4, Expected: 4, First: true,
+	}
+	manifestPath := uploadManifestPathFor(spec.Path, spec.UploadID)
+	if err := os.Mkdir(manifestPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeUploadStreamChunk(spec, bytes.NewReader([]byte("data"))); err == nil {
+		t.Fatal("chunk was accepted without a durable manifest")
+	}
+	args := map[string]any{"path": spec.Path, "upload_id": spec.UploadID, "chunk_count": int64(1), "total_size": int64(4), "chunk_size": int64(4)}
+	if err := os.Remove(manifestPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := commitFileUpload(args); err == nil {
+		t.Fatal("commit accepted a chunk whose manifest write failed")
+	}
+	if _, err := writeUploadStreamChunk(spec, bytes.NewReader([]byte("data"))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := commitFileUpload(args); err != nil {
+		t.Fatal(err)
 	}
 }
 

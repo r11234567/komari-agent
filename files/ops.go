@@ -67,10 +67,8 @@ type uploadManifest struct {
 }
 
 var (
-	uploadChunksMu      = sync.Mutex{}
-	uploadChunks        = make(map[string]uploadChunkState)
-	uploadManifestMu    sync.Mutex
-	uploadManifestLocks = make(map[string]*sync.Mutex)
+	uploadChunksMu sync.Mutex
+	uploadChunks   = make(map[string]uploadChunkState)
 )
 
 type searchMatch struct {
@@ -555,26 +553,6 @@ func uploadManifestPathFor(targetPath, uploadID string) string {
 	return filepath.Join(filepath.Dir(target), "."+name+".komari-upload-"+uploadID+".meta.json")
 }
 
-func uploadManifestLock(uploadID string) *sync.Mutex {
-	uploadManifestMu.Lock()
-	defer uploadManifestMu.Unlock()
-	lock := uploadManifestLocks[uploadID]
-	if lock == nil {
-		lock = &sync.Mutex{}
-		uploadManifestLocks[uploadID] = lock
-	}
-	return lock
-}
-
-func forgetUploadManifestLock(uploadID string) {
-	if uploadID == "" {
-		return
-	}
-	uploadManifestMu.Lock()
-	delete(uploadManifestLocks, uploadID)
-	uploadManifestMu.Unlock()
-}
-
 func cloneUploadStateLocked(state uploadChunkState) uploadChunkState {
 	cloned := state
 	cloned.Parts = make(map[int64]struct{}, len(state.Parts))
@@ -726,11 +704,7 @@ func cancelFileUploadScoped(scope string, args map[string]interface{}) (json.Raw
 	waitUploadStreams(uploadID)
 	writeLock := uploadWriteLock(uploadID)
 	writeLock.Lock()
-	defer func() {
-		writeLock.Unlock()
-		forgetUploadWriteLock(uploadID)
-		forgetUploadManifestLock(uploadID)
-	}()
+	defer writeLock.Unlock()
 	targetPath := strings.TrimSpace(argString(args, "path"))
 	if targetPath != "" {
 		targetPath = resolveFilePath(targetPath)
@@ -807,11 +781,7 @@ func commitFileUploadScoped(scope string, args map[string]interface{}) (json.Raw
 	waitUploadStreams(uploadID)
 	writeLock := uploadWriteLock(uploadID)
 	writeLock.Lock()
-	defer func() {
-		writeLock.Unlock()
-		forgetUploadWriteLock(uploadID)
-		forgetUploadManifestLock(uploadID)
-	}()
+	defer writeLock.Unlock()
 
 	uploadChunksMu.Lock()
 	state, exists, restoreErr := restoreUploadSessionLocked(scope, path, uploadID)
