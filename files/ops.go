@@ -2,6 +2,7 @@ package files
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,6 +50,7 @@ type uploadChunkState struct {
 	Parts        map[int64]struct{}
 	PartCount    int64
 	TempPath     string
+	PartIdentity string
 	CreatedAt    time.Time
 }
 
@@ -56,7 +58,7 @@ type uploadManifest struct {
 	UploadID     string    `json:"upload_id"`
 	WorkspaceID  string    `json:"workspace_id,omitempty"`
 	TargetPath   string    `json:"target_path"`
-	PartPath     string    `json:"part_path"`
+	PartIdentity string    `json:"part_identity,omitempty"`
 	ExpectedSize int64     `json:"expected_size"`
 	ChunkSize    int64     `json:"chunk_size"`
 	PartCount    int64     `json:"part_count"`
@@ -532,25 +534,20 @@ func uploadChunkCount(size, chunkSize int64) int64 {
 	if size <= 0 || chunkSize <= 0 {
 		return 0
 	}
-	return (size + chunkSize - 1) / chunkSize
+	return 1 + (size-1)/chunkSize
 }
 
 func uploadPartPathFor(targetPath, uploadID string) string {
-	target := filepath.ToSlash(targetPath)
-	name := filepath.Base(target)
-	if name == "" || name == "." || name == "/" {
-		name = "upload"
-	}
-	return filepath.Join(filepath.Dir(target), "."+name+".komari-upload-"+uploadID+".part")
+	return filepath.Join(uploadStagePath(targetPath, uploadID), "part")
 }
 
 func uploadManifestPathFor(targetPath, uploadID string) string {
-	target := filepath.ToSlash(targetPath)
-	name := filepath.Base(target)
-	if name == "" || name == "." || name == "/" {
-		name = "upload"
-	}
-	return filepath.Join(filepath.Dir(target), "."+name+".komari-upload-"+uploadID+".meta.json")
+	return filepath.Join(uploadStagePath(targetPath, uploadID), "manifest.json")
+}
+
+func uploadStagePath(targetPath, uploadID string) string {
+	digest := sha256.Sum256([]byte(filepath.Base(targetPath) + "\x00" + uploadID))
+	return filepath.Join(filepath.Dir(targetPath), fmt.Sprintf(".komari-upload-%x", digest[:16]))
 }
 
 func cloneUploadStateLocked(state uploadChunkState) uploadChunkState {
@@ -575,7 +572,7 @@ func saveUploadManifest(uploadID string, state uploadChunkState) error {
 		UploadID:     uploadID,
 		WorkspaceID:  state.WorkspaceID,
 		TargetPath:   state.TargetPath,
-		PartPath:     state.TempPath,
+		PartIdentity: state.PartIdentity,
 		ExpectedSize: state.ExpectedSize,
 		ChunkSize:    state.ChunkSize,
 		PartCount:    state.PartCount,
@@ -588,7 +585,7 @@ func saveUploadManifest(uploadID string, state uploadChunkState) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomicFileSafe(uploadManifestPathFor(state.TargetPath, uploadID), encoded, 0o600)
+	return writeAtomicFileSafe(uploadManifestPathFor(state.TargetPath, uploadID), encoded, 0o600, state.PartIdentity)
 }
 
 func restoreUploadSessionLocked(scope, targetPath, uploadID string) (uploadChunkState, bool, error) {
@@ -619,25 +616,43 @@ func restoreUploadSessionLocked(scope, targetPath, uploadID string) (uploadChunk
 	if manifest.WorkspaceID != scope {
 		return uploadChunkState{}, false, errors.New("upload session belongs to another workspace")
 	}
-	if manifest.TargetPath != "" && !samePath(manifest.TargetPath, targetPath) {
+	if !samePath(manifest.TargetPath, targetPath) {
 		return uploadChunkState{}, false, errors.New("upload target path does not match session")
 	}
-	partPath := manifest.PartPath
-	if partPath == "" {
-		partPath = uploadPartPathFor(targetPath, uploadID)
+	if manifest.ChunkSize <= 0 || manifest.ChunkSize > maxTransferChunkSize ||
+		manifest.ExpectedSize <= 0 || manifest.PartCount != uploadChunkCount(manifest.ExpectedSize, manifest.ChunkSize) ||
+		len(manifest.Parts) == 0 {
+		return uploadChunkState{}, false, errors.New("invalid upload manifest geometry")
 	}
-	partFile, _, err := openRegularNoSymlinks(partPath, os.O_RDONLY, 0)
+	partPath := uploadPartPathFor(targetPath, uploadID)
+	partFile, err := openUploadPartSafe(partPath, false)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return uploadChunkState{}, false, nil
-		}
 		return uploadChunkState{}, false, err
 	}
-	_ = partFile.Close()
+	defer partFile.Close()
+	if err := checkUploadPartIdentity(partFile, manifest.PartIdentity); err != nil {
+		return uploadChunkState{}, false, err
+	}
+	partInfo, err := partFile.Stat()
+	if err != nil {
+		return uploadChunkState{}, false, err
+	}
 
 	parts := make(map[int64]struct{}, len(manifest.Parts))
+	var received int64
 	for _, idx := range manifest.Parts {
+		if idx < 0 || idx >= manifest.PartCount {
+			return uploadChunkState{}, false, errors.New("invalid recorded upload chunk")
+		}
+		if _, duplicate := parts[idx]; duplicate {
+			return uploadChunkState{}, false, errors.New("duplicate recorded upload chunk")
+		}
+		offset := idx * manifest.ChunkSize
+		received = max(received, offset+min(manifest.ChunkSize, manifest.ExpectedSize-offset))
 		parts[idx] = struct{}{}
+	}
+	if received != manifest.Received || partInfo.Size() < received {
+		return uploadChunkState{}, false, errors.New("upload manifest does not match staged length")
 	}
 	state := uploadChunkState{
 		WorkspaceID:  manifest.WorkspaceID,
@@ -648,10 +663,8 @@ func restoreUploadSessionLocked(scope, targetPath, uploadID string) (uploadChunk
 		Parts:        parts,
 		PartCount:    manifest.PartCount,
 		TempPath:     partPath,
+		PartIdentity: manifest.PartIdentity,
 		CreatedAt:    manifest.CreatedAt,
-	}
-	if state.TargetPath == "" {
-		state.TargetPath = targetPath
 	}
 	uploadChunks[uploadID] = state
 	return state, true, nil
@@ -674,15 +687,8 @@ func removeUploadFileLocked(uploadID string) error {
 	if !ok {
 		return nil
 	}
-	if state.TempPath != "" {
-		if err := os.Remove(state.TempPath); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-	}
-	if state.TargetPath != "" {
-		if err := os.Remove(uploadManifestPathFor(state.TargetPath, uploadID)); err != nil && !os.IsNotExist(err) {
-			return err
-		}
+	if err := removeUploadStage(uploadStagePath(state.TargetPath, uploadID), state.PartIdentity); err != nil {
+		return err
 	}
 	delete(uploadChunks, uploadID)
 	return nil
@@ -730,16 +736,6 @@ func cancelFileUploadScoped(scope string, args map[string]interface{}) (json.Raw
 	}
 	uploadChunksMu.Unlock()
 
-	// Fallback if manifest was never written yet: remove deterministic part/meta paths.
-	if targetPath != "" {
-		partPath := uploadPartPathFor(targetPath, uploadID)
-		if err := os.Remove(partPath); err != nil && !os.IsNotExist(err) {
-			return nil, err
-		}
-		if err := os.Remove(uploadManifestPathFor(targetPath, uploadID)); err != nil && !os.IsNotExist(err) {
-			return nil, err
-		}
-	}
 	return json.Marshal(map[string]any{"cancelled": true})
 }
 
@@ -815,15 +811,15 @@ func commitFileUploadScoped(scope string, args map[string]interface{}) (json.Raw
 		return nil, fmt.Errorf("upload incomplete: received %d of %d chunks", received, chunkCount)
 	}
 	partPath := state.TempPath
+	partIdentity := state.PartIdentity
 	uploadChunksMu.Unlock()
 	if partPath == "" {
 		return nil, errors.New("upload part file is missing")
 	}
 
-	if err := commitUploadPartSafe(partPath, path, totalSize); err != nil {
+	if err := commitUploadPartSafe(partPath, path, totalSize, partIdentity); err != nil {
 		return nil, err
 	}
-	_ = os.Remove(uploadManifestPathFor(path, uploadID))
 	uploadChunksMu.Lock()
 	delete(uploadChunks, uploadID)
 	uploadChunksMu.Unlock()

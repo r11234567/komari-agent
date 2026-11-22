@@ -3,8 +3,10 @@
 package files
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -216,7 +218,7 @@ func renameInDir(srcDir *os.File, srcName string, dstDir *os.File, dstName strin
 
 func createTempInDir(dir *os.File, prefix string) (*os.File, string, error) {
 	for i := 0; i < 64; i++ {
-		name := fmt.Sprintf("%s%d-%d", prefix, os.Getpid(), i)
+		name := prefix + rand.Text()
 		file, err := openInDir(dir, name, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL, 0o600)
 		if err == nil {
 			return file, name, nil
@@ -341,12 +343,16 @@ func syscallMode(i fs.FileMode) uint32 {
 	return o
 }
 
-func writeAtomicFileSafe(path string, data []byte, perm fs.FileMode) error {
-	parent, base, err := openParentNoSymlinks(path, true, 0o755)
+func writeAtomicFileSafe(path string, data []byte, perm fs.FileMode, identity string) error {
+	parent, err := openUploadStage(filepath.Dir(path), false)
 	if err != nil {
 		return err
 	}
 	defer parent.Close()
+	if err := checkStagePartIdentity(parent, identity); err != nil {
+		return err
+	}
+	base := filepath.Base(path)
 	tmp, tmpName, err := createTempInDir(parent, "."+base+".tmp-")
 	if err != nil {
 		return err
@@ -378,27 +384,24 @@ func writeAtomicFileSafe(path string, data []byte, perm fs.FileMode) error {
 }
 
 func readRegularFileSafe(path string, maxBytes int64) ([]byte, error) {
-	file, info, err := openRegularNoSymlinks(path, os.O_RDONLY, 0)
+	parent, err := openUploadStage(filepath.Dir(path), false)
+	if err != nil {
+		return nil, err
+	}
+	defer parent.Close()
+	file, err := openInDir(parent, filepath.Base(path), unix.O_RDONLY|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
-	if maxBytes > 0 && info.Size() > maxBytes {
+	if err := ensurePrivatePart(file); err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if int64(len(data)) > maxBytes {
 		return nil, fmt.Errorf("file %q exceeds maximum %d bytes", path, maxBytes)
 	}
-	buf := make([]byte, info.Size())
-	n := 0
-	for n < len(buf) {
-		readN, readErr := file.Read(buf[n:])
-		n += readN
-		if readErr != nil {
-			if readN > 0 {
-				continue
-			}
-			break
-		}
-	}
-	return buf[:n], nil
+	return data, err
 }
 
 func createEmptyRegularFileSafe(path string, hasMode bool, requestedMode fs.FileMode) error {
@@ -454,42 +457,156 @@ func createEmptyRegularFileSafe(path string, hasMode bool, requestedMode fs.File
 	return tempFailureRetry(func() error { return unix.Fsync(int(parent.Fd())) })
 }
 
-func openUploadPartSafe(partPath string, truncate bool) (*os.File, error) {
-	parent, base, err := openParentNoSymlinks(partPath, false, 0)
+// A directory writer can rename the stage's entry, but only the worker can
+// alter files inside the private directory reached through this descriptor.
+func openUploadStage(path string, create bool) (*os.File, error) {
+	parent, base, err := openParentNoSymlinks(path, false, 0)
 	if err != nil {
 		return nil, err
 	}
 	defer parent.Close()
-	flags := unix.O_WRONLY | unix.O_CREAT
-	if truncate {
-		flags |= unix.O_TRUNC
+	if create {
+		if err := unix.Mkdirat(int(parent.Fd()), base, 0o700); err != nil && !errors.Is(err, unix.EEXIST) {
+			return nil, err
+		}
 	}
-	return openInDir(parent, base, flags, 0o600)
+	stage, err := openInDir(parent, base, unix.O_RDONLY|unix.O_DIRECTORY, 0)
+	if err != nil {
+		return nil, err
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(stage.Fd()), &stat); err != nil {
+		_ = stage.Close()
+		return nil, err
+	}
+	if stat.Uid != uint32(os.Geteuid()) || stat.Mode&0o777 != 0o700 {
+		_ = stage.Close()
+		return nil, errors.New("upload stage must be a worker-owned private directory")
+	}
+	if create {
+		if err := tempFailureRetry(func() error { return unix.Fsync(int(parent.Fd())) }); err != nil {
+			_ = stage.Close()
+			return nil, err
+		}
+	}
+	return stage, nil
 }
 
-func commitUploadPartSafe(partPath, targetPath string, totalSize int64) error {
+func ensurePrivatePart(file *os.File) error {
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
+		return err
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != uint32(os.Geteuid()) ||
+		stat.Mode&0o077 != 0 || stat.Nlink != 1 {
+		return errors.New("upload staging file must be private, regular and worker-owned")
+	}
+	return nil
+}
+
+func uploadPartIdentity(file *os.File) (string, error) {
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x:%x", stat.Dev, stat.Ino), nil
+}
+
+func checkUploadPartIdentity(file *os.File, expected string) error {
+	identity, err := uploadPartIdentity(file)
+	if err != nil {
+		return err
+	}
+	if identity != expected {
+		return errors.New("upload part identity changed")
+	}
+	return nil
+}
+
+func checkStagePartIdentity(stage *os.File, expected string) error {
+	file, err := openInDir(stage, "part", unix.O_RDONLY|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return checkUploadPartIdentity(file, expected)
+}
+
+func openUploadPartSafe(partPath string, create bool) (*os.File, error) {
+	stage, err := openUploadStage(filepath.Dir(partPath), create)
+	if err != nil {
+		return nil, err
+	}
+	defer stage.Close()
+	name := filepath.Base(partPath)
+	flags := unix.O_RDWR | unix.O_NONBLOCK
+	if create {
+		part, err := openInDir(stage, name, flags|unix.O_CREAT|unix.O_EXCL, 0o600)
+		if err == nil || !errors.Is(err, os.ErrExist) {
+			return part, err
+		}
+	}
+	part, err := openInDir(stage, name, flags, 0)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensurePrivatePart(part); err != nil {
+		_ = part.Close()
+		return nil, err
+	}
+	return part, nil
+}
+
+func removeUploadStage(path, identity string) error {
+	stage, err := openUploadStage(path, false)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer stage.Close()
+	if err := checkStagePartIdentity(stage, identity); err != nil {
+		return err
+	}
+	for _, name := range []string{"part", "manifest.json"} {
+		if err := unix.Unlinkat(int(stage.Fd()), name, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+			return err
+		}
+	}
+	if err := deletePathSafe(path, false); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func commitUploadPartSafe(partPath, targetPath string, totalSize int64, identity string) error {
 	parent, targetBase, err := openParentNoSymlinks(targetPath, true, 0o755)
 	if err != nil {
 		return err
 	}
 	defer parent.Close()
-	partParent, partBase, err := openParentNoSymlinks(partPath, false, 0)
+	partParent, err := openUploadStage(filepath.Dir(partPath), false)
 	if err != nil {
 		return err
 	}
 	defer partParent.Close()
 
-	partFile, err := openInDir(partParent, partBase, unix.O_RDWR, 0)
+	partBase := filepath.Base(partPath)
+	partFile, err := openInDir(partParent, partBase, unix.O_RDWR|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return err
 	}
 	defer partFile.Close()
+	if err := ensurePrivatePart(partFile); err != nil {
+		return err
+	}
+	if err := checkUploadPartIdentity(partFile, identity); err != nil {
+		return err
+	}
 	partInfo, err := partFile.Stat()
 	if err != nil {
 		return err
-	}
-	if !partInfo.Mode().IsRegular() {
-		return errors.New("upload part file must be a regular file")
 	}
 	if partInfo.Size() < totalSize {
 		return fmt.Errorf("upload part file is %d bytes, want %d", partInfo.Size(), totalSize)
@@ -519,13 +636,15 @@ func commitUploadPartSafe(partPath, targetPath string, totalSize int64) error {
 	if err := partFile.Sync(); err != nil {
 		return err
 	}
-	if err := partFile.Close(); err != nil {
-		return err
-	}
 	if err := renameInDir(partParent, partBase, parent, targetBase, true); err != nil {
 		return err
 	}
-	return tempFailureRetry(func() error { return unix.Fsync(int(parent.Fd())) })
+	if err := tempFailureRetry(func() error { return unix.Fsync(int(parent.Fd())) }); err != nil {
+		return err
+	}
+	_ = unix.Unlinkat(int(partParent.Fd()), "manifest.json", 0)
+	_ = unix.Unlinkat(int(parent.Fd()), filepath.Base(filepath.Dir(partPath)), unix.AT_REMOVEDIR)
+	return nil
 }
 
 func moveSameDeviceSafe(source, destination string, overwrite bool) error {

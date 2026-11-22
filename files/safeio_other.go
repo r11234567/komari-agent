@@ -5,6 +5,7 @@ package files
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -57,9 +58,9 @@ func chownSafe(path string, uid, gid int) error {
 	return changeOwnership(path, uid, gid)
 }
 
-func writeAtomicFileSafe(path string, data []byte, perm fs.FileMode) error {
+func writeAtomicFileSafe(path string, data []byte, perm fs.FileMode, _ string) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := checkUploadStage(dir); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
@@ -94,6 +95,9 @@ func writeAtomicFileSafe(path string, data []byte, perm fs.FileMode) error {
 }
 
 func readRegularFileSafe(path string, maxBytes int64) ([]byte, error) {
+	if err := checkUploadStage(filepath.Dir(path)); err != nil {
+		return nil, err
+	}
 	file, info, err := openRegularNoSymlinks(path, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, err
@@ -102,7 +106,11 @@ func readRegularFileSafe(path string, maxBytes int64) ([]byte, error) {
 	if maxBytes > 0 && info.Size() > maxBytes {
 		return nil, fmt.Errorf("file %q exceeds maximum %d bytes", path, maxBytes)
 	}
-	return os.ReadFile(path)
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("file %q exceeds maximum %d bytes", path, maxBytes)
+	}
+	return data, err
 }
 
 func createEmptyRegularFileSafe(path string, hasMode bool, requestedMode fs.FileMode) error {
@@ -144,16 +152,61 @@ func createEmptyRegularFileSafe(path string, hasMode bool, requestedMode fs.File
 	return syncUploadDirectory(directory)
 }
 
-func openUploadPartSafe(partPath string, truncate bool) (*os.File, error) {
-	flags := os.O_WRONLY | os.O_CREATE
-	if truncate {
-		flags |= os.O_TRUNC
+func checkUploadStage(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
 	}
-	return os.OpenFile(partPath, flags, 0o600)
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("invalid upload staging directory")
+	}
+	return nil
 }
 
-func commitUploadPartSafe(partPath, targetPath string, totalSize int64) error {
-	partInfo, err := os.Stat(partPath)
+func openUploadPartSafe(partPath string, create bool) (*os.File, error) {
+	stage := filepath.Dir(partPath)
+	if create {
+		if err := os.Mkdir(stage, 0o700); err != nil && !os.IsExist(err) {
+			return nil, err
+		}
+	}
+	if err := checkUploadStage(stage); err != nil {
+		return nil, err
+	}
+	if create {
+		file, err := os.OpenFile(partPath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil || !os.IsExist(err) {
+			return file, err
+		}
+	}
+	file, _, err := openRegularNoSymlinks(partPath, os.O_RDWR, 0)
+	return file, err
+}
+
+func uploadPartIdentity(*os.File) (string, error)    { return "", nil }
+func checkUploadPartIdentity(*os.File, string) error { return nil }
+
+func removeUploadStage(path, _ string) error {
+	if err := checkUploadStage(path); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	for _, name := range []string{"part", "manifest.json"} {
+		if err := os.Remove(filepath.Join(path, name)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return os.Remove(path)
+}
+
+func commitUploadPartSafe(partPath, targetPath string, totalSize int64, _ string) error {
+	part, err := openUploadPartSafe(partPath, false)
+	if err != nil {
+		return err
+	}
+	defer part.Close()
+	partInfo, err := part.Stat()
 	if err != nil {
 		return err
 	}
@@ -161,7 +214,7 @@ func commitUploadPartSafe(partPath, targetPath string, totalSize int64) error {
 		return fmt.Errorf("upload part file is %d bytes, want %d", partInfo.Size(), totalSize)
 	}
 	if partInfo.Size() > totalSize {
-		if err := os.Truncate(partPath, totalSize); err != nil {
+		if err := part.Truncate(totalSize); err != nil {
 			return err
 		}
 	}
@@ -176,9 +229,13 @@ func commitUploadPartSafe(partPath, targetPath string, totalSize int64) error {
 	if err := preserveReplacementMetadata(partPath, existing); err != nil {
 		return err
 	}
+	if err := part.Close(); err != nil {
+		return err
+	}
 	if err := replaceFile(partPath, targetPath); err != nil {
 		return err
 	}
+	_ = removeUploadStage(filepath.Dir(partPath), "")
 	return syncUploadDirectory(targetDir)
 }
 

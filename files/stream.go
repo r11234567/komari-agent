@@ -372,7 +372,7 @@ func parseUploadStreamSpecScoped(scope string, args map[string]interface{}) (upl
 	if spec.ChunkSize <= 0 || spec.ChunkSize > maxTransferChunkSize {
 		return uploadStreamSpec{}, fmt.Errorf("chunk_size must be between 1 and %d bytes", maxTransferChunkSize)
 	}
-	if spec.ChunkCount != (spec.TotalSize+spec.ChunkSize-1)/spec.ChunkSize {
+	if spec.ChunkCount != uploadChunkCount(spec.TotalSize, spec.ChunkSize) {
 		return uploadStreamSpec{}, errors.New("chunk_count does not match total_size")
 	}
 	if spec.ChunkIndex < 0 || spec.ChunkIndex >= spec.ChunkCount || spec.Offset != spec.ChunkIndex*spec.ChunkSize {
@@ -414,11 +414,18 @@ func writeUploadStreamChunk(spec uploadStreamSpec, source io.Reader) (json.RawMe
 				uploadChunksMu.Unlock()
 				return nil, openErr
 			}
+			identity, identifyErr := uploadPartIdentity(file)
+			if identifyErr != nil {
+				_ = file.Close()
+				uploadChunksMu.Unlock()
+				return nil, identifyErr
+			}
 			if closeErr := file.Close(); closeErr != nil {
 				uploadChunksMu.Unlock()
 				return nil, closeErr
 			}
 			state.TempPath = partPath
+			state.PartIdentity = identity
 			uploadChunks[spec.UploadID] = state
 			exists = true
 		}
@@ -450,6 +457,10 @@ func writeUploadStreamChunk(spec uploadStreamSpec, source io.Reader) (json.RawMe
 
 	file, err := openUploadPartSafe(partPath, false)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkUploadPartIdentity(file, state.PartIdentity); err != nil {
+		_ = file.Close()
 		return nil, err
 	}
 	buffer := fileStreamBufferPool.Get().([]byte)

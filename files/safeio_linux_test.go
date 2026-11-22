@@ -61,3 +61,36 @@ func TestLinuxSafeIORejectsSymlinkTraversalAndTargets(t *testing.T) {
 		t.Fatalf("file was unexpectedly created inside symlink target dir: %v", err)
 	}
 }
+
+func TestUploadPartIdentitySurvivesReopenAndRejectsOtherPart(t *testing.T) {
+	root := t.TempDir()
+	first := uploadPartPathFor(filepath.Join(root, "one"), "upload-one")
+	second := uploadPartPathFor(filepath.Join(root, "two"), "upload-two")
+	file, err := openUploadPartSafe(first, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := uploadPartIdentity(file)
+	_ = file.Close()
+	if err != nil || identity == "" {
+		t.Fatalf("upload part identity = %q, err = %v", identity, err)
+	}
+	for _, check := range []struct {
+		path   string
+		create bool
+		valid  bool
+	}{
+		{first, false, true},
+		{second, true, false},
+	} {
+		file, err := openUploadPartSafe(check.path, check.create)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = checkUploadPartIdentity(file, identity)
+		_ = file.Close()
+		if (err == nil) != check.valid {
+			t.Errorf("check identity for %s = %v, valid = %t", check.path, err, check.valid)
+		}
+	}
+}

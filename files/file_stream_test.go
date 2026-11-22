@@ -406,6 +406,9 @@ func TestUploadManifestWriteFailureDoesNotAcknowledgeChunk(t *testing.T) {
 		ChunkCount: 1, TotalSize: 4, ChunkSize: 4, Expected: 4, First: true,
 	}
 	manifestPath := uploadManifestPathFor(spec.Path, spec.UploadID)
+	if err := os.Mkdir(filepath.Dir(manifestPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Mkdir(manifestPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
