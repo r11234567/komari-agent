@@ -171,22 +171,18 @@ func (v *Verifier) verifySignatures(payload []byte, signatures []*securityv1.Sig
 			continue
 		}
 		present[algorithm] = true
-		key, ok := v.findKey(signature.GetKeyId(), algorithm, now)
+		key, keyID, ok := v.verifyPinnedSignature(signature, payload, now)
 		if !ok {
 			continue
 		}
-		if verifyOne(algorithm, key, payload, signature.GetValue()) {
-			verified[algorithm] = true
-			// Deduplicate by algorithm + raw key material so duplicating a single
-			// valid signature (or reusing the same key under two IDs) never satisfies
-			// MinimumSignatures >= 2.
-			materialKey := fmt.Sprintf("%d:%x", algorithm, key)
-			if _, duplicate := seenKeys[materialKey]; duplicate {
-				continue
-			}
-			seenKeys[materialKey] = struct{}{}
-			verifiedKeyIDs = append(verifiedKeyIDs, signature.GetKeyId())
+		verified[algorithm] = true
+		// Deduplicate by algorithm and raw key, including keys with multiple IDs.
+		materialKey := fmt.Sprintf("%d:%x", algorithm, key)
+		if _, duplicate := seenKeys[materialKey]; duplicate {
+			continue
 		}
+		seenKeys[materialKey] = struct{}{}
+		verifiedKeyIDs = append(verifiedKeyIDs, keyID)
 	}
 
 	if v.policy.RequireAll {
@@ -207,8 +203,9 @@ func (v *Verifier) verifySignatures(payload []byte, signatures []*securityv1.Sig
 	return strings.Join(verifiedKeyIDs, ","), nil
 }
 
-// findKey locates a pinned key that is valid right now.
-func (v *Verifier) findKey(keyID string, algorithm int32, now time.Time) ([]byte, bool) {
+// verifyPinnedSignature tries valid pinned keys for the signature's algorithm.
+func (v *Verifier) verifyPinnedSignature(signature *securityv1.Signature, payload []byte, now time.Time) ([]byte, string, bool) {
+	keyID, algorithm := signature.GetKeyId(), int32(signature.GetAlgorithm())
 	for _, pinned := range v.keys {
 		if pinned.Algorithm != algorithm {
 			continue
@@ -225,12 +222,12 @@ func (v *Verifier) findKey(keyID string, algorithm int32, now time.Time) ([]byte
 			continue
 		}
 		raw, err := base64.StdEncoding.DecodeString(pinned.Value)
-		if err != nil {
+		if err != nil || !verifyOne(algorithm, raw, payload, signature.GetValue()) {
 			continue
 		}
-		return raw, true
+		return raw, pinned.KeyID, true
 	}
-	return nil, false
+	return nil, "", false
 }
 
 // checkBinding enforces the replay defenses carried inside the signature.
