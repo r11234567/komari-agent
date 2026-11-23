@@ -7,7 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -281,13 +281,17 @@ func TestDPoPRequestSigningAndBodyHash(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var capturedSig, capturedTs, capturedNonce, capturedAuth string
+	var capturedAuth, capturedProof string
 	var capturedBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedSig = r.Header.Get("X-Komari-Signature")
-		capturedTs = r.Header.Get("X-Komari-Timestamp")
-		capturedNonce = r.Header.Get("X-Komari-Nonce")
+		if r.URL.Path == "/ping" {
+			w.Header().Set("X-Komari-Agent-Proof", "dpop-jwt-v1")
+			w.Header().Set("DPoP-Nonce", "test-panel-nonce")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		capturedAuth = r.Header.Get("Authorization")
+		capturedProof = r.Header.Get("DPoP")
 		capturedBody, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -308,35 +312,61 @@ func TestDPoPRequestSigningAndBodyHash(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if capturedSig == "" {
-		t.Fatal("expected X-Komari-Signature to be present")
+	if capturedProof == "" {
+		t.Fatal("expected DPoP proof JWT header to be present")
 	}
-	if capturedTs == "" {
-		t.Fatal("expected X-Komari-Timestamp to be present")
-	}
-	if capturedNonce == "" {
-		t.Fatal("expected X-Komari-Nonce to be present")
-	}
-	if capturedAuth != "Bearer test-access-token-12345" {
-		t.Fatalf("expected Bearer token, got %q", capturedAuth)
+	if capturedAuth != "DPoP test-access-token-12345" {
+		t.Fatalf("expected DPoP token, got %q", capturedAuth)
 	}
 	if string(capturedBody) != string(reqBody) {
 		t.Fatalf("expected body %q, got %q", string(reqBody), string(capturedBody))
 	}
 
-	// Verify the signature against pubKey with the exact RFC 9449 canonical payload
-	tokenDigest := sha256.Sum256([]byte("test-access-token-12345"))
-	tokenHash := hex.EncodeToString(tokenDigest[:])
-	bodyDigest := sha256.Sum256(reqBody)
-	bodyHash := hex.EncodeToString(bodyDigest[:])
-
-	expectedPayload := fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n%s", "POST", path, capturedTs, capturedNonce, tokenHash, bodyHash)
-	sigBytes, err := base64.StdEncoding.DecodeString(capturedSig)
-	if err != nil {
-		t.Fatalf("decode signature failed: %v", err)
+	// Verify the RFC 9449 compact JWS signature and bound claims against pubKey.
+	parts := strings.Split(capturedProof, ".")
+	if len(parts) != 3 {
+		t.Fatalf("expected 3-segment DPoP JWT, got %d", len(parts))
 	}
-	if !ed25519.Verify(pubKey, []byte(expectedPayload), sigBytes) {
+	headerRaw, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		t.Fatalf("decode DPoP header: %v", err)
+	}
+	claimsRaw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("decode DPoP claims: %v", err)
+	}
+	sigBytes, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		t.Fatalf("decode DPoP signature: %v", err)
+	}
+	if !ed25519.Verify(pubKey, []byte(parts[0]+"."+parts[1]), sigBytes) {
 		t.Fatal("DPoP signature verification against agent public key failed!")
+	}
+	var hdr struct {
+		Typ string `json:"typ"`
+		Alg string `json:"alg"`
+		JWK struct {
+			Kty string `json:"kty"`
+			Crv string `json:"crv"`
+			X   string `json:"x"`
+		} `json:"jwk"`
+	}
+	if err := json.Unmarshal(headerRaw, &hdr); err != nil || hdr.Typ != "dpop+jwt" || hdr.Alg != "EdDSA" || hdr.JWK.X != base64.RawURLEncoding.EncodeToString(pubKey) {
+		t.Fatalf("unexpected DPoP JWS header: %+v err=%v", hdr, err)
+	}
+	var claims struct {
+		HTM string `json:"htm"`
+		HTU string `json:"htu"`
+		ATH string `json:"ath"`
+		BH  string `json:"bh"`
+	}
+	if err := json.Unmarshal(claimsRaw, &claims); err != nil {
+		t.Fatalf("unmarshal DPoP claims: %v", err)
+	}
+	tokenDigest := sha256.Sum256([]byte("test-access-token-12345"))
+	bodyDigest := sha256.Sum256(reqBody)
+	if claims.HTM != "POST" || claims.HTU != server.URL+path || claims.ATH != base64.RawURLEncoding.EncodeToString(tokenDigest[:]) || claims.BH != base64.RawURLEncoding.EncodeToString(bodyDigest[:]) {
+		t.Fatalf("unexpected DPoP claims: %+v", claims)
 	}
 	t.Log("DPoP uplink signature verified successfully")
 }
@@ -375,6 +405,10 @@ func TestDPoP_AutoRefreshOn401(t *testing.T) {
 	var serverURL string
 	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/ping":
+			w.Header().Set("X-Komari-Agent-Proof", "dpop-jwt-v1")
+			w.Header().Set("DPoP-Nonce", "test-panel-nonce")
+			w.WriteHeader(http.StatusOK)
 		case "/komari.enrollment.v1.EnrollmentService/RefreshCredentials":
 			// Return a real request-bound signed refresh result.
 			respMsg := &enrollmentv1.RefreshCredentialsResponse{
@@ -394,14 +428,14 @@ func TestDPoP_AutoRefreshOn401(t *testing.T) {
 		case "/komari.report.v1.AgentReportService/SubmitReport":
 			submitAttempts++
 			auth := r.Header.Get("Authorization")
-			if auth == "Bearer initial-expired-token" {
+			if auth == "DPoP initial-expired-token" {
 				// Reject initial expired token with 401
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
 				_, _ = w.Write([]byte(`{"code": "UNAUTHENTICATED", "message": "token expired"}`))
 				return
 			}
-			if auth == "Bearer new-access-token-rotated" {
+			if auth == "DPoP new-access-token-rotated" {
 				// Accept rotated token
 				w.Header().Set("Content-Type", "application/proto")
 				w.WriteHeader(http.StatusOK)

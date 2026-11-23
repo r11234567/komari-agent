@@ -5,9 +5,7 @@ package rescue
 import (
 	"context"
 	"crypto/ed25519"
-	"crypto/sha256"
 	"encoding/base64"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -49,7 +47,13 @@ func TestCredentialHandoffPreservesFreshLeaseAndHonorsRevocation(t *testing.T) {
 	var newRequests atomic.Int32
 	_, handler := configconnect.NewPrivilegedDeliveryServiceHandler(panel)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if r.URL.Path == "/ping" {
+			w.Header().Set("X-Komari-Agent-Proof", "dpop-jwt-v1")
+			w.Header().Set("DPoP-Nonce", "test-panel-nonce")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "DPoP ")
 		if token != "synthetic-old-at" && token != "synthetic-new-at" {
 			http.Error(w, "unauthorized", 401)
 			return
@@ -151,7 +155,5 @@ func TestCredentialHandoffPreservesFreshLeaseAndHonorsRevocation(t *testing.T) {
 }
 
 func verifyHandoffRequest(r *http.Request, body []byte, token string, public ed25519.PublicKey) bool {
-	payload := fmt.Sprintf("%s\n%s\n%s\n%s\n%x\n%x", r.Method, r.URL.Path, r.Header.Get("X-Komari-Timestamp"), r.Header.Get("X-Komari-Nonce"), sha256.Sum256([]byte(token)), sha256.Sum256(body))
-	signature, err := base64.StdEncoding.DecodeString(r.Header.Get("X-Komari-Signature"))
-	return err == nil && ed25519.Verify(public, []byte(payload), signature)
+	return verifyRescueDPoPRequest(r, body, token, public)
 }

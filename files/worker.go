@@ -20,6 +20,7 @@ const WorkerArgument = "--workspace-file-worker"
 
 type workerRequest struct {
 	ID        string
+	Scope     string
 	Operation filev1.FileOperation
 	Args      map[string]any
 }
@@ -32,6 +33,7 @@ type workerResponse struct {
 // one worker per grant preserves upload state without sharing it across users.
 func ServeWorker(input io.Reader, output io.Writer) error {
 	decoder, encoder := json.NewDecoder(input), json.NewEncoder(output)
+	decoder.UseNumber()
 	var outputMu sync.Mutex
 	var tasks sync.WaitGroup
 	slots := make(chan struct{}, 4)
@@ -49,7 +51,7 @@ func ServeWorker(input io.Reader, output io.Writer) error {
 		go func(request workerRequest) {
 			defer tasks.Done()
 			defer func() { <-slots }()
-			event := Execute(request.Operation, request.Args)
+			event := ExecuteWithScope(request.Scope, request.Operation, request.Args)
 			outputMu.Lock()
 			defer outputMu.Unlock()
 			_ = encoder.Encode(workerResponse{ID: request.ID, Event: event})
@@ -128,6 +130,25 @@ func (e *Executor) Close() {
 	}
 }
 
+// ExecuteAssignment validates a strongly-typed FileAssignment and runs it inside
+// the workspace OS-account worker using the validated wire operation.
+func (e *Executor) ExecuteAssignment(ctx context.Context, assignment *filev1.FileAssignment) *filev1.AgentFileEvent {
+	if assignment == nil {
+		return &filev1.AgentFileEvent{Error: "file assignment is required"}
+	}
+	operation, args, err := decodeAssignment(assignment)
+	if err != nil {
+		return &filev1.AgentFileEvent{
+			RequestId: assignment.GetRequestId(),
+			Operation: assignment.GetOperation(),
+			Error:     err.Error(),
+		}
+	}
+	event := e.Execute(ctx, assignment.GetWorkspaceId(), assignment.GetSystemUser(), assignment.GetRequestId(), operation, args)
+	event.RequestId = assignment.GetRequestId()
+	return event
+}
+
 func (e *Executor) Execute(ctx context.Context, scope, username, requestID string, operation filev1.FileOperation, args map[string]any) *filev1.AgentFileEvent {
 	failure := func(err error) *filev1.AgentFileEvent {
 		return &filev1.AgentFileEvent{Operation: operation, Error: err.Error()}
@@ -146,11 +167,7 @@ func (e *Executor) Execute(ctx context.Context, scope, username, requestID strin
 			workerArgs[key] = value
 		}
 	}
-	name := operationName(operation)
-	if override := argString(workerArgs, "_op"); override != "" {
-		name = override
-	}
-	if name == "upload_stream" || name == "download_stream" {
+	if operation == filev1.FileOperation_FILE_OPERATION_UPLOAD_STREAM || operation == filev1.FileOperation_FILE_OPERATION_DOWNLOAD_STREAM {
 		endpoint, closeRelay, err := newWorkerTransferRelay(ctx, workerArgs, e.authorizeTransfer)
 		if err != nil {
 			return failure(err)
@@ -201,7 +218,7 @@ func (e *Executor) Execute(ctx context.Context, scope, username, requestID strin
 	w.mu.Unlock()
 	defer func() { w.mu.Lock(); delete(w.pending, requestID); w.lastUsed = time.Now(); w.mu.Unlock() }()
 	w.writeMu.Lock()
-	err := w.encoder.Encode(workerRequest{ID: requestID, Operation: operation, Args: workerArgs})
+	err := w.encoder.Encode(workerRequest{ID: requestID, Scope: scope, Operation: operation, Args: workerArgs})
 	w.writeMu.Unlock()
 	if err != nil {
 		w.stop()

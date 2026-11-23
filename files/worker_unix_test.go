@@ -136,11 +136,11 @@ func TestWorkerTransfersPreserveUploadStateAndOSAccount(t *testing.T) {
 			t.Fatalf("worker upload chunk %d: %s", index, event.Error)
 		}
 	}
-	commit := map[string]any{"_op": "upload_commit", "path": path, "upload_id": "stateful-upload", "chunk_count": 2, "total_size": 8, "chunk_size": 4}
-	if event := executor.Execute(ctx, "other-workspace", target, "wrong-commit", filev1.FileOperation_FILE_OPERATION_UPLOAD_STREAM, commit); event.Success {
+	commit := map[string]any{"path": path, "upload_id": "stateful-upload", "chunk_count": 2, "total_size": 8, "chunk_size": 4}
+	if event := executor.Execute(ctx, "other-workspace", target, "wrong-commit", filev1.FileOperation_FILE_OPERATION_UPLOAD_COMMIT, commit); event.Success {
 		t.Fatal("another workspace committed the upload")
 	}
-	if event := executor.Execute(ctx, "upload-workspace", target, "commit", filev1.FileOperation_FILE_OPERATION_UPLOAD_STREAM, commit); !event.Success {
+	if event := executor.Execute(ctx, "upload-workspace", target, "commit", filev1.FileOperation_FILE_OPERATION_UPLOAD_COMMIT, commit); !event.Success {
 		t.Fatalf("worker lost chunk state before commit: %s", event.Error)
 	}
 	if event := executor.Execute(ctx, "upload-workspace", target, "download", filev1.FileOperation_FILE_OPERATION_DOWNLOAD_STREAM, map[string]any{

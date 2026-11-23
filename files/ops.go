@@ -2,10 +2,10 @@ package files
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -41,6 +41,7 @@ type fileInfo struct {
 }
 
 type uploadChunkState struct {
+	WorkspaceID  string
 	Size         int64
 	ExpectedSize int64
 	ChunkSize    int64
@@ -48,11 +49,26 @@ type uploadChunkState struct {
 	Parts        map[int64]struct{}
 	PartCount    int64
 	TempPath     string
+	PartIdentity string
 	CreatedAt    time.Time
 }
 
+type uploadManifest struct {
+	UploadID     string    `json:"upload_id"`
+	WorkspaceID  string    `json:"workspace_id,omitempty"`
+	TargetPath   string    `json:"target_path"`
+	PartIdentity string    `json:"part_identity,omitempty"`
+	ExpectedSize int64     `json:"expected_size"`
+	ChunkSize    int64     `json:"chunk_size"`
+	PartCount    int64     `json:"part_count"`
+	Received     int64     `json:"received"`
+	Parts        []int64   `json:"parts"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
 var (
-	uploadChunksMu = sync.Mutex{}
+	uploadChunksMu sync.Mutex
 	uploadChunks   = make(map[string]uploadChunkState)
 )
 
@@ -135,6 +151,21 @@ func createFile(path string) (json.RawMessage, error) {
 	return createFileWithMode(path, "")
 }
 
+func octalFileMode(parsed uint32) fs.FileMode {
+	mode := fs.FileMode(parsed & 0o777)
+	// Go stores special permission flags separately from Unix octal bits.
+	if parsed&0o4000 != 0 {
+		mode |= os.ModeSetuid
+	}
+	if parsed&0o2000 != 0 {
+		mode |= os.ModeSetgid
+	}
+	if parsed&0o1000 != 0 {
+		mode |= os.ModeSticky
+	}
+	return mode
+}
+
 func createFileWithMode(path, modeValue string) (json.RawMessage, error) {
 	// Validate before creating directories or replacing existing contents.
 	hasMode := strings.TrimSpace(modeValue) != ""
@@ -147,58 +178,13 @@ func createFileWithMode(path, modeValue string) (json.RawMessage, error) {
 		if parsed > 0o7777 {
 			return nil, fmt.Errorf("invalid octal mode: %s", modeValue)
 		}
-		requestedMode = fs.FileMode(parsed & 0o777)
-		// Go stores special permission flags separately from Unix octal bits.
-		if parsed&0o4000 != 0 {
-			requestedMode |= os.ModeSetuid
-		}
-		if parsed&0o2000 != 0 {
-			requestedMode |= os.ModeSetgid
-		}
-		if parsed&0o1000 != 0 {
-			requestedMode |= os.ModeSticky
-		}
+		requestedMode = octalFileMode(parsed)
 	}
 	path = resolveFilePath(path)
 	if path == string(filepath.Separator) || path == "." {
 		return nil, errors.New("file path is required")
 	}
-	directory := filepath.Dir(path)
-	if err := os.MkdirAll(directory, 0o755); err != nil {
-		return nil, err
-	}
-	existing, err := replaceableFile(path)
-	if err != nil {
-		return nil, err
-	}
-	temporary, err := os.CreateTemp(directory, ".komari-empty-*")
-	if err != nil {
-		return nil, err
-	}
-	temporaryName := temporary.Name()
-	removeTemporary := true
-	defer func() {
-		_ = temporary.Close()
-		if removeTemporary {
-			_ = os.Remove(temporaryName)
-		}
-	}()
-	if err := preserveReplacementMetadata(temporaryName, existing); err != nil {
-		return nil, err
-	}
-	if hasMode {
-		if err := os.Chmod(temporaryName, requestedMode); err != nil {
-			return nil, err
-		}
-	}
-	if err := temporary.Close(); err != nil {
-		return nil, err
-	}
-	if err := replaceFile(temporaryName, path); err != nil {
-		return nil, err
-	}
-	removeTemporary = false
-	if err := syncUploadDirectory(directory); err != nil {
+	if err := createEmptyRegularFileSafe(path, hasMode, requestedMode); err != nil {
 		return nil, err
 	}
 	return json.Marshal(map[string]any{"created": true, "size": 0})
@@ -214,7 +200,7 @@ func mkdir(path, modeValue string) (json.RawMessage, error) {
 		}
 		mode = fs.FileMode(parsed)
 	}
-	if err := os.MkdirAll(path, mode); err != nil {
+	if err := mkdirSafe(path, mode); err != nil {
 		return nil, err
 	}
 	return json.Marshal(map[string]any{"created": true})
@@ -230,14 +216,7 @@ func deletePath(path string, recursive bool) (json.RawMessage, error) {
 	if cleaned == string(filepath.Separator) || cleaned == volumeRoot {
 		return nil, errors.New("refusing to delete a filesystem root")
 	}
-	if _, err := os.Lstat(cleaned); err != nil {
-		return nil, err
-	}
-	remove := os.Remove
-	if recursive {
-		remove = os.RemoveAll
-	}
-	if err := remove(cleaned); err != nil {
+	if err := deletePathSafe(cleaned, recursive); err != nil {
 		return nil, err
 	}
 	return json.Marshal(map[string]any{"deleted": true})
@@ -252,50 +231,22 @@ func movePath(source, destination string, overwrite bool) (json.RawMessage, erro
 	if pathContains(source, destination) {
 		return nil, errors.New("cannot move a path into itself")
 	}
-	if !overwrite {
-		if _, err := os.Lstat(destination); err == nil {
-			return nil, fmt.Errorf("destination already exists: %s", destination)
-		} else if !os.IsNotExist(err) {
-			return nil, err
-		}
-	}
-	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
-		return nil, err
-	}
-	rename := replaceFile
-	if !overwrite {
-		rename = renameWithoutOverwrite
-	}
-	if err := rename(source, destination); err != nil {
+	if err := moveSameDeviceSafe(source, destination, overwrite); err != nil {
 		if !isCrossDeviceRename(err) {
 			return nil, err
 		}
-		// Windows and Unix both reject rename across volumes. Fall back to a
-		// copy followed by removal so moving between drive letters works too.
-		info, statErr := os.Lstat(source)
-		if statErr != nil {
-			return nil, statErr
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			if copyErr := copySymlink(source, destination, overwrite); copyErr != nil {
-				return nil, copyErr
-			}
-		} else if info.IsDir() {
-			if copyErr := copyDirectory(source, destination, overwrite); copyErr != nil {
-				return nil, copyErr
-			}
-		} else if copyErr := copyRegularFile(source, destination, info, overwrite); copyErr != nil {
-			return nil, copyErr
-		}
-		if removeErr := os.RemoveAll(source); removeErr != nil {
-			return nil, removeErr
+		if err := copyPathSafe(source, destination, true, overwrite, true); err != nil {
+			return nil, err
 		}
 	}
 	return json.Marshal(map[string]any{"moved": true})
 }
 
 func isCrossDeviceRename(err error) bool {
-	return errors.Is(err, syscall.EXDEV) || errors.Is(err, syscall.Errno(17))
+	if runtime.GOOS == "windows" {
+		return errors.Is(err, syscall.Errno(17)) // ERROR_NOT_SAME_DEVICE
+	}
+	return errors.Is(err, syscall.EXDEV)
 }
 
 func copyPath(source, destination string, recursive, overwrite bool) (json.RawMessage, error) {
@@ -304,156 +255,10 @@ func copyPath(source, destination string, recursive, overwrite bool) (json.RawMe
 	if samePath(source, destination) {
 		return nil, errors.New("source and destination are the same")
 	}
-	info, err := os.Lstat(source)
-	if err != nil {
-		return nil, err
-	}
-	if info.IsDir() {
-		if !recursive {
-			return nil, errors.New("recursive is required to copy a directory")
-		}
-		if pathContains(source, destination) {
-			return nil, errors.New("cannot copy a directory into itself")
-		}
-		if err := copyDirectory(source, destination, overwrite); err != nil {
-			return nil, err
-		}
-		return json.Marshal(map[string]any{"copied": true})
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		if err := copySymlink(source, destination, overwrite); err != nil {
-			return nil, err
-		}
-		return json.Marshal(map[string]any{"copied": true})
-	}
-	if err := copyRegularFile(source, destination, info, overwrite); err != nil {
+	if err := copyPathSafe(source, destination, recursive, overwrite, false); err != nil {
 		return nil, err
 	}
 	return json.Marshal(map[string]any{"copied": true})
-}
-
-func copyRegularFile(source, destination string, info os.FileInfo, overwrite bool) error {
-	if !info.Mode().IsRegular() {
-		return errors.New("only regular files can be copied")
-	}
-	input, err := os.Open(source)
-	if err != nil {
-		return err
-	}
-	defer input.Close()
-	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
-		return err
-	}
-	if existing, err := os.Lstat(destination); err == nil {
-		if !overwrite {
-			return fmt.Errorf("destination already exists: %s", destination)
-		}
-		if !existing.Mode().IsRegular() {
-			return errors.New("cannot replace a non-regular destination with a file")
-		}
-		if os.SameFile(info, existing) {
-			return errors.New("source and destination are the same file")
-		}
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	output, err := os.CreateTemp(filepath.Dir(destination), ".komari-copy-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(output.Name())
-	defer output.Close()
-	if _, err = io.Copy(output, input); err != nil {
-		return err
-	}
-	if err = output.Chmod(info.Mode().Perm()); err != nil {
-		return err
-	}
-	if err = output.Sync(); err != nil {
-		return err
-	}
-	if err = output.Close(); err != nil {
-		return err
-	}
-	if err = os.Chtimes(output.Name(), info.ModTime(), info.ModTime()); err != nil {
-		return err
-	}
-	if !overwrite {
-		// Linking publishes the complete file without replacing a destination
-		// created after our check. Unsupported filesystems fail safely.
-		return os.Link(output.Name(), destination)
-	}
-	return replaceFile(output.Name(), destination)
-}
-
-func copySymlink(source, destination string, overwrite bool) error {
-	target, err := os.Readlink(source)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
-		return err
-	}
-	if existing, err := os.Lstat(destination); err == nil {
-		if !overwrite {
-			return fmt.Errorf("destination already exists: %s", destination)
-		}
-		if existing.IsDir() && existing.Mode()&os.ModeSymlink == 0 {
-			return errors.New("cannot replace destination directory with a symlink")
-		}
-		if err := os.Remove(destination); err != nil {
-			return err
-		}
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	return os.Symlink(target, destination)
-}
-
-func copyDirectory(source, destination string, overwrite bool) error {
-	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
-		return err
-	}
-	if !overwrite {
-		if err := os.Mkdir(destination, 0o755); err != nil {
-			return err
-		}
-	}
-	return filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		relative, err := filepath.Rel(source, path)
-		if err != nil {
-			return err
-		}
-		target := destination
-		if relative != "." {
-			target = filepath.Join(destination, relative)
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		if entry.Type()&os.ModeSymlink != 0 {
-			return copySymlink(path, target, overwrite)
-		}
-		if entry.IsDir() {
-			if existing, err := os.Lstat(target); err == nil && (!existing.IsDir() || existing.Mode()&os.ModeSymlink != 0) {
-				return errors.New("cannot copy a directory through a non-directory destination")
-			} else if err != nil && !os.IsNotExist(err) {
-				return err
-			}
-			if err := os.MkdirAll(target, info.Mode().Perm()); err != nil {
-				return err
-			}
-			if err := os.Chmod(target, info.Mode().Perm()); err != nil {
-				return err
-			}
-			return os.Chtimes(target, info.ModTime(), info.ModTime())
-		}
-		return copyRegularFile(path, target, info, overwrite)
-	})
 }
 
 func samePath(left, right string) bool {
@@ -476,7 +281,10 @@ func chmodPath(path, modeValue string) (json.RawMessage, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(path, fs.FileMode(mode)); err != nil {
+	if mode > 0o7777 {
+		return nil, fmt.Errorf("invalid octal mode: %s", modeValue)
+	}
+	if err := chmodSafe(path, octalFileMode(mode)); err != nil {
 		return nil, err
 	}
 	return json.Marshal(map[string]any{"mode": fmt.Sprintf("%04o", mode)})
@@ -506,7 +314,7 @@ func chownPath(args map[string]interface{}) (json.RawMessage, error) {
 		}
 		gid = resolved
 	}
-	if err := changeOwnership(path, uid, gid); err != nil {
+	if err := chownSafe(path, uid, gid); err != nil {
 		return nil, err
 	}
 	return json.Marshal(map[string]any{"uid": uid, "gid": gid})
@@ -570,16 +378,149 @@ func uploadChunkCount(size, chunkSize int64) int64 {
 	if size <= 0 || chunkSize <= 0 {
 		return 0
 	}
-	return (size + chunkSize - 1) / chunkSize
+	return 1 + (size-1)/chunkSize
 }
 
 func uploadPartPathFor(targetPath, uploadID string) string {
-	target := filepath.ToSlash(targetPath)
-	name := filepath.Base(target)
-	if name == "" || name == "." || name == "/" {
-		name = "upload"
+	return filepath.Join(uploadStagePath(targetPath, uploadID), "part")
+}
+
+func uploadManifestPathFor(targetPath, uploadID string) string {
+	return filepath.Join(uploadStagePath(targetPath, uploadID), "manifest.json")
+}
+
+func uploadStagePath(targetPath, uploadID string) string {
+	digest := sha256.Sum256([]byte(filepath.Base(targetPath) + "\x00" + uploadID))
+	return filepath.Join(filepath.Dir(targetPath), fmt.Sprintf(".komari-upload-%x", digest[:16]))
+}
+
+func cloneUploadStateLocked(state uploadChunkState) uploadChunkState {
+	cloned := state
+	cloned.Parts = make(map[int64]struct{}, len(state.Parts))
+	for idx := range state.Parts {
+		cloned.Parts[idx] = struct{}{}
 	}
-	return filepath.Join(filepath.Dir(target), "."+name+".komari-upload-"+uploadID+".part")
+	return cloned
+}
+
+func saveUploadManifest(uploadID string, state uploadChunkState) error {
+	if uploadID == "" || state.TargetPath == "" {
+		return nil
+	}
+	parts := make([]int64, 0, len(state.Parts))
+	for idx := range state.Parts {
+		parts = append(parts, idx)
+	}
+	sort.Slice(parts, func(i, j int) bool { return parts[i] < parts[j] })
+	manifest := uploadManifest{
+		UploadID:     uploadID,
+		WorkspaceID:  state.WorkspaceID,
+		TargetPath:   state.TargetPath,
+		PartIdentity: state.PartIdentity,
+		ExpectedSize: state.ExpectedSize,
+		ChunkSize:    state.ChunkSize,
+		PartCount:    state.PartCount,
+		Received:     state.Size,
+		Parts:        parts,
+		CreatedAt:    state.CreatedAt,
+		UpdatedAt:    time.Now().UTC(),
+	}
+	encoded, err := json.Marshal(manifest)
+	if err != nil {
+		return err
+	}
+	return writeAtomicFileSafe(uploadManifestPathFor(state.TargetPath, uploadID), encoded, 0o600, state.PartIdentity)
+}
+
+func restoreUploadSessionLocked(scope, targetPath, uploadID string) (uploadChunkState, bool, error) {
+	if state, exists := uploadChunks[uploadID]; exists {
+		if state.WorkspaceID != scope {
+			return uploadChunkState{}, false, errors.New("upload session belongs to another workspace")
+		}
+		return state, true, nil
+	}
+	if strings.TrimSpace(targetPath) == "" {
+		return uploadChunkState{}, false, nil
+	}
+	manifestPath := uploadManifestPathFor(targetPath, uploadID)
+	raw, err := readRegularFileSafe(manifestPath, 4<<20)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return uploadChunkState{}, false, nil
+		}
+		return uploadChunkState{}, false, err
+	}
+	var manifest uploadManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return uploadChunkState{}, false, fmt.Errorf("corrupt upload manifest: %w", err)
+	}
+	if manifest.UploadID != uploadID {
+		return uploadChunkState{}, false, errors.New("upload manifest id mismatch")
+	}
+	if manifest.WorkspaceID != scope {
+		return uploadChunkState{}, false, errors.New("upload session belongs to another workspace")
+	}
+	if !samePath(manifest.TargetPath, targetPath) {
+		return uploadChunkState{}, false, errors.New("upload target path does not match session")
+	}
+	if manifest.ChunkSize <= 0 || manifest.ChunkSize > maxTransferChunkSize ||
+		manifest.ExpectedSize <= 0 || manifest.PartCount != uploadChunkCount(manifest.ExpectedSize, manifest.ChunkSize) ||
+		len(manifest.Parts) == 0 {
+		return uploadChunkState{}, false, errors.New("invalid upload manifest geometry")
+	}
+	partPath := uploadPartPathFor(targetPath, uploadID)
+	partFile, err := openUploadPartSafe(partPath, false)
+	if err != nil {
+		return uploadChunkState{}, false, err
+	}
+	defer partFile.Close()
+	partIdentity := manifest.PartIdentity
+	if partIdentity == "" && (runtime.GOOS == "darwin" || runtime.GOOS == "freebsd") {
+		// Older BSD workers did not persist an identity. The new opener has
+		// already verified the part and stage are private and worker-owned.
+		partIdentity, err = uploadPartIdentity(partFile)
+		if err != nil {
+			return uploadChunkState{}, false, err
+		}
+	}
+	if err := checkUploadPartIdentity(partFile, partIdentity); err != nil {
+		return uploadChunkState{}, false, err
+	}
+	partInfo, err := partFile.Stat()
+	if err != nil {
+		return uploadChunkState{}, false, err
+	}
+
+	parts := make(map[int64]struct{}, len(manifest.Parts))
+	var received int64
+	for _, idx := range manifest.Parts {
+		if idx < 0 || idx >= manifest.PartCount {
+			return uploadChunkState{}, false, errors.New("invalid recorded upload chunk")
+		}
+		if _, duplicate := parts[idx]; duplicate {
+			return uploadChunkState{}, false, errors.New("duplicate recorded upload chunk")
+		}
+		offset := idx * manifest.ChunkSize
+		received = max(received, offset+min(manifest.ChunkSize, manifest.ExpectedSize-offset))
+		parts[idx] = struct{}{}
+	}
+	if received != manifest.Received || partInfo.Size() < received {
+		return uploadChunkState{}, false, errors.New("upload manifest does not match staged length")
+	}
+	state := uploadChunkState{
+		WorkspaceID:  manifest.WorkspaceID,
+		Size:         manifest.Received,
+		ExpectedSize: manifest.ExpectedSize,
+		ChunkSize:    manifest.ChunkSize,
+		TargetPath:   manifest.TargetPath,
+		Parts:        parts,
+		PartCount:    manifest.PartCount,
+		TempPath:     partPath,
+		PartIdentity: partIdentity,
+		CreatedAt:    manifest.CreatedAt,
+	}
+	uploadChunks[uploadID] = state
+	return state, true, nil
 }
 
 func syncUploadDirectory(dir string) error {
@@ -599,16 +540,18 @@ func removeUploadFileLocked(uploadID string) error {
 	if !ok {
 		return nil
 	}
-	if state.TempPath != "" {
-		if err := os.Remove(state.TempPath); err != nil && !os.IsNotExist(err) {
-			return err
-		}
+	if err := removeUploadStage(uploadStagePath(state.TargetPath, uploadID), state.PartIdentity); err != nil {
+		return err
 	}
 	delete(uploadChunks, uploadID)
 	return nil
 }
 
 func cancelFileUpload(args map[string]interface{}) (json.RawMessage, error) {
+	return cancelFileUploadScoped("", args)
+}
+
+func cancelFileUploadScoped(scope string, args map[string]interface{}) (json.RawMessage, error) {
 	uploadID := strings.TrimSpace(argString(args, "upload_id"))
 	if uploadID == "" {
 		return nil, errors.New("upload_id is required")
@@ -620,17 +563,18 @@ func cancelFileUpload(args map[string]interface{}) (json.RawMessage, error) {
 	waitUploadStreams(uploadID)
 	writeLock := uploadWriteLock(uploadID)
 	writeLock.Lock()
-	defer func() {
-		writeLock.Unlock()
-		forgetUploadWriteLock(uploadID)
-	}()
+	defer writeLock.Unlock()
 	targetPath := strings.TrimSpace(argString(args, "path"))
 	if targetPath != "" {
 		targetPath = resolveFilePath(targetPath)
 	}
 
 	uploadChunksMu.Lock()
-	state, exists := uploadChunks[uploadID]
+	state, exists, restoreErr := restoreUploadSessionLocked(scope, targetPath, uploadID)
+	if restoreErr != nil {
+		uploadChunksMu.Unlock()
+		return nil, restoreErr
+	}
 	if exists {
 		if targetPath != "" && state.TargetPath != "" && !samePath(targetPath, state.TargetPath) {
 			uploadChunksMu.Unlock()
@@ -645,14 +589,6 @@ func cancelFileUpload(args map[string]interface{}) (json.RawMessage, error) {
 	}
 	uploadChunksMu.Unlock()
 
-	// A process restart can discard the in-memory state while leaving the part
-	// file behind. Derive the deterministic path and remove only that file.
-	if targetPath != "" {
-		partPath := uploadPartPathFor(targetPath, uploadID)
-		if err := os.Remove(partPath); err != nil && !os.IsNotExist(err) {
-			return nil, err
-		}
-	}
 	return json.Marshal(map[string]any{"cancelled": true})
 }
 
@@ -660,6 +596,10 @@ func cancelFileUpload(args map[string]interface{}) (json.RawMessage, error) {
 // request carries metadata only; all file bytes have already been written to
 // the private part file by upload_stream.
 func commitFileUpload(args map[string]interface{}) (json.RawMessage, error) {
+	return commitFileUploadScoped("", args)
+}
+
+func commitFileUploadScoped(scope string, args map[string]interface{}) (json.RawMessage, error) {
 	uploadID := strings.TrimSpace(argString(args, "upload_id"))
 	path := resolveFilePath(argString(args, "path"))
 	totalSize := argInt64(args, "total_size")
@@ -690,13 +630,14 @@ func commitFileUpload(args map[string]interface{}) (json.RawMessage, error) {
 	waitUploadStreams(uploadID)
 	writeLock := uploadWriteLock(uploadID)
 	writeLock.Lock()
-	defer func() {
-		writeLock.Unlock()
-		forgetUploadWriteLock(uploadID)
-	}()
+	defer writeLock.Unlock()
 
 	uploadChunksMu.Lock()
-	state, exists := uploadChunks[uploadID]
+	state, exists, restoreErr := restoreUploadSessionLocked(scope, path, uploadID)
+	if restoreErr != nil {
+		uploadChunksMu.Unlock()
+		return nil, restoreErr
+	}
 	if !exists {
 		uploadChunksMu.Unlock()
 		return nil, errors.New("unknown upload session")
@@ -723,38 +664,13 @@ func commitFileUpload(args map[string]interface{}) (json.RawMessage, error) {
 		return nil, fmt.Errorf("upload incomplete: received %d of %d chunks", received, chunkCount)
 	}
 	partPath := state.TempPath
+	partIdentity := state.PartIdentity
 	uploadChunksMu.Unlock()
 	if partPath == "" {
 		return nil, errors.New("upload part file is missing")
 	}
 
-	partInfo, err := os.Stat(partPath)
-	if err != nil {
-		return nil, err
-	}
-	if partInfo.Size() < totalSize {
-		return nil, fmt.Errorf("upload part file is %d bytes, want %d", partInfo.Size(), totalSize)
-	}
-	if partInfo.Size() > totalSize {
-		if err := os.Truncate(partPath, totalSize); err != nil {
-			return nil, err
-		}
-	}
-	targetDir := filepath.Dir(path)
-	if err := os.MkdirAll(targetDir, 0o755); err != nil {
-		return nil, err
-	}
-	existing, err := replaceableFile(path)
-	if err != nil {
-		return nil, err
-	}
-	if err := preserveReplacementMetadata(partPath, existing); err != nil {
-		return nil, err
-	}
-	if err := replaceFile(partPath, path); err != nil {
-		return nil, err
-	}
-	if err := syncUploadDirectory(targetDir); err != nil {
+	if err := commitUploadPartSafe(partPath, path, totalSize, partIdentity); err != nil {
 		return nil, err
 	}
 	uploadChunksMu.Lock()
@@ -814,15 +730,14 @@ func describeFile(path string, symlink bool) (fileInfo, error) {
 }
 
 func matchFileContent(path, query, lowerQuery string) (searchMatch, bool) {
-	info, err := os.Stat(path)
-	if err != nil || info.IsDir() || info.Size() > 10*1024*1024 {
-		return searchMatch{}, false
-	}
-	file, err := os.Open(path)
+	file, info, err := openRegularNoSymlinks(path, os.O_RDONLY, 0)
 	if err != nil {
 		return searchMatch{}, false
 	}
 	defer file.Close()
+	if info.IsDir() || info.Size() > 10*1024*1024 {
+		return searchMatch{}, false
+	}
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	lineNumber := 0
