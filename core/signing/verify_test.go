@@ -169,3 +169,20 @@ func TestVerifyRejectsDuplicateSignatureForMinimumThreshold(t *testing.T) {
 		t.Fatal("Verify() counted duplicate signature from the same key twice toward MinimumSignatures")
 	}
 }
+
+func TestVerifyTriesOtherPinnedKeysWhenSignatureOmitsKeyID(t *testing.T) {
+	f := newFixture(t)
+	first := newFixture(t).identity.ControlPlaneKeys[0]
+	first.KeyID = "key-previous"
+	f.identity.ControlPlaneKeys = append([]credentials.PinnedKey{first}, f.identity.ControlPlaneKeys...)
+	envelope := f.envelope(t, nil)
+	envelope.Signatures[0].KeyId = first.KeyID
+	if _, err := New(f.identity, f.replay).Verify(envelope); err == nil {
+		t.Fatal("Verify accepted a signature using a different key from the stated ID")
+	}
+	envelope.Signatures[0].KeyId = ""
+	got, err := New(f.identity, f.replay).Verify(envelope)
+	if err != nil || got.VerifiedBy != "key-1" {
+		t.Fatalf("Verify with omitted ID: instruction=%+v err=%v", got, err)
+	}
+}
