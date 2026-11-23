@@ -256,8 +256,8 @@ func TestCredentialRenewalStopsOnlyOnRefreshRecoveryRequiredDetail(t *testing.T)
 		t.Fatal(err)
 	}
 	recoveryErr.AddDetail(detail)
-	if !permanentCredentialRejection(recoveryErr) {
-		t.Fatal("wire CodeFailedPrecondition with REFRESH_RECOVERY_REQUIRED detail must halt renewal retries")
+	if permanentCredentialRejection(recoveryErr) || errors.Is(classify(recoveryErr), ErrPermissionDenied) {
+		t.Fatal("wire recovery details outside the refresh RPC must not stop the agent")
 	}
 
 	localRecoveryErr := connect.NewError(connect.CodeFailedPrecondition, errors.New("local status mapping"))
