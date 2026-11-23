@@ -33,6 +33,7 @@ type workerResponse struct {
 // one worker per grant preserves upload state without sharing it across users.
 func ServeWorker(input io.Reader, output io.Writer) error {
 	decoder, encoder := json.NewDecoder(input), json.NewEncoder(output)
+	decoder.UseNumber()
 	var outputMu sync.Mutex
 	var tasks sync.WaitGroup
 	slots := make(chan struct{}, 4)

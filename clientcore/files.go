@@ -16,6 +16,7 @@ const (
 	fileOperationTimeout     = 5 * time.Minute
 	fileStreamOperationLimit = 30 * time.Minute
 	typedFilePayloadHeader   = "X-Komari-File-Payload"
+	streamHeartbeatHeader    = "X-Komari-Stream-Heartbeat"
 )
 
 func (c *Client) runFileOperations(ctx context.Context) {
@@ -102,6 +103,7 @@ func (c *Client) attachFileOperation(parent context.Context, assignment *filev1.
 	c.authorize(stream.RequestHeader())
 	stream.RequestHeader().Set("X-Komari-Workspace-Identity", "v1")
 	stream.RequestHeader().Set(typedFilePayloadHeader, "1")
+	stream.RequestHeader().Set(streamHeartbeatHeader, "1")
 	if err := stream.Send(&filev1.AttachFileOperationsRequest{
 		Message: &filev1.AttachFileOperationsRequest_Attach{Attach: &filev1.AgentFileAttach{
 			AgentId:      c.agentIDValue(),
@@ -129,7 +131,17 @@ func (c *Client) attachFileOperation(parent context.Context, assignment *filev1.
 	// Read the server side concurrently so grant expiry closes active workers,
 	// including a long transfer, instead of waiting for the operation to finish.
 	remoteClosed := make(chan struct{})
-	go func() { defer close(remoteClosed); _, _ = stream.Receive(); cancel() }()
+	go func() {
+		defer close(remoteClosed)
+		defer cancel()
+		for {
+			response, err := stream.Receive()
+			if err != nil || response.GetCommand() != nil {
+				return
+			}
+			// An empty response is a heartbeat after the assignment.
+		}
+	}()
 
 	event := executor.ExecuteAssignment(ctx, command)
 	event.RequestId = command.GetRequestId()

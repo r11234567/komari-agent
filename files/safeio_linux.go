@@ -306,15 +306,16 @@ func chmodSafe(path string, mode fs.FileMode) error {
 	if st.Mode&unix.S_IFMT == unix.S_IFLNK {
 		return fmt.Errorf("refusing chmod on symlink %q", path)
 	}
-	file, openErr := openInDir(parent, base, unix.O_RDONLY|unix.O_NONBLOCK, 0)
+	file, openErr := openInDir(parent, base, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOCTTY, 0)
 	if openErr == nil {
 		defer file.Close()
 		return tempFailureRetry(func() error {
 			return unix.Fchmod(int(file.Fd()), syscallMode(mode))
 		})
 	}
+	// Older kernels without fchmodat2 fail closed when a no-follow chmod is required.
 	return tempFailureRetry(func() error {
-		return unix.Fchmodat(int(parent.Fd()), base, syscallMode(mode), 0)
+		return unix.Fchmodat(int(parent.Fd()), base, syscallMode(mode), unix.AT_SYMLINK_NOFOLLOW)
 	})
 }
 
@@ -593,7 +594,7 @@ func commitUploadPartSafe(partPath, targetPath string, totalSize int64, identity
 	defer partParent.Close()
 
 	partBase := filepath.Base(partPath)
-	partFile, err := openInDir(partParent, partBase, unix.O_RDWR|unix.O_NONBLOCK, 0)
+	partFile, err := openInDir(partParent, partBase, unix.O_RDONLY|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return err
 	}
@@ -611,37 +612,45 @@ func commitUploadPartSafe(partPath, targetPath string, totalSize int64, identity
 	if partInfo.Size() < totalSize {
 		return fmt.Errorf("upload part file is %d bytes, want %d", partInfo.Size(), totalSize)
 	}
-	if partInfo.Size() > totalSize {
-		if err := partFile.Truncate(totalSize); err != nil {
-			return err
-		}
-	}
 	st, err := statNoFollowInDir(parent, targetBase)
 	if err != nil {
 		return err
 	}
+	if st != nil && st.Mode&unix.S_IFMT != unix.S_IFREG {
+		return errors.New("cannot replace a non-regular file; choose its regular-file target explicitly")
+	}
+	// Keep the resumable part private and worker-owned until publication succeeds.
+	publication, publicationName, err := createTempInDir(partParent, ".publish-")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = publication.Close()
+		_ = unix.Unlinkat(int(partParent.Fd()), publicationName, 0)
+	}()
+	if _, err := io.CopyN(publication, partFile, totalSize); err != nil {
+		return err
+	}
 	modeBits := uint32(0o644)
 	if st != nil {
-		if st.Mode&unix.S_IFMT != unix.S_IFREG {
-			return errors.New("cannot replace a non-regular file; choose its regular-file target explicitly")
-		}
-		modeBits = st.Mode & 0o7777
-		if err := tempFailureRetry(func() error { return unix.Fchown(int(partFile.Fd()), int(st.Uid), int(st.Gid)) }); err != nil {
+		modeBits = st.Mode & 0o777
+		if err := tempFailureRetry(func() error { return unix.Fchown(int(publication.Fd()), int(st.Uid), int(st.Gid)) }); err != nil {
 			return fmt.Errorf("cannot preserve file ownership: %w", err)
 		}
 	}
-	if err := tempFailureRetry(func() error { return unix.Fchmod(int(partFile.Fd()), modeBits) }); err != nil {
+	if err := tempFailureRetry(func() error { return unix.Fchmod(int(publication.Fd()), modeBits) }); err != nil {
 		return err
 	}
-	if err := partFile.Sync(); err != nil {
+	if err := publication.Sync(); err != nil {
 		return err
 	}
-	if err := renameInDir(partParent, partBase, parent, targetBase, true); err != nil {
+	if err := renameInDir(partParent, publicationName, parent, targetBase, true); err != nil {
 		return err
 	}
 	if err := tempFailureRetry(func() error { return unix.Fsync(int(parent.Fd())) }); err != nil {
 		return err
 	}
+	_ = unix.Unlinkat(int(partParent.Fd()), partBase, 0)
 	_ = unix.Unlinkat(int(partParent.Fd()), "manifest.json", 0)
 	_ = unix.Unlinkat(int(parent.Fd()), filepath.Base(filepath.Dir(partPath)), unix.AT_REMOVEDIR)
 	return nil

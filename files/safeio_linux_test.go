@@ -94,3 +94,42 @@ func TestUploadPartIdentitySurvivesReopenAndRejectsOtherPart(t *testing.T) {
 		}
 	}
 }
+
+func TestUploadCommitKeepsOrdinaryPermissionsOnly(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "existing")
+	if err := os.WriteFile(target, []byte("old"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(target, 0o750|os.ModeSetuid|os.ModeSetgid|os.ModeSticky); err != nil {
+		t.Fatal(err)
+	}
+	part := uploadPartPathFor(target, "replacement")
+	file, err := openUploadPartSafe(part, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	if _, err := file.WriteString("replacement"); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := uploadPartIdentity(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := commitUploadPartSafe(part, target, int64(len("replacement")), identity); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode() != 0o750 {
+		t.Fatalf("replacement mode = %v, want ordinary permissions 0750", info.Mode())
+	}
+	if data, err := os.ReadFile(target); err != nil || string(data) != "replacement" {
+		t.Fatalf("replacement contents = %q, err = %v", data, err)
+	}
+	if _, err := os.Stat(filepath.Dir(part)); !os.IsNotExist(err) {
+		t.Fatalf("publication left its private stage behind: %v", err)
+	}
+}

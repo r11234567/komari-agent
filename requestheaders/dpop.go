@@ -182,6 +182,7 @@ type dpopClaims struct {
 	Nonce string `json:"nonce,omitempty"`
 	BH    string `json:"bh,omitempty"`
 	BM    string `json:"bm,omitempty"`
+	QSH   string `json:"qsh,omitempty"`
 }
 
 func requestOriginAndHTU(target *http.Request) (origin string, htu string) {
@@ -204,7 +205,7 @@ func requestOriginAndHTU(target *http.Request) (origin string, htu string) {
 	return origin, origin + path
 }
 
-func buildDPoPProofJWT(privKey ed25519.PrivateKey, method, htu, accessToken, nonce, bodyHash string, isStream bool) (string, error) {
+func buildDPoPProofJWT(privKey ed25519.PrivateKey, method, htu, rawQuery, accessToken, nonce, bodyHash string, isStream bool) (string, error) {
 	pubKey := ed25519.PublicKey(privKey[ed25519.PrivateKeySize-ed25519.PublicKeySize:])
 	headerBytes, err := json.Marshal(dpopHeader{
 		Typ: DPoPTypHeader,
@@ -230,6 +231,10 @@ func buildDPoPProofJWT(privKey ed25519.PrivateKey, method, htu, accessToken, non
 	}
 	if isStream {
 		claims.BM = "stream"
+	}
+	if rawQuery != "" {
+		queryDigest := sha256.Sum256([]byte(rawQuery))
+		claims.QSH = base64.RawURLEncoding.EncodeToString(queryDigest[:])
 	}
 	claimsBytes, err := json.Marshal(claims)
 	if err != nil {
@@ -288,6 +293,9 @@ func (s *NonceStore) negotiateProof(base http.RoundTripper, req *http.Request, a
 		return false, fmt.Errorf("Agent request proof probe returned HTTP %d", response.StatusCode)
 	}
 	jwt := response.StatusCode == http.StatusOK && response.Header.Get("X-Komari-Agent-Proof") == "dpop-jwt-v1"
+	if !jwt && s.probeKey == probeKey && s.probeJWT {
+		return false, errors.New("previously negotiated Agent DPoP capability is missing")
+	}
 	if jwt {
 		nonce := response.Header.Get("DPoP-Nonce")
 		if !validDPoPNonce(nonce) {
@@ -394,7 +402,7 @@ func (d *DPoPTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil
 		}
 		_, htu := requestOriginAndHTU(target)
-		proof, signErr := buildDPoPProofJWT(privKey, target.Method, htu, curToken, nonce, bodyHash, isStream)
+		proof, signErr := buildDPoPProofJWT(privKey, target.Method, htu, target.URL.RawQuery, curToken, nonce, bodyHash, isStream)
 		if signErr != nil {
 			return signErr
 		}
