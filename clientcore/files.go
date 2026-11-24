@@ -99,7 +99,7 @@ func (c *Client) attachFileOperation(parent context.Context, assignment *filev1.
 	}
 	go capability.CancelOnRevocation(ctx, cancel, accountAllowed)
 
-	stream := c.files.AttachFileOperations(ctx)
+	stream := c.fileAttachClient().AttachFileOperations(ctx)
 	c.authorize(stream.RequestHeader())
 	stream.RequestHeader().Set("X-Komari-Workspace-Identity", "v1")
 	stream.RequestHeader().Set(typedFilePayloadHeader, "1")
