@@ -16,11 +16,14 @@ import (
 	"github.com/komari-monitor/komari-agent/core/hostops"
 	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
 	configconnect "github.com/r11234567/komari-proto/gen/go/komari/config/v1/configv1connect"
+	securityv1 "github.com/r11234567/komari-proto/gen/go/komari/security/v1"
 )
 
 type jitterHeartbeatPanel struct {
 	configconnect.UnimplementedPrivilegedDeliveryServiceHandler
 	frames   chan *configv1.PrivilegedRevision
+	control  chan *configv1.WatchPrivilegedDeliveryResponse
+	seal     func(*securityv1.SignedInstruction) *securityv1.SignedEnvelope
 	requests atomic.Int32
 	active   atomic.Int32
 }
@@ -34,6 +37,13 @@ func (p *jitterHeartbeatPanel) WatchPrivilegedDelivery(ctx context.Context, _ *c
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case frame := <-p.control:
+			if frame == nil {
+				return nil
+			}
+			if err := stream.Send(frame); err != nil {
+				return err
+			}
 		case frame, open := <-p.frames:
 			if !open {
 				return nil
@@ -58,8 +68,9 @@ func jitterHelperFixture(t *testing.T) (*Helper, *jitterHeartbeatPanel, func(tim
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	trust, sign := heartbeatFixture(t)
-	panel := &jitterHeartbeatPanel{frames: make(chan *configv1.PrivilegedRevision, 8)}
+	trust, sign, seal := heartbeatFixtureWithSigner(t)
+	panel := &jitterHeartbeatPanel{frames: make(chan *configv1.PrivilegedRevision, 8),
+		control: make(chan *configv1.WatchPrivilegedDeliveryResponse, 8), seal: seal}
 	_, handler := configconnect.NewPrivilegedDeliveryServiceHandler(panel)
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)

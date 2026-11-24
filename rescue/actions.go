@@ -56,7 +56,7 @@ func ExecuteAction(ctx context.Context, config ActionConfig, action rescuev1.Res
 	case rescuev1.RescueAction_RESCUE_ACTION_DETAILED_MEMORY_METRICS:
 		return performanceDiagnostics(ctx, false, true)
 	case rescuev1.RescueAction_RESCUE_ACTION_TEMPORARY_SSH_ACCESS:
-		return grantTemporarySSHAccess(ctx, config, sshPort)
+		return ActionResult{}, errors.New("temporary SSH requires a source IP and a supported nftables configuration")
 	case rescuev1.RescueAction_RESCUE_ACTION_REVOKE_TEMPORARY_SSH_ACCESS:
 		return revokeTemporarySSHAccess(ctx, config)
 	case rescuev1.RescueAction_RESCUE_ACTION_ROLLBACK_PRIVILEGED_CONFIG:

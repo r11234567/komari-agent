@@ -333,13 +333,21 @@ func (h *Helper) verifyRescueAssignment(assignment *rescuev1.RescueAssignment) (
 	if err != nil {
 		return nil, fmt.Errorf("verify rescue envelope: %w", err)
 	}
-	if instruction.InstructionType != "rescue:v1" {
-		return nil, fmt.Errorf("the signature authorizes %q, not a rescue instruction (rescue:v1)", instruction.InstructionType)
-	}
-
 	var sessionProto rescuev1.RescueSession
 	if err := proto.Unmarshal(instruction.Body, &sessionProto); err != nil {
 		return nil, fmt.Errorf("unmarshal signed rescue session: %w", err)
+	}
+	kind := "rescue:v1"
+	if sessionProto.GetSshWindow() != nil {
+		kind = "rescue:ssh-window:v1"
+		switch sessionProto.Action {
+		case rescuev1.RescueAction_RESCUE_ACTION_TEMPORARY_SSH_ACCESS, rescuev1.RescueAction_RESCUE_ACTION_REVOKE_TEMPORARY_SSH_ACCESS:
+		default:
+			return nil, errors.New("a temporary SSH window requires an SSH rescue action")
+		}
+	}
+	if instruction.InstructionType != kind {
+		return nil, fmt.Errorf("the signature authorizes %q, not a rescue instruction (%s)", instruction.InstructionType, kind)
 	}
 
 	if assignment.Session != nil {
@@ -351,6 +359,9 @@ func (h *Helper) verifyRescueAssignment(assignment *rescuev1.RescueAssignment) (
 		}
 		if assignment.Session.GetSshPort() != sessionProto.GetSshPort() {
 			return nil, errors.New("rescue session SSH port mismatch between envelope and assignment")
+		}
+		if !proto.Equal(assignment.Session.GetSshWindow(), sessionProto.GetSshWindow()) {
+			return nil, errors.New("rescue session SSH window mismatch between envelope and assignment")
 		}
 	}
 
@@ -383,18 +394,53 @@ func (h *Helper) execute(parent context.Context, assignment *rescuev1.RescueAssi
 	operationContext, cancel := context.WithDeadline(parent, deadline)
 	defer cancel()
 	cancelledByServer := make(chan struct{}, 1)
-	go h.watchCancellation(operationContext, assignment.AssignmentId, cancel, cancelledByServer)
+	if session.GetSshWindow() == nil {
+		go h.watchCancellation(operationContext, assignment.AssignmentId, cancel, cancelledByServer)
+	}
 	if h.hostTrust != nil {
 		go h.cancelOnRevocation(operationContext, cancel)
 	}
 
-	result, actionErr := ExecuteAction(operationContext, h.action, session.Action, session.Arguments, session.GetSshPort())
+	var result ActionResult
+	var actionErr error
+	if session.GetSshWindow() != nil && session.State == commonv1.OperationState_OPERATION_STATE_CANCEL_REQUESTED {
+		cancelledByServer <- struct{}{}
+		if session.Action == rescuev1.RescueAction_RESCUE_ACTION_TEMPORARY_SSH_ACCESS {
+			session := &rescuev1.RescueSession{
+				Action:    rescuev1.RescueAction_RESCUE_ACTION_REVOKE_TEMPORARY_SSH_ACCESS,
+				SshWindow: &rescuev1.SSHWindowRequest{PreviousGrantId: session.GetSessionId(), EnrollmentKeyId: session.GetSshWindow().GetEnrollmentKeyId()},
+			}
+			result, actionErr = executeSSHWindow(operationContext, h.manifest, session, nil)
+		}
+	} else if session.GetSshWindow() != nil {
+		var key string
+		if h.hostTrust != nil {
+			if id, ok := readHostIdentity(h.manifest, h.hostTrust); ok {
+				key = id.KeyID
+			}
+		}
+		if key == "" || key != session.GetSshWindow().GetEnrollmentKeyId() || len(session.Arguments) != 0 {
+			actionErr = errors.New("temporary SSH authorization does not match this enrollment")
+		} else {
+			result, actionErr = executeSSHWindow(operationContext, h.manifest, session, func() bool {
+				current, ok := readHostIdentity(h.manifest, h.hostTrust)
+				now := time.Now()
+				return h.authorized.Load() && ok && current.KeyID == key &&
+					(!current.RefreshExpired(now) || now.Before(current.AccessTokenExpiresAt))
+			})
+		}
+	} else {
+		result, actionErr = ExecuteAction(operationContext, h.action, session.Action, session.Arguments, session.GetSshPort())
+	}
 	state := commonv1.OperationState_OPERATION_STATE_SUCCEEDED
 	var detail *commonv1.ErrorDetail
 	select {
 	case <-cancelledByServer:
 		state = commonv1.OperationState_OPERATION_STATE_CANCELLED
 		detail = &commonv1.ErrorDetail{Code: "CANCELLED", Message: "rescue operation was cancelled by the server"}
+		if actionErr != nil {
+			log.Printf("confirm cancellation of temporary SSH grant %s: %v", session.GetSessionId(), actionErr)
+		}
 	default:
 		if errors.Is(operationContext.Err(), context.DeadlineExceeded) {
 			state = commonv1.OperationState_OPERATION_STATE_DEADLINE_EXCEEDED
@@ -483,6 +529,11 @@ func (h *Helper) reportStatus(parent context.Context, statusErr error) error {
 		HelperInstanceId: h.instanceID, ObservedAt: timestamppb.Now(),
 	}
 	status.NetworkIsolation, status.BlockedInterfaces = networkIsolationStatus(h.action)
+	if h.hostTrust != nil {
+		if identity, ok := readHostIdentity(h.manifest, h.hostTrust); ok {
+			sshWindowStatus(ctx, h.manifest, identity.KeyID, status)
+		}
+	}
 	if statusErr != nil {
 		status.Error = &commonv1.ErrorDetail{Code: "HELPER_CONNECTION", Message: truncateError(statusErr.Error())}
 	}

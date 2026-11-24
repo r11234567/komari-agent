@@ -110,6 +110,11 @@ jobs:
       - name: Prove regression test fails when the old 30s timeout is restored
         if: ${{ !cancelled() }}
         run: bash scripts/ci/run-audit-check.sh rescue-watch-negative-control bash scripts/ci/test-rescue-watch-negative-control.sh
+      - name: Real IPv4 and IPv6 SSH admission and expiry in isolated nftables namespaces
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nftables iproute2
+          bash scripts/ci/run-audit-check.sh temporary-ssh-window sudo env PATH="$PATH" GOTOOLCHAIN=local GOMODCACHE="$(go env GOMODCACHE)" GOCACHE="$(go env GOCACHE)" bash scripts/ci/test-temporary-ssh-window.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:
