@@ -830,7 +830,7 @@ IDENTITY_FIELDS
             fi
             [ -n "$rescue_endpoint" ] || { log_error "Enrollment needs --endpoint https://your-panel; rerun this command with it. Registration is retained."; exit 1; }
             log_info "Opening browser approval enrollment as $service_user (no system password is requested)."
-            runuser -u "$service_user" -- "$agent_path" login --endpoint "$rescue_endpoint"
+            runuser -u "$service_user" -- "$agent_path" login --credentials-file "$credentials_path" --endpoint "$rescue_endpoint"
             read_identity
             mapfile -t identity_fields < "$staging/identity-fields"
             [ "${#identity_fields[@]}" -eq 2 ] || { log_error "Enrollment did not create a node identity"; exit 1; }
@@ -860,7 +860,7 @@ if sys.argv[7] and t.get('access_config_file') != sys.argv[7]:
 CHECK_TRUST
             else
                 if [ -r /dev/tty ] && [ -w /dev/tty ]; then
-                    log_info "Copy the panel signing key from your independently verified administrator source. Agent enrollment keys are not promoted to root authority."
+                    log_info "Copy the panel signing key ID and public key from the browser approval result on your verified panel."
                     [ -n "$panel_key_id" ] || read -r -p 'Panel signing key ID: ' panel_key_id </dev/tty
                     [ -n "$panel_public_key" ] || read -r -p 'Panel Ed25519 public key (base64): ' panel_public_key </dev/tty
                 fi

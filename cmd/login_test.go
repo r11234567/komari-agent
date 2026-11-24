@@ -77,7 +77,7 @@ func TestReauthProceedsWhenRefreshRejectedBeforeLocalExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pinned := []credentials.PinnedKey{{Algorithm: 1, KeyID: "panel-key-1", Value: base64.StdEncoding.EncodeToString([]byte("synthetic-panel-key"))}}
+	pinned := []credentials.PinnedKey{{Algorithm: 1, KeyID: "panel-key-1", Value: base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{42}, 32))}}
 	err = store.Save(credentials.Identity{
 		Endpoint:              server.URL,
 		AgentID:               "existing-agent-1",
@@ -112,6 +112,12 @@ func TestReauthProceedsWhenRefreshRejectedBeforeLocalExpiry(t *testing.T) {
 	reauthCmd.SetContext(ctx)
 	if err := reauthCmd.RunE(reauthCmd, nil); err != nil {
 		t.Fatalf("reauth failed when local refresh token was unexpired but rejected: %v", err)
+	}
+	log := output.String()
+	approved := strings.Index(log, "Re-authenticated as agent")
+	key := strings.Index(log, "Panel signing key ID: panel-key-1\nPanel Ed25519 public key (base64): "+pinned[0].Value)
+	if approved < 0 || key <= approved || strings.Contains(log, "synthetic-reauthed-rt") || strings.Contains(log, private) {
+		t.Fatalf("reauth must print only public key material after approval: %q", log)
 	}
 
 	if panel.beginReq == nil {

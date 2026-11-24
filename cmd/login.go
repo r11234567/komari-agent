@@ -10,6 +10,8 @@ package cmd
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -23,6 +25,7 @@ import (
 	"github.com/komari-monitor/komari-agent/core/enrollment"
 	"github.com/komari-monitor/komari-agent/dnsresolver"
 	"github.com/komari-monitor/komari-agent/update"
+	securityv1 "github.com/r11234567/komari-proto/gen/go/komari/security/v1"
 	"github.com/spf13/cobra"
 )
 
@@ -107,6 +110,9 @@ is the step where a human decides this machine may join.`,
 		}
 
 		fmt.Printf("\nEnrolled as agent %s\n", identity.AgentID)
+		if enrolled, ok := store.Identity(); ok {
+			printPanelSigningKeys(cmd.OutOrStdout(), enrolled.ControlPlaneKeys)
+		}
 		fmt.Printf("Credentials stored at %s\n", store.Path())
 		if !identity.RefreshTokenExpiresAt.IsZero() {
 			fmt.Printf("Sign-in valid until %s (renewed automatically)\n",
@@ -277,7 +283,9 @@ var trustShowCmd = &cobra.Command{
 			fmt.Println("Run 'komari-agent trust refresh' to fetch them.")
 			return nil
 		}
-		fmt.Printf("Panel: %s\n\n", identity.Endpoint)
+		out := cmd.OutOrStdout()
+		fmt.Fprintf(out, "Panel: %s\n\n", identity.Endpoint)
+		printPanelSigningKeys(out, identity.ControlPlaneKeys)
 		for _, key := range identity.ControlPlaneKeys {
 			fmt.Printf("  key id      %s\n", key.KeyID)
 			fmt.Printf("  fingerprint %s\n", enrollment.Fingerprint(key))
@@ -373,12 +381,41 @@ and configuration in the panel.`,
 		}
 
 		fmt.Fprintf(out, "\nRe-authenticated as agent %s\n", renewed.AgentID)
+		keys := renewed.ControlPlaneKeys
+		if len(keys) == 0 && strings.HasPrefix(client.Endpoint(), "https://") {
+			// For an older enrollment without Agent pins, show the HTTPS
+			// endpoint's public bundle without changing either trust store.
+			keyCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			keys, _, _, _, _ = client.FetchTrustBundle(keyCtx, renewed.AgentID)
+		}
+		printPanelSigningKeys(out, keys)
 		if !renewed.RefreshTokenExpiresAt.IsZero() {
 			fmt.Fprintf(out, "Sign-in valid until %s (renewed automatically)\n",
 				renewed.RefreshTokenExpiresAt.Local().Format("2006-01-02 15:04"))
 		}
 		return nil
 	},
+}
+
+func printPanelSigningKeys(out io.Writer, keys []credentials.PinnedKey) {
+	var shown bool
+	now := time.Now()
+	for _, key := range keys {
+		raw, err := base64.StdEncoding.DecodeString(key.Value)
+		if key.Algorithm != int32(securityv1.SignatureAlgorithm_SIGNATURE_ALGORITHM_ED25519) ||
+			len(raw) != ed25519.PublicKeySize || err != nil || key.KeyID == "" ||
+			now.Before(key.NotBefore) || (key.NotAfter != nil && !now.Before(*key.NotAfter)) {
+			continue
+		}
+		fmt.Fprintf(out, "Panel signing key ID: %s\nPanel Ed25519 public key (base64): %s\n", key.KeyID, key.Value)
+		shown = true
+	}
+	if shown {
+		fmt.Fprintln(out, "Compare these public keys with the signing keys shown on the panel's approval page before configuring root host trust.")
+	} else {
+		fmt.Fprintln(out, "No current Ed25519 panel pin is available. View the panel's approval page for its signing keys.")
+	}
 }
 
 func pinTrust(ctx context.Context, client *enrollment.Client, store *credentials.Store, identity credentials.Identity) error {
