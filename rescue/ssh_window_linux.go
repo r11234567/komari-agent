@@ -18,6 +18,7 @@ import (
 
 	"github.com/komari-monitor/komari-agent/core/credentials"
 	"github.com/komari-monitor/komari-agent/core/hostops"
+	commonv1 "github.com/r11234567/komari-proto/gen/go/komari/common/v1"
 	rescuev1 "github.com/r11234567/komari-proto/gen/go/komari/rescue/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -115,16 +116,27 @@ func sshWindowStatus(ctx context.Context, manifest *hostops.Manifest, key string
 	status.SshEnrollmentKeyId = key
 	config, err := loadSSHWindowConfig(manifest)
 	if err != nil {
+		code := "SSH_CONFIG_INVALID"
+		if errors.Is(err, os.ErrNotExist) {
+			code = "SSH_CONFIG_MISSING"
+		}
+		status.SshWindowError = sshWindowDiagnostic(code, err)
 		return
 	}
 	sshAccessMu.Lock()
 	defer sshAccessMu.Unlock()
 	snapshot, err := config.inspect(ctx, true)
 	if err != nil {
+		code := "SSH_NFT_READ_FAILED"
+		if errors.Is(err, errSSHWindowRules) {
+			code = "SSH_NFT_RULES_INVALID"
+		}
+		status.SshWindowError = sshWindowDiagnostic(code, err)
 		return
 	}
 	state, grant, err := config.reconcile(snapshot)
 	if err != nil {
+		status.SshWindowError = sshWindowDiagnostic("SSH_STATE_INVALID", err)
 		return
 	}
 	status.SshAccessPort = config.Port
@@ -133,6 +145,10 @@ func sshWindowStatus(ctx context.Context, manifest *hostops.Manifest, key string
 	} else if state.Current != nil && state.Current.Key == key {
 		status.SshAccess = state.Current.receipt(false)
 	}
+}
+
+func sshWindowDiagnostic(code string, err error) *commonv1.ErrorDetail {
+	return &commonv1.ErrorDetail{Code: code, Message: strings.ToValidUTF8(truncateError(err.Error()), "")}
 }
 
 func executeSSHWindow(ctx context.Context, manifest *hostops.Manifest, session *rescuev1.RescueSession, mayGrant func() bool) (ActionResult, error) {
