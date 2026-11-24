@@ -43,14 +43,34 @@ func TestTemporarySSHWindowNftables(t *testing.T) {
 	defer listener.Close()
 	port := uint32(listener.Addr().(*net.TCPAddr).Port)
 	manifest := &hostops.Manifest{ServiceName: "test", HostPolicyFile: filepath.Join(dir, "policy.json"), CredentialsFile: filepath.Join(dir, "credentials.json")}
-	settings := []byte(fmt.Sprintf(`{"table":"public_edge_guard","chain":"input","interface":"sshhost","port":%d}`, port))
-	if err := os.WriteFile(filepath.Join(dir, "test.temporary-ssh.json"), settings, 0o600); err != nil {
+	checkStatus := func(code, detail string, wantPort uint32) {
+		t.Helper()
+		status := &rescuev1.RescueHelperStatus{}
+		sshWindowStatus(t.Context(), manifest, "enrollment-test", status)
+		if !status.GetSshWindowSupported() || status.GetSshAccessPort() != wantPort ||
+			status.GetSshWindowError().GetCode() != code || !strings.Contains(status.GetSshWindowError().GetMessage(), detail) {
+			t.Fatalf("want SSH status %q containing %q with port %d, got %v", code, detail, wantPort, status)
+		}
+	}
+	configPath := filepath.Join(dir, "test.temporary-ssh.json")
+	checkStatus("SSH_CONFIG_MISSING", configPath, 0)
+	if err := os.WriteFile(configPath, []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	checkStatus("SSH_CONFIG_INVALID", "invalid temporary SSH table", 0)
+	settings := []byte(fmt.Sprintf(`{"table":"public_edge_guard","chain":"input","interface":"sshhost","port":%d}`, port))
+	if err := os.WriteFile(configPath, settings, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checkStatus("SSH_NFT_READ_FAILED", "public_edge_guard", 0)
 	config, err := loadSSHWindowConfig(manifest)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := config.apply(t.Context(), "add table inet public_edge_guard\n"); err != nil {
+		t.Fatal(err)
+	}
+	checkStatus("SSH_NFT_RULES_INVALID", "public_edge_guard/input", 0)
 	firewall := fmt.Sprintf(`table inet public_edge_guard {
 	  set komari_rescue_ssh_v4 { type ipv4_addr; flags timeout; }
 	  set komari_rescue_ssh_v6 { type ipv6_addr; flags timeout; }
@@ -76,6 +96,14 @@ func TestTemporarySSHWindowNftables(t *testing.T) {
 	if err := config.apply(t.Context(), firewall); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(config.statePath, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checkStatus("SSH_STATE_INVALID", "unexpected EOF", 0)
+	if err := os.Remove(config.statePath); err != nil {
+		t.Fatal(err)
+	}
+	checkStatus("", "", port)
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)

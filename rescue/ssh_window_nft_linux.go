@@ -15,6 +15,8 @@ import (
 	"time"
 )
 
+var errSSHWindowRules = errors.New("invalid temporary SSH firewall entry point")
+
 type sshWindowElement struct {
 	Address netip.Addr  `json:"val"`
 	Comment string      `json:"comment"`
@@ -73,7 +75,7 @@ func (config sshWindowConfig) inspect(ctx context.Context, requireHook bool) (*s
 				if r.Chain == config.Chain && reflect.DeepEqual(r.Expressions, config.ruleExpressions(set)) {
 					rules[set]++
 				} else if strings.Contains(string(expressions), `"@`+set+`"`) {
-					return nil, fmt.Errorf("temporary SSH set %s is referenced by an unexpected rule in %s", set, r.Chain)
+					return nil, fmt.Errorf("%w: set %s is referenced by an unexpected rule in %s", errSSHWindowRules, set, r.Chain)
 				}
 			}
 		}
@@ -83,7 +85,7 @@ func (config sshWindowConfig) inspect(ctx context.Context, requireHook bool) (*s
 				wantType = "ipv4_addr"
 			}
 			if string(s.Type) != fmt.Sprintf("%q", wantType) || !reflect.DeepEqual(s.Flags, []string{"timeout"}) {
-				return nil, fmt.Errorf("temporary SSH set %s must be a dedicated %s timeout set", s.Name, wantType)
+				return nil, fmt.Errorf("%w: set %s must be a dedicated %s timeout set", errSSHWindowRules, s.Name, wantType)
 			}
 			sets[s.Name] = true
 			var items []struct {
@@ -91,7 +93,7 @@ func (config sshWindowConfig) inspect(ctx context.Context, requireHook bool) (*s
 			}
 			if len(s.Elements) > 0 {
 				if err := json.Unmarshal(s.Elements, &items); err != nil {
-					return nil, fmt.Errorf("invalid entries in temporary SSH set %s: %w", s.Name, err)
+					return nil, fmt.Errorf("%w: invalid entries in set %s: %v", errSSHWindowRules, s.Name, err)
 				}
 			}
 			for _, item := range items {
@@ -100,13 +102,13 @@ func (config sshWindowConfig) inspect(ctx context.Context, requireHook bool) (*s
 				if err != nil || timeoutErr != nil || timeout <= 0 || timeout > temporarySSHDuration.Seconds() ||
 					!validSSHGrantID(item.Element.Comment) || !item.Element.Address.IsValid() ||
 					item.Element.Address.Is4() != (s.Name == sshWindowV4Set) {
-					return nil, fmt.Errorf("unexpected entry in temporary SSH set %s", s.Name)
+					return nil, fmt.Errorf("%w: unexpected entry in set %s", errSSHWindowRules, s.Name)
 				}
 				if expiry <= 0 {
 					continue
 				}
 				if element != nil {
-					return nil, errors.New("more than one temporary SSH entry is present")
+					return nil, fmt.Errorf("%w: more than one temporary SSH entry is present", errSSHWindowRules)
 				}
 				value := item.Element
 				element = &value
@@ -115,7 +117,7 @@ func (config sshWindowConfig) inspect(ctx context.Context, requireHook bool) (*s
 	}
 	if requireHook && (!input || !sets[sshWindowV4Set] || !sets[sshWindowV6Set] ||
 		rules[sshWindowV4Set] != 1 || rules[sshWindowV6Set] != 1) {
-		return nil, fmt.Errorf("temporary SSH rules are missing or do not match %s/%s, %s TCP %d", config.Table, config.Chain, config.Interface, config.Port)
+		return nil, fmt.Errorf("%w: the input chain, sets or rules are missing or do not match %s/%s, %s TCP %d", errSSHWindowRules, config.Table, config.Chain, config.Interface, config.Port)
 	}
 	return element, nil
 }
