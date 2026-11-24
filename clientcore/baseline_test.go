@@ -32,13 +32,14 @@ type baselineTestService struct {
 	configv1connect.UnimplementedConfigServiceHandler
 	configv1connect.UnimplementedPrivilegedDeliveryServiceHandler
 	hostv1connect.UnimplementedHostServiceHandler
-	requirePreserve bool
-	key             ed25519.PrivateKey
-	fail            atomic.Bool
-	requests        atomic.Int32
-	receipts        atomic.Int32
-	first           *configv1.InitializeNodeConfigRequest
-	t               *testing.T
+	requirePreserve  bool
+	existingRevision uint64
+	key              ed25519.PrivateKey
+	fail             atomic.Bool
+	requests         atomic.Int32
+	receipts         atomic.Int32
+	first            *configv1.InitializeNodeConfigRequest
+	t                *testing.T
 }
 
 func (s *baselineTestService) NegotiateHostProtocol(context.Context, *connect.Request[hostv1.NegotiateHostProtocolRequest]) (*connect.Response[hostv1.NegotiateHostProtocolResponse], error) {
@@ -46,6 +47,9 @@ func (s *baselineTestService) NegotiateHostProtocol(context.Context, *connect.Re
 }
 func (s *baselineTestService) InitializeNodeConfig(_ context.Context, req *connect.Request[configv1.InitializeNodeConfigRequest]) (*connect.Response[configv1.InitializeNodeConfigResponse], error) {
 	s.requests.Add(1)
+	if s.existingRevision != 0 {
+		return connect.NewResponse(&configv1.InitializeNodeConfigResponse{SkippedReason: "privileged configuration history already exists"}), nil
+	}
 	if s.requirePreserve && !req.Msg.PreserveRuntime {
 		return connect.NewResponse(&configv1.InitializeNodeConfigResponse{SkippedReason: "ordinary configuration history must be preserved"}), nil
 	}
@@ -66,8 +70,12 @@ func (s *baselineTestService) InitializeNodeConfig(_ context.Context, req *conne
 	}
 	return connect.NewResponse(response), nil
 }
-func (s *baselineTestService) GetNodeConfigState(context.Context, *connect.Request[configv1.GetNodeConfigStateRequest]) (*connect.Response[configv1.GetNodeConfigStateResponse], error) {
-	return connect.NewResponse(&configv1.GetNodeConfigStateResponse{ProtocolVersion: 2}), nil
+func (s *baselineTestService) GetPrivilegedDelivery(context.Context, *connect.Request[configv1.GetPrivilegedDeliveryRequest]) (*connect.Response[configv1.GetPrivilegedDeliveryResponse], error) {
+	response := &configv1.GetPrivilegedDeliveryResponse{}
+	if s.existingRevision != 0 {
+		response.Revision = &configv1.PrivilegedRevision{Revision: s.existingRevision}
+	}
+	return connect.NewResponse(response), nil
 }
 func (s *baselineTestService) AcknowledgeConfig(context.Context, *connect.Request[configv1.AcknowledgeConfigRequest]) (*connect.Response[configv1.AcknowledgeConfigResponse], error) {
 	if s.fail.Load() {
@@ -91,19 +99,21 @@ func TestBaselineACKRetriesAfterLocalLoadAndReconnect(t *testing.T) {
 		if migrated {
 			name = "migrated-r4"
 		}
-		t.Run(name, func(t *testing.T) { testBaselineReconnect(t, migrated) })
+		t.Run(name, func(t *testing.T) { testBaselineReconnect(t, migrated, false, 0) })
 	}
 }
 func TestUnacceptedOldBaselineRequestMigratesWithoutDeletingState(t *testing.T) {
-	testBaselineReconnect(t, true, true)
+	testBaselineReconnect(t, true, true, 0)
 }
-func testBaselineReconnect(t *testing.T, migrated bool, oldProposal ...bool) {
-	oldRequest := len(oldProposal) > 0 && oldProposal[0]
+func TestSkippedBaselineUsesAgentDeliveryRead(t *testing.T) {
+	testBaselineReconnect(t, true, false, 4)
+}
+func testBaselineReconnect(t *testing.T, migrated, oldRequest bool, existingRevision uint64) {
 	pub, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := &baselineTestService{key: key, t: t, requirePreserve: oldRequest}
+	service := &baselineTestService{key: key, t: t, requirePreserve: oldRequest, existingRevision: existingRevision}
 	service.fail.Store(true)
 	mux := http.NewServeMux()
 	p, h := configv1connect.NewConfigServiceHandler(service)
@@ -147,6 +157,15 @@ func testBaselineReconnect(t *testing.T, migrated bool, oldProposal ...bool) {
 		t.Fatal(err)
 	}
 	c := &Client{agentID: "new-node", startupID: "boot-1", store: store, privilegedStore: priv, credentialStore: identity, hostPolicy: policy, hostManifest: &hostops.Manifest{ServiceName: "custom", HostPolicyFile: policyPath}, config: configv1connect.NewConfigServiceClient(server.Client(), server.URL), privileged: configv1connect.NewPrivilegedDeliveryServiceClient(server.Client(), server.URL), host: hostv1connect.NewHostServiceClient(server.Client(), server.URL)}
+	if existingRevision != 0 {
+		if err = c.initializeHost(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if service.requests.Load() != 1 || store.Current().Revision != 4 || priv.State().AppliedRevision != 0 {
+			t.Fatal("existing panel history must use the signed delivery stream")
+		}
+		return
+	}
 	if oldRequest {
 		saved := &configv1.InitializeNodeConfigRequest{AgentId: "new-node", ServiceId: "custom", PolicyHash: "old-unaccepted-request", Runtime: &configv1.RuntimeConfig{}, Privileged: c.localBaseline().Proto()}
 		encoded, e := proto.Marshal(saved)

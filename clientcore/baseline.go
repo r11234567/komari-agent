@@ -109,13 +109,16 @@ func (c *Client) initializeHost(parent context.Context) error {
 	}
 	if !response.Msg.Initialized {
 		// Existing privileged history is handled by its normal signed stream.
-		stateReq := connect.NewRequest(&configv1.GetNodeConfigStateRequest{AgentId: c.agentIDValue()})
-		c.authorize(stateReq.Header())
-		state, stateErr := c.privileged.GetNodeConfigState(ctx, stateReq)
-		if stateErr == nil && state.Msg.Desired != nil {
+		currentReq := connect.NewRequest(&configv1.GetPrivilegedDeliveryRequest{AgentId: c.agentIDValue()})
+		c.authorize(currentReq.Header())
+		current, err := c.privileged.GetPrivilegedDelivery(ctx, currentReq)
+		if err != nil {
+			return err
+		}
+		if current.Msg.Revision != nil {
 			return c.flushReceipts(ctx)
 		}
-		if stateErr == nil && state.Msg.AppliedRevision == 0 && !proposal.PreserveRuntime && (c.store.Current().Revision != 0 || strings.HasPrefix(c.hostPolicy.DisableSource, "legacy-") || response.Msg.SkippedReason == "ordinary configuration history must be preserved") {
+		if !proposal.PreserveRuntime && (c.store.Current().Revision != 0 || strings.HasPrefix(c.hostPolicy.DisableSource, "legacy-") || response.Msg.SkippedReason == "ordinary configuration history must be preserved") {
 			// Older agents may have saved a fresh-install proposal, received
 			// initialized=false, and then loaded an existing runtime revision.
 			// No baseline was accepted: a current state read must confirm no
