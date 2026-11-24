@@ -414,8 +414,8 @@ func (h *Helper) execute(parent context.Context, assignment *rescuev1.RescueAssi
 	// shows something useful.
 	if state == commonv1.OperationState_OPERATION_STATE_SUCCEEDED {
 		event.Diagnostics = result.Diagnostics
-		event.SshAccess = result.SSHAccess
 	}
+	event.SshAccess = result.SSHAccess
 	if err := h.reportEvent(parent, event); err != nil {
 		return err
 	}

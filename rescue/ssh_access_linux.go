@@ -36,6 +36,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	rescuev1 "github.com/r11234567/komari-proto/gen/go/komari/rescue/v1"
@@ -73,21 +74,29 @@ type sshAccessState struct {
 	ExpiresAt time.Time                `json:"expires_at"`
 	Mechanism sshAccessMechanism       `json:"mechanism"`
 	Expiry    rescuev1.ExpiryMechanism `json:"expiry"`
+	NftChain  *sshNftChain             `json:"nft_chain,omitempty"`
 }
+
+var sshAccessMu sync.Mutex
 
 func grantTemporarySSHAccess(ctx context.Context, config ActionConfig, requestedPort uint32) (ActionResult, error) {
 	if !isPrivileged() {
 		return ActionResult{}, errors.New("temporary SSH access requires a privileged rescue helper")
 	}
 	port := requestedPort
-	if port == 0 || port > 65535 {
+	if port > 65535 {
+		return ActionResult{}, fmt.Errorf("invalid SSH port %d", port)
+	}
+	if port == 0 {
 		port = defaultSSHPort
 	}
+	sshAccessMu.Lock()
+	defer sshAccessMu.Unlock()
 
 	// Reconcile first: a stale grant from a previous helper generation must not
 	// be mistaken for the one being created now, and its deadline must not
 	// outlive it.
-	if err := ReconcileTemporarySSHAccess(ctx, config); err != nil {
+	if err := closeTemporarySSHAccess(ctx, config, false); err != nil {
 		return ActionResult{}, fmt.Errorf("reconcile previous temporary SSH access: %w", err)
 	}
 	if existing, err := loadSSHAccessState(config); err == nil && existing.ExpiresAt.After(time.Now()) {
@@ -95,9 +104,13 @@ func grantTemporarySSHAccess(ctx context.Context, config ActionConfig, requested
 	}
 
 	daemon := inspectSSHDaemon(ctx, port)
-	mechanism, err := detectFirewallMechanism()
+	receipt := ActionResult{SSHAccess: &rescuev1.TemporarySSHAccess{Port: port, SshdState: daemon}}
+	if !daemon.Reachable {
+		return receipt, errors.New(daemon.Limitation)
+	}
+	mechanism, err := detectFirewallMechanism(ctx)
 	if err != nil {
-		return ActionResult{}, err
+		return receipt, err
 	}
 
 	granted := time.Now()
@@ -108,33 +121,34 @@ func grantTemporarySSHAccess(ctx context.Context, config ActionConfig, requested
 		ExpiresAt: expires,
 		Mechanism: mechanism,
 	}
+	if mechanism == mechanismNftablesSet {
+		state.NftChain, err = resolveSSHInputChain(ctx)
+		if err != nil {
+			return receipt, err
+		}
+	}
 
 	// The state file is written before the rule is installed. A crash between
 	// the two leaves a deadline with no rule, which reconciliation cleans up
 	// harmlessly; the reverse order would leave a rule with no deadline.
 	if err := saveSSHAccessState(config, state); err != nil {
-		return ActionResult{}, fmt.Errorf("persist temporary SSH access deadline: %w", err)
+		return receipt, fmt.Errorf("persist temporary SSH access deadline: %w", err)
 	}
 
 	// Unlike network isolation, opening a port does not sever the control
 	// plane connection, so there is no reason to defer it past the report.
 	// Applying it now is what lets the reported state describe what actually
 	// happened rather than what was about to be attempted.
-	expiry, err := installSSHAccessRule(ctx, config, port, mechanism)
+	expiry, err := installSSHAccessRule(ctx, config, state)
 	if err != nil {
-		_ = removeSSHAccessState(config)
-		return ActionResult{}, err
+		// A cancellation can interrupt the command after the firewall applied it.
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if mechanism == mechanismNftablesSet || mechanism == mechanismIptables {
+			return receipt, errors.Join(err, revokeSSHAccess(cleanup, config, state))
+		}
+		return receipt, err
 	}
-	state.Expiry = expiry
-	if err := saveSSHAccessState(config, state); err != nil {
-		// The rule is already installed, so the deadline must be recorded or
-		// reconciliation cannot close the window. Roll back rather than leave
-		// an unbounded grant.
-		_ = removeSSHAccessRule(ctx, state)
-		_ = cancelSSHAccessTimer(ctx)
-		return ActionResult{}, fmt.Errorf("persist temporary SSH access mechanism: %w", err)
-	}
-
 	return ActionResult{
 		SSHAccess: &rescuev1.TemporarySSHAccess{
 			Port:            port,
@@ -151,6 +165,8 @@ func revokeTemporarySSHAccess(ctx context.Context, config ActionConfig) (ActionR
 	if !isPrivileged() {
 		return ActionResult{}, errors.New("temporary SSH access requires a privileged rescue helper")
 	}
+	sshAccessMu.Lock()
+	defer sshAccessMu.Unlock()
 	state, err := loadSSHAccessState(config)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -180,6 +196,8 @@ func revokeTemporarySSHAccess(ctx context.Context, config ActionConfig) (ActionR
 // helper calls it on startup and around each lease, so a rule whose kernel
 // timeout or timer was lost is still removed.
 func ReconcileTemporarySSHAccess(ctx context.Context, config ActionConfig) error {
+	sshAccessMu.Lock()
+	defer sshAccessMu.Unlock()
 	return closeTemporarySSHAccess(ctx, config, false)
 }
 
@@ -190,6 +208,8 @@ func ReconcileTemporarySSHAccess(ctx context.Context, config ActionConfig) error
 // decide the window is still valid and leave the port open, which is the one
 // outcome this whole mechanism exists to prevent.
 func CloseTemporarySSHAccess(ctx context.Context, config ActionConfig) error {
+	sshAccessMu.Lock()
+	defer sshAccessMu.Unlock()
 	return closeTemporarySSHAccess(ctx, config, true)
 }
 
@@ -226,22 +246,12 @@ func sweepOrphanedSSHAccess(ctx context.Context) error {
 }
 
 func revokeSSHAccess(ctx context.Context, config ActionConfig, state sshAccessState) error {
-	var failures []string
 	if err := removeSSHAccessRule(ctx, state); err != nil {
-		failures = append(failures, err.Error())
+		return fmt.Errorf("revoke temporary SSH access: %w", err)
 	}
 	// The timer is cancelled even when the rule is already gone, so a stale
 	// unit cannot fire against a port granted later.
-	if err := cancelSSHAccessTimer(ctx); err != nil {
-		failures = append(failures, err.Error())
-	}
-	if err := removeSSHAccessState(config); err != nil {
-		failures = append(failures, err.Error())
-	}
-	if len(failures) > 0 {
-		return errors.New("revoke temporary SSH access: " + strings.Join(failures, "; "))
-	}
-	return nil
+	return errors.Join(cancelSSHAccessTimer(ctx), removeSSHAccessState(config))
 }
 
 // detectFirewallMechanism picks the tool that owns packet filtering here.
@@ -250,15 +260,15 @@ func revokeSSHAccess(ctx context.Context, config ActionConfig, state sshAccessSt
 // underlying chains behind it gets reverted on its next reload. A bare
 // nftables host gets our own table plus a set element timeout, which is the
 // only kernel-enforced expiry available.
-func detectFirewallMechanism() (sshAccessMechanism, error) {
+func detectFirewallMechanism(ctx context.Context) (sshAccessMechanism, error) {
 	if path, err := exec.LookPath("ufw"); err == nil {
-		if output, runErr := exec.Command(path, "status").Output(); runErr == nil &&
+		if output, runErr := exec.CommandContext(ctx, path, "status").Output(); runErr == nil &&
 			strings.Contains(strings.ToLower(string(output)), "status: active") {
 			return mechanismUFW, nil
 		}
 	}
 	if path, err := exec.LookPath("firewall-cmd"); err == nil {
-		if err := exec.Command(path, "--state").Run(); err == nil {
+		if err := exec.CommandContext(ctx, path, "--state").Run(); err == nil {
 			return mechanismFirewalld, nil
 		}
 	}
@@ -274,10 +284,11 @@ func detectFirewallMechanism() (sshAccessMechanism, error) {
 // installSSHAccessRule takes the mechanism the caller already resolved, so the
 // rule that is installed and the mechanism recorded for revocation cannot
 // disagree if the host's firewall tooling changes between the two calls.
-func installSSHAccessRule(ctx context.Context, config ActionConfig, port uint32, mechanism sshAccessMechanism) (rescuev1.ExpiryMechanism, error) {
-	switch mechanism {
+func installSSHAccessRule(ctx context.Context, config ActionConfig, state sshAccessState) (rescuev1.ExpiryMechanism, error) {
+	port := state.Port
+	switch state.Mechanism {
 	case mechanismNftablesSet:
-		if err := installNftablesSSHAccess(ctx, config, port); err != nil {
+		if err := installNftablesSSHAccess(ctx, config, state); err != nil {
 			return rescuev1.ExpiryMechanism_EXPIRY_MECHANISM_UNSPECIFIED, err
 		}
 		// The element carries its own timeout, so the kernel closes the window
@@ -317,6 +328,9 @@ func removeSSHAccessRule(ctx context.Context, state sshAccessState) error {
 	port := strconv.FormatUint(uint64(state.Port), 10)
 	switch state.Mechanism {
 	case mechanismNftablesSet:
+		if state.NftChain != nil {
+			return removeSSHInputRule(ctx, *state.NftChain)
+		}
 		return deleteNftablesSSHAccess(ctx)
 	case mechanismUFW:
 		if _, stderr, err := platformCommand(ctx, "ufw", "delete", "allow", fmt.Sprintf("%s/tcp", port)); err != nil {
@@ -341,21 +355,25 @@ func removeSSHAccessRule(ctx context.Context, state sshAccessState) error {
 	return nil
 }
 
-func installNftablesSSHAccess(ctx context.Context, config ActionConfig, port uint32) error {
-	// The set is declared with a timeout flag and the rule matches the set, so
-	// the port stops being accepted when the element expires without anything
-	// having to delete a rule.
+func installNftablesSSHAccess(ctx context.Context, config ActionConfig, state sshAccessState) error {
 	script := fmt.Sprintf(`table inet %[1]s {
 	set %[2]s {
 		type inet_service
 		flags timeout
+		elements = { %[3]d timeout %[4]s }
 	}
 	chain input {
 		type filter hook input priority -150; policy accept;
 		tcp dport @%[2]s accept
 	}
 }
-`, temporarySSHTable, temporarySSHSet)
+`, temporarySSHTable, temporarySSHSet, state.Port, durationForNft(temporarySSHDuration))
+	if state.NftChain != nil {
+		chain := state.NftChain
+		script = fmt.Sprintf("add set inet %[1]s %[2]s { type inet_service; flags timeout; elements = { %[3]d timeout %[4]s }; }\n"+
+			"insert rule inet %[1]s %[5]s tcp dport @%[2]s counter accept comment \"%[2]s\"\n",
+			chain.Table, chain.Set, state.Port, durationForNft(temporarySSHDuration), chain.Name)
+	}
 
 	directory := filepath.Dir(sshAccessStatePath(config))
 	if err := os.MkdirAll(directory, 0o700); err != nil {
@@ -376,10 +394,6 @@ func installNftablesSSHAccess(ctx context.Context, config ActionConfig, port uin
 	}
 	if _, stderr, err := platformCommand(ctx, "nft", "-f", path); err != nil {
 		return fmt.Errorf("apply temporary SSH nftables rule: %s: %w", strings.TrimSpace(string(stderr)), err)
-	}
-	element := fmt.Sprintf("{ %d timeout %s }", port, durationForNft(temporarySSHDuration))
-	if _, stderr, err := platformCommand(ctx, "nft", "add", "element", "inet", temporarySSHTable, temporarySSHSet, element); err != nil {
-		return fmt.Errorf("add temporary SSH port element: %s: %w", strings.TrimSpace(string(stderr)), err)
 	}
 	return nil
 }
@@ -455,132 +469,6 @@ func durationForNft(value time.Duration) string {
 	return strconv.Itoa(int(value.Seconds())) + "s"
 }
 
-// inspectSSHDaemon reports whether a login could actually succeed.
-func inspectSSHDaemon(ctx context.Context, port uint32) *rescuev1.SSHDaemonState {
-	state := &rescuev1.SSHDaemonState{}
-	listening, err := listeningTCPPorts()
-	if err == nil {
-		state.ObservedListenPorts = listening
-		for _, candidate := range listening {
-			if candidate == port {
-				state.Reachable = true
-				break
-			}
-		}
-	} else {
-		state.Limitation = "could not read listening sockets: " + err.Error()
-	}
-	state.Running = sshDaemonRunning(ctx)
-	state.ListenAddresses = sshdListenAddresses()
-
-	switch {
-	case !state.Running:
-		state.Limitation = "sshd does not appear to be running, so opening the firewall cannot allow a login"
-	case !state.Reachable && len(state.ObservedListenPorts) > 0:
-		state.Limitation = fmt.Sprintf("nothing is listening on port %d; sshd may be bound to another port or to a private address only", port)
-	}
-	return state
-}
-
-func sshDaemonRunning(ctx context.Context) bool {
-	if _, err := exec.LookPath("systemctl"); err == nil {
-		for _, unit := range []string{"sshd", "ssh"} {
-			if _, _, err := platformCommand(ctx, "systemctl", "is-active", "--quiet", unit); err == nil {
-				return true
-			}
-		}
-	}
-	// Fall back to scanning process names, for hosts without systemd.
-	entries, err := os.ReadDir(procRootDirectory())
-	if err != nil {
-		return false
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		if _, err := strconv.Atoi(entry.Name()); err != nil {
-			continue
-		}
-		comm, err := os.ReadFile(filepath.Join(procRootDirectory(), entry.Name(), "comm"))
-		if err != nil {
-			continue
-		}
-		if strings.TrimSpace(string(comm)) == "sshd" {
-			return true
-		}
-	}
-	return false
-}
-
-// sshdListenAddresses reports the configured bindings, including drop-ins,
-// because a Tailscale-only host commonly restricts sshd to a private address
-// and that is invisible from the firewall alone.
-func sshdListenAddresses() []string {
-	var addresses []string
-	files := []string{"/etc/ssh/sshd_config"}
-	if entries, err := filepath.Glob("/etc/ssh/sshd_config.d/*.conf"); err == nil {
-		files = append(files, entries...)
-	}
-	for _, file := range files {
-		content, err := os.ReadFile(file)
-		if err != nil {
-			continue
-		}
-		for _, line := range strings.Split(string(content), "\n") {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-				continue
-			}
-			fields := strings.Fields(trimmed)
-			if len(fields) >= 2 && strings.EqualFold(fields[0], "ListenAddress") {
-				addresses = append(addresses, fields[1])
-			}
-		}
-	}
-	return uniqueStrings(addresses)
-}
-
-// listeningTCPPorts reads listening sockets straight from the kernel rather
-// than shelling out to ss, keeping the diagnostic cost at a couple of file
-// reads.
-func listeningTCPPorts() ([]uint32, error) {
-	const tcpStateListen = "0A"
-	var ports []uint32
-	var lastErr error
-	found := false
-	for _, name := range []string{"tcp", "tcp6"} {
-		content, err := os.ReadFile(filepath.Join(procRootDirectory(), "net", name))
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		found = true
-		for index, line := range strings.Split(string(content), "\n") {
-			if index == 0 {
-				continue
-			}
-			fields := strings.Fields(line)
-			if len(fields) < 4 || fields[3] != tcpStateListen {
-				continue
-			}
-			_, portHex, ok := strings.Cut(fields[1], ":")
-			if !ok {
-				continue
-			}
-			parsed, err := strconv.ParseUint(portHex, 16, 32)
-			if err != nil {
-				continue
-			}
-			ports = append(ports, uint32(parsed))
-		}
-	}
-	if !found {
-		return nil, lastErr
-	}
-	return uniqueUint32(ports), nil
-}
-
 func procRootDirectory() string {
 	if value := strings.TrimSpace(os.Getenv("HOST_PROC")); value != "" {
 		return value
@@ -614,7 +502,16 @@ func saveSSHAccessState(config ActionConfig, state sshAccessState) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o600)
+	file, err := os.CreateTemp(filepath.Dir(path), ".rescue-temp-ssh-*.json")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	_, writeErr := file.Write(data)
+	if err := errors.Join(writeErr, file.Close()); err != nil {
+		return err
+	}
+	return os.Rename(file.Name(), path)
 }
 
 func loadSSHAccessState(config ActionConfig) (sshAccessState, error) {
