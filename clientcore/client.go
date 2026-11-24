@@ -55,9 +55,10 @@ import (
 )
 
 const (
-	requestDeadline    = 15 * time.Second
-	configDeadline     = 30 * time.Second
-	configPollInterval = 5 * time.Minute
+	requestDeadline           = 15 * time.Second
+	configDeadline            = 30 * time.Second
+	configPollInterval        = 5 * time.Minute
+	agentDuplexProtocolHeader = "X-Komari-Agent-Duplex-Protocol"
 )
 
 var (
@@ -86,6 +87,9 @@ type Client struct {
 	execution      execv1connect.ExecutionServiceClient
 	webssh         websshv1connect.WebSSHServiceClient
 	files          filev1connect.FileServiceClient
+	websshGRPC     websshv1connect.WebSSHServiceClient
+	filesGRPC      filev1connect.FileServiceClient
+	useDuplexGRPC  atomic.Bool
 	endpoint       string
 	tokenMu        sync.RWMutex
 	token          string
@@ -359,6 +363,8 @@ func New(config *flags_pkg.Config, store *runtimeconfig.Store) (*Client, error) 
 	c.execution = execv1connect.NewExecutionServiceClient(wrapWithDPoP(streamHTTPClient, c), baseURL)
 	c.webssh = websshv1connect.NewWebSSHServiceClient(wrapWithDPoP(streamHTTPClient, c), baseURL)
 	c.files = filev1connect.NewFileServiceClient(wrapWithDPoP(streamHTTPClient, c), baseURL)
+	c.websshGRPC = websshv1connect.NewWebSSHServiceClient(wrapWithDPoP(streamHTTPClient, c), baseURL, connect.WithGRPC())
+	c.filesGRPC = filev1connect.NewFileServiceClient(wrapWithDPoP(streamHTTPClient, c), baseURL, connect.WithGRPC())
 
 	return c, nil
 }
@@ -971,7 +977,7 @@ func (c *Client) attachRemoteSession(ctx context.Context, assignment *websshv1.S
 	if err != nil {
 		failedCtx, failedCancel := context.WithTimeout(ctx, requestDeadline)
 		defer failedCancel()
-		failed := c.webssh.AttachSession(failedCtx)
+		failed := c.terminalAttachClient().AttachSession(failedCtx)
 		c.authorize(failed.RequestHeader())
 		failed.RequestHeader().Set("X-Komari-Workspace-Identity", "v1")
 		if attachErr := failed.Send(&websshv1.AttachSessionRequest{Message: &websshv1.AttachSessionRequest_Attach{Attach: &websshv1.AgentSessionAttach{AgentId: c.agentIDValue(), AssignmentId: assignment.AssignmentId, SessionId: assignment.SessionId}}}); attachErr == nil {
@@ -992,7 +998,7 @@ func (c *Client) attachRemoteSession(ctx context.Context, assignment *websshv1.S
 		until = assignment.LeaseExpiresAt.AsTime()
 	}
 	stream := newResumableTerminal(sessionCtx, cancel, until, assignment.SessionId, func(attempt context.Context, after uint64) (terminalConnection, error) {
-		connection := c.webssh.AttachSession(attempt)
+		connection := c.terminalAttachClient().AttachSession(attempt)
 		c.authorize(connection.RequestHeader())
 		connection.RequestHeader().Set("X-Komari-Workspace-Identity", "v1")
 		err := connection.Send(&websshv1.AttachSessionRequest{Message: &websshv1.AttachSessionRequest_Attach{Attach: &websshv1.AgentSessionAttach{AgentId: c.agentIDValue(), AssignmentId: assignment.AssignmentId, SessionId: assignment.SessionId, AfterCommandSequence: after, Resumable: true}}})
@@ -1374,8 +1380,12 @@ func (c *Client) SyncConfig(parent context.Context) error {
 	req := connect.NewRequest(&configv1.GetDesiredConfigRequest{AgentId: c.agentIDValue(), AppliedRevision: after})
 	c.authorize(req.Header())
 	response, err := c.config.GetDesiredConfig(ctx, req)
-	if err != nil || response.Msg.Desired == nil {
+	if err != nil {
 		return err
+	}
+	c.useDuplexGRPC.Store(response.Header().Get(agentDuplexProtocolHeader) == "grpc")
+	if response.Msg.Desired == nil {
+		return nil
 	}
 	c.rememberAgentID(response.Msg.Desired.AgentId)
 	if err := c.applyDesiredConfig(parent, response.Msg.Desired); err != nil {
@@ -1383,6 +1393,20 @@ func (c *Client) SyncConfig(parent context.Context) error {
 	}
 	c.runtimeReconciled = true
 	return nil
+}
+
+func (c *Client) terminalAttachClient() websshv1connect.WebSSHServiceClient {
+	if c.useDuplexGRPC.Load() {
+		return c.websshGRPC
+	}
+	return c.webssh
+}
+
+func (c *Client) fileAttachClient() filev1connect.FileServiceClient {
+	if c.useDuplexGRPC.Load() {
+		return c.filesGRPC
+	}
+	return c.files
 }
 
 func (c *Client) applyDesiredConfig(parent context.Context, desired *configv1.DesiredConfig) error {
