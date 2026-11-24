@@ -21,21 +21,32 @@ import (
 )
 
 func heartbeatFixture(t *testing.T) (*hostops.Trust, func(time.Time, uint64) *configv1.PrivilegedRevision) {
+	trust, sign, _ := heartbeatFixtureWithSigner(t)
+	return trust, sign
+}
+
+func heartbeatFixtureWithSigner(t *testing.T) (*hostops.Trust, func(time.Time, uint64) *configv1.PrivilegedRevision, func(*securityv1.SignedInstruction) *securityv1.SignedEnvelope) {
 	t.Helper()
 	public, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 	trust := &hostops.Trust{AgentID: "node", PanelKeys: []credentials.PinnedKey{{Algorithm: 1, KeyID: "panel", Value: base64.StdEncoding.EncodeToString(public)}}}
+	seal := func(instruction *securityv1.SignedInstruction) *securityv1.SignedEnvelope {
+		payload, err := proto.Marshal(instruction)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &securityv1.SignedEnvelope{Payload: payload, Signatures: []*securityv1.Signature{{Algorithm: 1, KeyId: "panel", Value: ed25519.Sign(key, payload)}}}
+	}
 	sign := func(at time.Time, seq uint64) *configv1.PrivilegedRevision {
 		settings := privileged.Settings{RequiredPrivilegeMode: 2, RescueHelperEnabled: true}
 		revision := &configv1.PrivilegedRevision{AgentId: "node", ProtocolVersion: 2, Revision: 1, UpdateSequence: seq, Privileged: settings.Proto(), ConfigHash: privileged.Hash(settings), State: configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_DELIVERED}
 		body, _ := proto.MarshalOptions{Deterministic: true}.Marshal(revision)
-		payload, _ := proto.Marshal(&securityv1.SignedInstruction{AgentId: "node", Nonce: at.String(), InstructionType: "komari.config.v2.PrivilegedRevision", IssuedAt: timestamppb.New(at), ExpiresAt: timestamppb.New(at.Add(time.Minute)), Body: body})
-		revision.Signature = &securityv1.SignedEnvelope{Payload: payload, Signatures: []*securityv1.Signature{{Algorithm: 1, KeyId: "panel", Value: ed25519.Sign(key, payload)}}}
+		revision.Signature = seal(&securityv1.SignedInstruction{AgentId: "node", Nonce: at.String(), InstructionType: "komari.config.v2.PrivilegedRevision", IssuedAt: timestamppb.New(at), ExpiresAt: timestamppb.New(at.Add(time.Minute)), Body: body})
 		return revision
 	}
-	return trust, sign
+	return trust, sign, seal
 }
 func TestRescueHeartbeatRejectsReplayDelayRegressionAndTampering(t *testing.T) {
 	trust, sign := heartbeatFixture(t)

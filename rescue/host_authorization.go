@@ -14,6 +14,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari-agent/core/credentials"
 	"github.com/komari-monitor/komari-agent/core/hostops"
+	"github.com/komari-monitor/komari-agent/core/signing"
 	"github.com/komari-monitor/komari-agent/requestheaders"
 	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
 	configconnect "github.com/r11234567/komari-proto/gen/go/komari/config/v1/configv1connect"
@@ -93,6 +94,7 @@ func newAuthorizationWatchClient(id credentials.Identity) *http.Client {
 
 type authorizationFrame struct {
 	revision *configv1.PrivilegedRevision
+	revoked  *securityv1.SignedEnvelope
 	err      error
 }
 
@@ -142,7 +144,7 @@ func receiveAuthorization(ctx context.Context, rpc configconnect.PrivilegedDeliv
 			send(authorizationFrame{err: errors.New("panel lacks signed rescue heartbeat support; upgrade panel first")})
 			return
 		}
-		send(authorizationFrame{revision: stream.Msg().Revision})
+		send(authorizationFrame{revision: stream.Msg().Revision, revoked: stream.Msg().GetRescueEnrollmentRevoked()})
 	}
 	err = stream.Err()
 	if err == nil {
@@ -227,6 +229,17 @@ func (h *Helper) watchAuthorization(ctx context.Context) {
 			handoff()
 		case frame := <-frames:
 			now := time.Now()
+			if frame.revoked != nil {
+				disconnect(now, errors.New("rescue enrollment withdrawal frame received"))
+				instruction, err := signing.New(h.hostTrust.Identity(), h.replayGuard).Verify(frame.revoked)
+				if err == nil && instruction.InstructionType == "rescue:ssh-enrollment-revoked:v1" {
+					err = revokeSSHWindowForEnrollment(ctx, h.manifest, string(instruction.Body))
+				}
+				if err != nil {
+					log.Printf("confirm temporary SSH enrollment revocation: %v", err)
+				}
+				continue
+			}
 			if frame.err != nil {
 				disconnect(now, frame.err)
 				continue
@@ -258,9 +271,12 @@ func (h *Helper) watchAuthorization(ctx context.Context) {
 			}
 			backoff = 500 * time.Millisecond
 		case now := <-ticker.C:
-			if changes == nil && now.Sub(lastCredentialCheck) >= 5*time.Second {
+			if now.Sub(lastCredentialCheck) >= 5*time.Second {
 				lastCredentialCheck = now
-				handoff()
+				checkSSHWindowIdentity(ctx, h.manifest)
+				if changes == nil {
+					handoff()
+				}
 			}
 			if frames == nil && !now.Before(nextRetry) {
 				id, ok := readHostIdentity(h.manifest, h.hostTrust)
@@ -276,6 +292,7 @@ func (h *Helper) watchAuthorization(ctx context.Context) {
 				req := connect.NewRequest(&configv1.WatchPrivilegedDeliveryRequest{AgentId: id.AgentID, ProtocolVersion: 2})
 				h.authorize(req.Header())
 				req.Header().Set(authorizationWatchHeader, "v1")
+				req.Header().Set("X-Komari-Rescue-SSH-Window", "v1")
 				frames = make(chan authorizationFrame, 1)
 				if lastFrame.IsZero() || !h.authorized.Load() {
 					lastFrame = now
