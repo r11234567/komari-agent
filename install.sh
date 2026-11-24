@@ -838,7 +838,13 @@ IDENTITY_FIELDS
         fi
         node_id="${identity_fields[0]}"
         node_endpoint="${identity_fields[1]}"
-        if [ -n "$rescue_endpoint" ] && [ "${rescue_endpoint%/}" != "${node_endpoint%/}" ]; then
+        # Agent login stores an HTTPS URL when given a bare panel address.
+        requested_endpoint="${rescue_endpoint#"${rescue_endpoint%%[![:space:]]*}"}"
+        requested_endpoint="${requested_endpoint%"${requested_endpoint##*[![:space:]]}"}"
+        if [[ -n "$requested_endpoint" && "$requested_endpoint" != *://* ]]; then
+            requested_endpoint="https://$requested_endpoint"
+        fi
+        if [ -n "$rescue_endpoint" ] && [ "${requested_endpoint%/}" != "${node_endpoint%/}" ]; then
             log_error "Endpoint differs from the enrolled node; existing credentials are preserved"; exit 1
         fi
         if [ "$metrics_only" != true ]; then
