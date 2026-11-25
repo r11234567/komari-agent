@@ -41,9 +41,7 @@ The Agent and rescue version is embedded with:
 -ldflags="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}"
 ```
 
-Do not remove this without changing the agent update and reporting logic. The
-agent uses `update.CurrentVersion` for update checks and reports it as part of
-basic info.
+The Agent reports `update.CurrentVersion` as part of its basic information.
 
 All Host build matrices also embed the same exact tag as `internal/hostcmd.ReleaseVersion`. A PAM-authorized on-demand rescue install fetches this fixed tag, never `latest` or an Agent-supplied version.
 
@@ -286,41 +284,12 @@ commit. Mark it latest only after Release Binaries and Publish Docker Image also
 succeed. Editing a release does not necessarily trigger a new `published` event;
 to rebuild a corrected tag, return the release to draft and publish it again.
 
-## Auto-Update Interaction
+## Agent upgrades
 
-Stable auto-update behavior:
-
-- The agent calls `update.CheckAndUpdate()` when auto-update is enabled.
-- `CheckAndUpdate()` uses `github.com/rhysd/go-github-selfupdate/selfupdate`.
-- That library's normal latest-release detection skips GitHub prereleases.
-- Therefore stable agents with auto-update enabled should not update to
-  `Snapshot-*` prereleases.
-
-Snapshot auto-update behavior:
-
-- Snapshot builds are identified by the embedded `update.CurrentVersion` prefix
-  `Snapshot-`.
-- Snapshot agents list GitHub releases and select the newest non-draft
-  prerelease whose tag starts with `Snapshot-` and contains the exact platform
-  asset name.
-- Snapshot agents update only to another snapshot prerelease.
-- Snapshot agents running in Docker skip binary self-update when
-  `/.komari-agent-container` exists.
-
-The Docker image tag is not used as the binary version source. The Docker tag is
-always `snapshot` by design. Snapshot binary update decisions use the embedded
-binary version `update.CurrentVersion == Snapshot-yymmddhhMM` and GitHub release
-metadata instead.
-
-Container guidance for future update changes:
-
-- A binary running in Docker can potentially replace `/app/komari-agent`, but
-  that only changes the container's writable layer.
-- After self-update, the current code exits with status `42`; the container needs
-  a restart policy or external supervisor to come back.
-- Recreating the container from the image discards any in-container binary
-  replacement.
-- Prefer image-level updates for Docker deployments.
+Update a service installation with the installer or the administrator-run
+`komari-host update` command. The Agent reports the version embedded in
+`update.CurrentVersion`. Update a container deployment by pulling its image
+and recreating the container.
 
 ## Change Checklist
 
@@ -333,6 +302,6 @@ Before changing these workflows, check:
 - Docker snapshot publishing still keeps the mutable `snapshot` tag.
 - Stable Docker publishing does not run for snapshot prereleases and does not
   publish `latest` for snapshots.
-- Binary asset names still match updater, installer, and Dockerfile expectations.
+- Binary asset names still match installer and Dockerfile expectations.
 - `update.CurrentVersion` is still embedded in all release-producing binaries.
 - Race protection still prevents stale `main` commits from publishing snapshots.

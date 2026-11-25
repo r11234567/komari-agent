@@ -7,85 +7,12 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/creack/pty"
 )
-
-// newTerminalImpl 创建一个新的终端实例。
-// 它会尝试使用环境中配置的默认 shell，如果失败则回退到常见 shell。
-// 优先以交互模式启动 shell，如果不支持则回退到非交互模式。
-func newTerminalImpl() (*terminalImpl, error) {
-	shell := os.Getenv("SHELL")
-	if shell != "" && (!filepath.IsAbs(shell) || filepath.Clean(shell) != shell) {
-		shell = ""
-	}
-	if shell != "" {
-		if _, err := exec.LookPath(shell); err != nil {
-			log.Print("Configured shell is unavailable; falling back")
-			shell = ""
-		}
-	}
-
-	// 回退到默认 shell 列表
-	defaultShells := []string{"zsh", "bash", "sh"}
-	if shell == "" {
-		log.Println("Shell not found or invalid, trying default shells.")
-		for _, s := range defaultShells {
-			if _, err := exec.LookPath(s); err == nil {
-				shell = s
-				log.Printf("Using default shell: %s\n", shell)
-				break
-			}
-		}
-	}
-
-	if shell == "" {
-		return nil, fmt.Errorf("no supported shell found among %v", defaultShells)
-	}
-
-	cmd := buildMotdShellCommand(shell)
-	cmd.Env = append(os.Environ(), // 继承系统环境变量
-		"TERM=xterm-256color", // 设置终端类型，提高兼容性
-		"LANG=C.UTF-8",        // 设置语言环境为 UTF-8
-		"LC_ALL=C.UTF-8",      // 强制所有本地化变量为 UTF-8
-	)
-
-	tty, err := pty.Start(cmd)
-	if err != nil {
-		// 回退到原始启动逻辑（直接启动 shell，再无参数）
-		cmd = exec.Command(shell)
-		cmd.Env = append(os.Environ(),
-			"TERM=xterm-256color",
-			"LANG=C.UTF-8",
-			"LC_ALL=C.UTF-8",
-		)
-		tty, err = pty.Start(cmd)
-		if err != nil {
-			return nil, fmt.Errorf("failed to start pty with argv0 prelude and plain shell: %v", err)
-		}
-	}
-
-	// 设置初始终端大小
-	pty.Setsize(tty, &pty.Winsize{Rows: 24, Cols: 80})
-
-	return &terminalImpl{
-		shell: shell,
-		term: &unixTerminal{
-			tty: tty,
-			cmd: cmd,
-		},
-	}, nil
-}
-
-const motdShellPrelude = "for f in /etc/update-motd.d/*; do [ -e \"$f\" ] && [ -x \"$f\" ] && \"$f\"; done; [ -r /etc/motd ] && cat /etc/motd; exec \"$1\""
-
-func buildMotdShellCommand(shell string) *exec.Cmd {
-	return exec.Command("/bin/sh", "-c", motdShellPrelude, "komari-motd", shell)
-}
 
 // unixTerminal 实现了 Unix 系统下的终端接口。
 type unixTerminal struct {
