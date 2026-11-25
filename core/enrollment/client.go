@@ -112,6 +112,8 @@ func (c *Client) Reauth(ctx context.Context, identity credentials.Identity, prog
 	// locally retained keypair have the same identity.
 
 	next.ControlPlaneKeys = identity.ControlPlaneKeys
+	next.TrustRevision = identity.TrustRevision
+	next.TrustSigningKeyID = identity.TrustSigningKeyID
 	next.PolicyAlgorithms = identity.PolicyAlgorithms
 	next.PolicyRequireAll = identity.PolicyRequireAll
 	next.PolicyMinimumSignatures = identity.PolicyMinimumSignatures

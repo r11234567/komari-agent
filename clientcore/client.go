@@ -5,6 +5,7 @@ package clientcore
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log"
@@ -385,6 +386,9 @@ func (c *Client) Run(ctx context.Context) error {
 	renewalDone := make(chan struct{})
 	go func() { defer close(renewalDone); c.runCredentialRenewal(renewalCtx) }()
 	defer func() { stopRenewal(); <-renewalDone }()
+	trustDone := make(chan struct{})
+	go func() { defer close(trustDone); c.runVerifiedTrustRenewal(renewalCtx) }()
+	defer func() { stopRenewal(); <-trustDone }()
 	initPending := false
 	if err := c.initializeHost(ctx); err != nil {
 		initPending = true
@@ -919,6 +923,11 @@ func (c *Client) attachRemoteSession(ctx context.Context, assignment *websshv1.S
 	if assignment.LeaseExpiresAt == nil || !assignment.LeaseExpiresAt.IsValid() || !time.Now().Before(assignment.LeaseExpiresAt.AsTime()) {
 		return errors.New("terminal assignment lease expired")
 	}
+	body := proto.CloneOf(assignment)
+	body.Envelope = nil
+	if err := c.verifyAgentControl(assignment.GetEnvelope(), body, "", c.replayGuard); err != nil {
+		return fmt.Errorf("verify terminal assignment: %w", err)
+	}
 	startupAt := time.Now()
 	log.Printf("WebSSH session=%s stage=assignment-received", assignment.SessionId)
 	cols, rows := 80, 24
@@ -950,11 +959,15 @@ func (c *Client) attachRemoteSession(ctx context.Context, assignment *websshv1.S
 		until = assignment.LeaseExpiresAt.AsTime()
 	}
 	stream := newResumableTerminal(sessionCtx, cancel, until, assignment.SessionId, func(attempt context.Context, after uint64) (terminalConnection, error) {
+		challenge := make([]byte, 32)
+		if _, err := rand.Read(challenge); err != nil {
+			return nil, err
+		}
 		connection := c.terminalAttachClient().AttachSession(attempt)
 		c.authorize(connection.RequestHeader())
 		connection.RequestHeader().Set("X-Komari-Workspace-Identity", "v1")
-		err := connection.Send(&websshv1.AttachSessionRequest{Message: &websshv1.AttachSessionRequest_Attach{Attach: &websshv1.AgentSessionAttach{AgentId: c.agentIDValue(), AssignmentId: assignment.AssignmentId, SessionId: assignment.SessionId, AfterCommandSequence: after, Resumable: true}}})
-		return connection, err
+		err := connection.Send(&websshv1.AttachSessionRequest{Message: &websshv1.AttachSessionRequest_Attach{Attach: &websshv1.AgentSessionAttach{AgentId: c.agentIDValue(), AssignmentId: assignment.AssignmentId, SessionId: assignment.SessionId, AfterCommandSequence: after, Resumable: true, Challenge: challenge}}})
+		return &signedTerminalConnection{terminalConnection: connection, client: c, assignment: assignment, challenge: challenge}, err
 	})
 	defer stream.close()
 	return runRemoteTerminal(sessionCtx, cancel, stream, pty, assignment.SessionId, startupAt, accountAllowed)
@@ -988,6 +1001,15 @@ func (c *Client) runPingProbes(ctx context.Context) {
 			// A lease normally long-polls. If a proxy or server returns an empty
 			// lease immediately, avoid turning it into a busy request loop.
 			if !retry.Wait(ctx, nil) {
+				return
+			}
+			continue
+		}
+		body := proto.CloneOf(assignment)
+		body.Envelope = nil
+		if err := c.verifyAgentControl(assignment.GetEnvelope(), body, "", c.replayGuard); err != nil {
+			log.Printf("Rejected ping assignment: %v", err)
+			if !retry.Wait(ctx, err) {
 				return
 			}
 			continue
@@ -1034,6 +1056,15 @@ func (c *Client) runReturnRouteProbes(ctx context.Context) {
 		assignment := response.Msg.Assignment
 		if assignment == nil {
 			if !retry.Wait(ctx, nil) {
+				return
+			}
+			continue
+		}
+		body := proto.CloneOf(assignment)
+		body.Envelope = nil
+		if err := c.verifyAgentControl(assignment.GetEnvelope(), body, "", c.replayGuard); err != nil {
+			log.Printf("Rejected return-route assignment: %v", err)
+			if !retry.Wait(ctx, err) {
 				return
 			}
 			continue

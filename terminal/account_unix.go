@@ -24,14 +24,13 @@ func newTerminalAs(username, shell, directory string) (*terminalImpl, error) {
 	if err != nil {
 		return nil, err
 	}
-	if shell == "" {
-		shell, err = accountLoginShell(identity)
-		if err != nil {
-			return nil, err
-		}
+	loginShell, err := accountLoginShell(identity)
+	if err != nil {
+		return nil, err
 	}
-	if !filepath.IsAbs(shell) || filepath.Clean(shell) != shell {
-		return nil, fmt.Errorf("shell must be an absolute path")
+	shell, err = selectAccountShell(loginShell, shell)
+	if err != nil {
+		return nil, err
 	}
 	cmd := buildAccountShellCommand(shell)
 	if err := identity.Configure(cmd, directory); err != nil {
@@ -48,6 +47,17 @@ func newTerminalAs(username, shell, directory string) (*terminalImpl, error) {
 		return nil, fmt.Errorf("start terminal as %s: %w", username, err)
 	}
 	return &terminalImpl{shell: shell, workingDir: cmd.Dir, term: &unixTerminal{tty: tty, cmd: cmd}}, nil
+}
+
+func selectAccountShell(loginShell, requested string) (string, error) {
+	switch filepath.Base(loginShell) {
+	case "nologin", "false":
+		return "", fmt.Errorf("selected account does not allow interactive login")
+	}
+	if requested != "" && requested != loginShell {
+		return "", fmt.Errorf("requested shell differs from the selected account login shell")
+	}
+	return loginShell, nil
 }
 
 // Read the account database, never the Agent's SHELL. getent supports NSS

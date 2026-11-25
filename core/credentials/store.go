@@ -69,7 +69,9 @@ type Identity struct {
 	// instructions, pinned on first contact. Trust here is established on
 	// first use: the operator typed the panel's domain by hand, so recording
 	// what answered is what lets a later substitution be detected.
-	ControlPlaneKeys []PinnedKey `json:"control_plane_keys,omitempty"`
+	ControlPlaneKeys  []PinnedKey `json:"control_plane_keys,omitempty"`
+	TrustRevision     uint64      `json:"trust_revision,omitempty"`
+	TrustSigningKeyID string      `json:"trust_signing_key_id,omitempty"`
 	// PolicyRequireAll and PolicyMinimumSignatures mirror the delivered
 	// verification policy so an offline Agent still enforces the last one it
 	// was told about rather than falling back to something weaker.
@@ -238,11 +240,38 @@ func (s *Store) PinTrustBundle(keys []PinnedKey, algorithms []int32, requireAll 
 	next.PolicyAlgorithms = append([]int32(nil), algorithms...)
 	next.PolicyRequireAll = requireAll
 	next.PolicyMinimumSignatures = minimum
+	next.TrustRevision = 0
+	next.TrustSigningKeyID = ""
 	next.UpdatedAt = time.Now().UTC()
 	if err := s.persist(next); err != nil {
 		return err
 	}
 	s.identity = next
+	return nil
+}
+
+// ApplyVerifiedTrustBundle persists a verified update against the same local
+// identity and revision that were used to validate it.
+func (s *Store) ApplyVerifiedTrustBundle(before, after Identity) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.identity == nil || s.identity.AgentID != before.AgentID || s.identity.KeyID != before.KeyID ||
+		s.identity.Endpoint != before.Endpoint || s.identity.UpdatedAt != before.UpdatedAt ||
+		after.TrustRevision < before.TrustRevision {
+		return errors.New("trust bundle commit conflict")
+	}
+	next := s.identity.clone()
+	next.ControlPlaneKeys = after.ControlPlaneKeys
+	next.PolicyAlgorithms = after.PolicyAlgorithms
+	next.PolicyRequireAll = after.PolicyRequireAll
+	next.PolicyMinimumSignatures = after.PolicyMinimumSignatures
+	next.TrustRevision = after.TrustRevision
+	next.TrustSigningKeyID = after.TrustSigningKeyID
+	next.UpdatedAt = time.Now().UTC()
+	if err := s.persist(next); err != nil {
+		return err
+	}
+	s.identity = next.clone()
 	return nil
 }
 
@@ -378,6 +407,12 @@ func (s *Store) CommitRefresh(before, after Identity) error {
 		return errors.New("credential generation did not advance once")
 	}
 	next := after.clone()
+	next.ControlPlaneKeys = s.identity.ControlPlaneKeys
+	next.PolicyAlgorithms = s.identity.PolicyAlgorithms
+	next.PolicyRequireAll = s.identity.PolicyRequireAll
+	next.PolicyMinimumSignatures = s.identity.PolicyMinimumSignatures
+	next.TrustRevision = s.identity.TrustRevision
+	next.TrustSigningKeyID = s.identity.TrustSigningKeyID
 	next.PendingRefresh = nil
 	next.EnrolledAt = s.identity.EnrolledAt
 	next.UpdatedAt = time.Now().UTC()

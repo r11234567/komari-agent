@@ -12,6 +12,19 @@ import (
 	"time"
 )
 
+func TestSelectAccountShellFollowsLocalLoginPolicy(t *testing.T) {
+	for _, requested := range []string{"", "/bin/bash"} {
+		if shell, err := selectAccountShell("/bin/bash", requested); err != nil || shell != "/bin/bash" {
+			t.Fatalf("shell=%q err=%v", shell, err)
+		}
+	}
+	for _, entry := range [][2]string{{"/bin/bash", "/bin/sh"}, {"/usr/sbin/nologin", ""}, {"/bin/false", "/bin/false"}} {
+		if _, err := selectAccountShell(entry[0], entry[1]); err == nil {
+			t.Fatalf("accepted invalid shell selection %v", entry)
+		}
+	}
+}
+
 func TestLoginShellUsesSelectedAccount(t *testing.T) {
 	passwd := "daemon:x:1:1::/:/usr/sbin/nologin\nalice:x:1001:1001::/home/alice:/bin/bash\n"
 	for _, test := range []struct{ name, uid, want string }{
