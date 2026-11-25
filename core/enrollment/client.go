@@ -247,14 +247,9 @@ func (c *Client) Refresh(ctx context.Context, identity credentials.Identity) (cr
 		return identity, errors.New("persist a pending refresh request before sending")
 	}
 	// Establish trust before rotating: a trust-fetch failure must not strand a
-	// newly issued pair. Existing protected host pins override file-owned pins.
+	// newly issued pair. The caller supplies the existing local pins.
 	if len(identity.ControlPlaneKeys) == 0 {
-		keys, algorithms, all, minimum, err := c.FetchTrustBundle(ctx, identity.AgentID)
-		if err != nil || len(keys) == 0 {
-			return identity, errors.New("no pinned control plane signing keys available")
-		}
-		identity.ControlPlaneKeys, identity.PolicyAlgorithms = keys, algorithms
-		identity.PolicyRequireAll, identity.PolicyMinimumSignatures = all, minimum
+		return identity, errors.New("no panel signing key is pinned; install the verified key with 'komari-agent trust refresh --public-key'")
 	}
 	proof, err := signRefreshV2(identity)
 	if err != nil {

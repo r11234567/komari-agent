@@ -144,7 +144,7 @@ func (v *Verifier) verifyEnvelopeSignatures(envelope *securityv1.SignedEnvelope,
 	}
 	if len(v.keys) == 0 {
 		return "", errors.New(
-			"no panel signing keys are pinned, so this instruction cannot be verified; run 'komari-agent trust refresh'")
+			"no panel signing keys are pinned; install the verified key with 'komari-agent trust refresh --public-key'")
 	}
 	payload := envelope.GetPayload()
 	if len(payload) == 0 {
