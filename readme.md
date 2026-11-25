@@ -20,25 +20,17 @@ Komari Agent 是面向现代跨平台基础设施的监控与远程运维探针�
 
 ### 1. Linux 一键安装
 
-```bash
-# 默认安全安装（非 root 账号 komari 运行）
-curl -fsSL 'https://raw.githubusercontent.com/r11234567/komari-agent/main/install.sh' | sudo bash
-
-# 指定面板地址；安装后按提示执行 login 完成注册
-curl -fsSL 'https://raw.githubusercontent.com/r11234567/komari-agent/main/install.sh' | sudo bash -s -- -e "https://panel.example.com"
-```
+从面板复制 Linux 安装命令，或按[安装器下载与校验](docs/service-startup.md#安装器下载与校验)操作。安装后按提示执行 `login` 完成注册。
 
 ### 2. Windows 管理员 PowerShell 安装
 
-```powershell
-$script = irm 'https://raw.githubusercontent.com/r11234567/komari-agent/main/install.ps1'
-& ([scriptblock]::Create($script)) -e "https://panel.example.com"
-```
+以管理员身份打开 PowerShell，运行[安装器下载与校验](docs/service-startup.md#安装器下载与校验)中的 Windows 命令。
 
 ### 3. macOS 安装
 
+按[安装器下载与校验](docs/service-startup.md#安装器下载与校验)完成安装后注册并启动服务。
+
 ```bash
-curl -fsSL 'https://raw.githubusercontent.com/r11234567/komari-agent/main/install.sh' | sudo bash -s -- -e "https://panel.example.com"
 sudo -u _komari /usr/local/komari/agent login --endpoint "https://panel.example.com"
 sudo launchctl kickstart -k system/com.komari.komari-agent
 ```
@@ -174,28 +166,18 @@ sudo komari-host restore --manifest /etc/komari/services/SERVICE.json
 
 ### 1. Linux / macOS 卸载
 
+先按[安装器下载与校验](docs/service-startup.md#安装器下载与校验)下载并校验 `install.sh`，然后执行：
+
 ```bash
-# 方式 A：使用一键卸载脚本（推荐）
-sudo komari-uninstall
-
-# 方式 B：使用安装脚本的卸载参数
-curl -fsSL 'https://raw.githubusercontent.com/r11234567/komari-agent/main/install.sh' | sudo bash -s -- --uninstall
-
-# 彻底清理（包括删除 komari 服务专用账号）
-sudo /opt/komari/uninstall.sh --purge-user
+sudo bash ./install.sh --uninstall
 ```
 
 ### 2. Windows 卸载
 
-以管理员身份打开 PowerShell：
+以管理员身份打开 PowerShell，下载并校验 `install.ps1` 后执行：
 
 ```powershell
-# 使用安装目录卸载
-& "$env:ProgramFiles\Komari\install.ps1" --uninstall
-
-# 或通过网络一键卸载
-$script = irm 'https://raw.githubusercontent.com/r11234567/komari-agent/main/install.ps1'
-& ([scriptblock]::Create($script)) '--uninstall'
+& ([scriptblock]::Create((Get-Content -LiteralPath .\install.ps1 -Raw))) --uninstall
 ```
 
 ### 3. Docker 卸载

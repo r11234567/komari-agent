@@ -97,12 +97,7 @@ Windows 基础 GPU 采集默认开启，可通过普通运行时配置显式关�
 
 日志首次出现 `GPU metrics accepted by panel: devices=... points=...` 表示面板已确认接收包含 GPU 的完整指标批次，每个客户端实例只记录一次。在装有 NVIDIA 驱动的 Windows 测试机上，可设置 `KOMARI_TEST_NVIDIA_GPU=1` 后运行 `go test -run TestWindowsNVIDIAHardwareMetrics -v ./monitoring`，严格验证真实硬件采集和指标转换。普通 CI 没有显卡时跳过这项硬件测试；CSV 解析及协议回归仍正常运行。
 
-在管理员 PowerShell 执行：
-
-```powershell
-$script = irm 'https://raw.githubusercontent.com/r11234567/komari-agent/main/install.ps1'
-& ([scriptblock]::Create($script)) -e 'https://panel.example.com'
-```
+以管理员身份打开 PowerShell，按[安装器下载与校验](#安装器下载与校验)操作。
 
 首次安装没有凭据时，安装器会等待登录，并输出下面的登录、启动命令。重复运行安装命令会保留共享状态及节点身份；`--install-rescue` 和 `--install-runtime-identity root-or-administrator` 会在改动服务前拒绝。
 
@@ -119,9 +114,29 @@ Get-Content "$env:ProgramFiles\Komari\logs\agent-stderr.log" -Tail 60
 
 NSSM 服务状态为 Running 并不总能证明 Agent 子进程存活。安装器设置 5 秒重启间隔，并在启动后复查状态；Paused 或启动异常时输出 stderr 日志和服务管理器事件。默认服务目录、状态目录的权限在 LocalSystem 模式下也会设置，以支持后续降权回 LocalService。
 
-## 验证修复
+## 安装器下载与校验
 
-安装器使用固定发行公钥验证 `.release.json`，并校验组件、版本、系统、架构及文件 SHA-256。若默认稳定版尚未提供签名，请通过 `--install-version` 选择带签名的发布版本。Linux systemd 安装需要同一版本的 Agent 和 Host 签名。
+以下命令固定安装器提交并检查脚本 SHA-256。将 `SIGNED_RELEASE` 替换为[发布页](https://github.com/r11234567/komari-agent/releases)中带当前平台 `.release.json` 的 tag，面板地址改为自己的 HTTPS 地址。Linux systemd 需要同一 tag 内的 Agent 和 Host 签名。
+
+```bash
+curl -fsSL 'https://raw.githubusercontent.com/r11234567/komari-agent/ee35277e63560af22e08a6b0b4254dc3e6c8302a/install.sh' -o install.sh &&
+printf '%s  %s\n' '538e9caf04d7276666cc2811e82e670e04ffa7d70ca94f84fe67c55d982209f6' install.sh | sha256sum -c - &&
+sudo bash ./install.sh --install-version 'SIGNED_RELEASE' -e 'https://panel.example.com'
+```
+
+macOS 将 `sha256sum` 换成 `shasum -a 256`。
+
+```powershell
+Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -Uri 'https://raw.githubusercontent.com/r11234567/komari-agent/ee35277e63560af22e08a6b0b4254dc3e6c8302a/install.ps1' -OutFile .\install.ps1
+if ((Get-FileHash -LiteralPath .\install.ps1 -Algorithm SHA256).Hash -ne '9df1e67e5613064046d9fdbe898c74fa87b66aafdb238e9512b205d04fa7dcb4') {
+    throw 'Installer SHA-256 mismatch'
+}
+& ([scriptblock]::Create((Get-Content -LiteralPath .\install.ps1 -Raw))) --install-version 'SIGNED_RELEASE' -e 'https://panel.example.com'
+```
+
+安装器用固定发行公钥验证 `.release.json`，再核对组件、版本、系统、架构和文件 SHA-256。
+
+## 验证修复
 
 `go test ./cmd ./clientcore ./core/credentials` 验证路径选择、显式覆盖、环境变量优先级、注册前的写权限检查和客户端凭据处理。
 
