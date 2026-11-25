@@ -105,9 +105,10 @@ jobs:
           CGO_ENABLED: '0'
           VERSION: ${{ needs.prepare.outputs.version }}
         run: bash scripts/ci/build-targets.sh
-      - name: Sign Linux rescue for the exact Snapshot release
-        if: matrix.goos == 'linux'
+      - name: Sign installation artifacts for the exact Snapshot release
+        if: matrix.goos == 'linux' || matrix.goos == 'windows'
         env:
+          RELEASE_OS: ${{ matrix.goos }}
           KOMARI_RELEASE_SIGNING_KEY: ${{ secrets.KOMARI_RELEASE_SIGNING_KEY }}
           KOMARI_RELEASE_SIGNING_KEY_ID: ${{ vars.KOMARI_RELEASE_SIGNING_KEY_ID }}
           SNAPSHOT_VERSION: ${{ needs.prepare.outputs.version }}
@@ -115,8 +116,16 @@ jobs:
         run: |-
           set -euo pipefail
           for arch in $TARGET_ARCHES; do
-            binary="build/linux-$arch/komari-agent-rescue-linux-$arch"
-            bash scripts/ci/run-audit-check.sh "snapshot-sign-$arch" go run scripts/sign-helper-release.go "$binary" "$SNAPSHOT_VERSION" linux "$arch"
+            components=(komari-agent)
+            extension=.exe
+            if [[ "$RELEASE_OS" == linux ]]; then
+              components+=(komari-host komari-agent-rescue)
+              extension=""
+            fi
+            for component in "${components[@]}"; do
+              binary="build/$RELEASE_OS-$arch/$component-$RELEASE_OS-$arch$extension"
+              bash scripts/ci/run-audit-check.sh "snapshot-sign-$component-$arch" go run scripts/sign-helper-release.go "$binary" "$SNAPSHOT_VERSION" "$RELEASE_OS" "$arch"
+            done
           done
       - name: Upload amd64 binaries
         if: contains(format(' {0} ', matrix.arches), ' amd64 ')

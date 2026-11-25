@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/komari-monitor/komari-agent/core/hostops"
 )
@@ -82,12 +83,28 @@ func run() error {
 			return fmt.Errorf("release version, OS and architecture must not be empty")
 		}
 	}
+	osName, arch := os.Args[3], os.Args[4]
+	suffix := "-" + osName + "-" + arch
+	if osName == "windows" {
+		suffix += ".exe"
+	}
+	name := filepath.Base(os.Args[1])
+	var component string
+	for _, candidate := range []string{"komari-agent", "komari-host", "komari-agent-rescue"} {
+		if name == candidate+suffix {
+			component = candidate
+			break
+		}
+	}
+	if component == "" {
+		return fmt.Errorf("unexpected release asset name %q for %s/%s", name, osName, arch)
+	}
 	b, err := os.ReadFile(os.Args[1])
 	if err != nil {
 		return err
 	}
 	hash := sha256.Sum256(b)
-	p, err := json.Marshal(hostops.ReleasePayload{Schema: "komari.release.v1", Component: "komari-agent-rescue", Version: os.Args[2], OS: os.Args[3], Arch: os.Args[4], SHA256: hex.EncodeToString(hash[:])})
+	p, err := json.Marshal(hostops.ReleasePayload{Schema: "komari.release.v1", Component: component, Version: os.Args[2], OS: osName, Arch: arch, SHA256: hex.EncodeToString(hash[:])})
 	if err != nil {
 		return err
 	}
