@@ -157,8 +157,17 @@ func TestRescueAuthorizationWatchSurvivesThirtySeconds(t *testing.T) {
 	t.Logf("verified %d signed heartbeats over %s on one DPoP-authenticated request", count, time.Since(start))
 }
 
+func authorizationWatchTestIdentity(t *testing.T) credentials.Identity {
+	t.Helper()
+	_, private, _, err := credentials.GenerateKeypair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return credentials.Identity{AgentID: "watch-fixture", PrivateKey: private, AccessToken: "watch-token"}
+}
+
 func TestRescueAuthorizationWatchTransportBoundsAndRedirects(t *testing.T) {
-	client := newAuthorizationWatchClient(credentials.Identity{})
+	client := newAuthorizationWatchClient(authorizationWatchTestIdentity(t))
 	if client.Timeout != 0 || authorizationWatchTransport.DialContext == nil || authorizationWatchTransport.TLSHandshakeTimeout <= 0 || authorizationWatchTransport.ResponseHeaderTimeout <= 0 {
 		t.Fatal("stream requires no total timeout and bounded connection/header establishment")
 	}
@@ -191,7 +200,7 @@ func TestRescueAuthorizationWatchContextCancelsStalledHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := time.Now()
-	response, err := newAuthorizationWatchClient(credentials.Identity{}).Do(req)
+	response, err := newAuthorizationWatchClient(authorizationWatchTestIdentity(t)).Do(req)
 	if response != nil {
 		response.Body.Close()
 	}

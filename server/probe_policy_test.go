@@ -24,7 +24,7 @@ func TestProbeAddressPolicyUsesPermittedResolvedIP(t *testing.T) {
 		}
 		return []netip.Addr{netip.MustParseAddr("10.0.0.20"), netip.MustParseAddr("1.1.1.1")}, nil
 	}
-	ip, err := resolveProbeAddress(t.Context(), "probe.example", lookup)
+	ip, err := resolveProbeAddress(t.Context(), "probe.example", "ip", lookup)
 	if err != nil || ip != "1.1.1.1" {
 		t.Fatalf("selected %q, %v", ip, err)
 	}

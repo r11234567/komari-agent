@@ -412,6 +412,30 @@ type trackingReadCloser struct {
 	closed bool
 }
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestDPoPTransportRejectsUnavailableEnrolledSigningKey(t *testing.T) {
+	for _, key := range []string{"", "invalid-base64", "AA=="} {
+		t.Run("key "+key, func(t *testing.T) {
+			base := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				t.Fatal("request reached the network without proof")
+				return nil, nil
+			})}
+			client := WrapWithStaticDPoP(base, credentials.Identity{AgentID: "agent", PrivateKey: key})
+			tracked := &trackingReadCloser{Reader: strings.NewReader("{}")}
+			req := httptest.NewRequest(http.MethodPost, "https://panel.example/komari.metrics.v1.MetricsService/SubmitMetrics", tracked)
+			req.Header.Set("Authorization", "Bearer fixture")
+			if _, err := client.Transport.RoundTrip(req); err == nil || !tracked.closed {
+				t.Fatalf("request error=%v, body closed=%v", err, tracked.closed)
+			}
+		})
+	}
+}
+
 func (r *trackingReadCloser) Close() error {
 	r.closed = true
 	return nil

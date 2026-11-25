@@ -74,6 +74,27 @@ func TestVerifiedTrustRotationPersistsMonotonicRevision(t *testing.T) {
 		})
 	}
 	signed := makeBundle(next, nextPrivate, 2, rotation)
+	for _, status := range []string{"expired", "not yet valid"} {
+		t.Run(status+" initial anchor", func(t *testing.T) {
+			unpinned := before
+			unpinned.TrustSigningKeyID = ""
+			key := current
+			if status == "expired" {
+				key.NotAfter = &now
+			} else {
+				key.NotBefore = now.Add(time.Minute)
+			}
+			unpinned.ControlPlaneKeys = []credentials.PinnedKey{key}
+			if _, err := verifyTrustBundle(unpinned, challenge, signed, now); err == nil {
+				t.Fatal("accepted rotation from an inactive initial trust anchor")
+			}
+		})
+	}
+	bootstrap := before
+	bootstrap.TrustSigningKeyID = ""
+	if _, err := verifyTrustBundle(bootstrap, challenge, signed, now); err != nil {
+		t.Fatalf("valid initial trust anchor rejected: %v", err)
+	}
 	if _, err := verifyTrustBundle(before, bytes.Repeat([]byte{99}, 32), signed, now); err == nil {
 		t.Fatal("bundle accepted without the matching local challenge")
 	}
