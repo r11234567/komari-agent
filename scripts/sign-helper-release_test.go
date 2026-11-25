@@ -89,15 +89,20 @@ func TestReleaseSignerRoundTripAndPreflight(t *testing.T) {
 	if _, err := os.Stat("helper.release.json"); !os.IsNotExist(err) {
 		t.Fatal("preflight created a release manifest")
 	}
+	suffix := "-" + runtime.GOOS + "-" + runtime.GOARCH
+	if runtime.GOOS == "windows" {
+		suffix += ".exe"
+	}
+	name := "komari-agent-rescue" + suffix
 	binary := []byte("test release artifact")
-	if err := os.WriteFile("helper", binary, 0600); err != nil {
+	if err := os.WriteFile(name, binary, 0600); err != nil {
 		t.Fatal(err)
 	}
-	os.Args = []string{"sign-helper-release.go", "helper", "1.2.85", runtime.GOOS, runtime.GOARCH}
+	os.Args = []string{"sign-helper-release.go", name, "1.2.85", runtime.GOOS, runtime.GOARCH}
 	if err := run(); err != nil {
 		t.Fatal(err)
 	}
-	b, err := os.ReadFile("helper.release.json")
+	b, err := os.ReadFile(name + ".release.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,4 +125,28 @@ func TestReleaseSignerRoundTripAndPreflight(t *testing.T) {
 	if _, err := hostops.VerifyRelease(trust, manifest, binary); err == nil {
 		t.Fatal("tampered manifest accepted")
 	}
+	for _, component := range []string{"komari-agent", "komari-host"} {
+		name := component + suffix
+		if err := os.WriteFile(name, binary, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		os.Args[1] = name
+		if err := run(); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(name + ".release.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(data, &manifest); err != nil {
+			t.Fatal(err)
+		}
+		if !ed25519.Verify(public, manifest.Payload, manifest.Signature) {
+			t.Fatal("published metadata signature did not verify")
+		}
+		if err := json.Unmarshal(manifest.Payload, &payload); err != nil || payload.Component != component {
+			t.Fatalf("published metadata identifies %q; want %q: %v", payload.Component, component, err)
+		}
+	}
+
 }
