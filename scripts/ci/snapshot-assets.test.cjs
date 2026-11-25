@@ -5,7 +5,7 @@ const { execFileSync } = require('node:child_process');
 const { mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { basename, join } = require('node:path');
-const { prepareSnapshotAssets, linuxArchitectures, windowsArchitectures } = require('./snapshot-assets.cjs');
+const { prepareSnapshotAssets, linuxArchitectures, windowsArchitectures, darwinArchitectures, freeBSDArchitectures } = require('./snapshot-assets.cjs');
 const version = 'Snapshot-0000000000';
 const fixtureKeys = new Map();
 const prepareFixtureAssets = directory => prepareSnapshotAssets(directory, version, fixtureKeys.get(directory).publisher);
@@ -33,6 +33,12 @@ function fixture(t) {
   }
   for (const arch of windowsArchitectures) {
     addAsset('komari-agent', 'windows', arch);
+  }
+  for (const arch of darwinArchitectures) {
+    addAsset('komari-agent', 'darwin', arch);
+  }
+  for (const arch of freeBSDArchitectures) {
+    addAsset('komari-agent', 'freebsd', arch);
   }
   return directory;
 }
@@ -100,7 +106,7 @@ test('publication rejects missing, untrusted or wrongly bound rescue releases', 
 });
 
 test('publication requires the Agent and Host signatures on supported installer targets', t => {
-  for (const name of ['komari-agent-linux-amd64', 'komari-host-linux-arm64', 'komari-agent-windows-amd64.exe']) {
+  for (const name of ['komari-agent-linux-amd64', 'komari-host-linux-arm64', 'komari-agent-windows-amd64.exe', 'komari-agent-darwin-arm64', 'komari-agent-freebsd-amd64']) {
     const directory = fixture(t);
     unlinkSync(join(directory, name + '.release.json'));
     assert.throws(() => prepareFixtureAssets(directory), /Missing signed release metadata/);

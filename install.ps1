@@ -99,10 +99,18 @@ switch ($env:PROCESSOR_ARCHITECTURE) {
 }
 
 function Get-ReleaseVersion {
-    if (-not [string]::IsNullOrWhiteSpace($InstallVersion)) { return $InstallVersion }
-    # GitHub's latest/download redirect does not consume the unauthenticated
-    # REST API quota shared by every machine behind the same public address.
-    return "latest"
+    $Version = $InstallVersion
+    if ([string]::IsNullOrWhiteSpace($Version)) {
+        $LatestUrl = "https://github.com/$ReleaseRepository/releases/latest"
+        if ($GitHubProxy) { $LatestUrl = "$($GitHubProxy.TrimEnd('/'))/$LatestUrl" }
+        $ResolvedUrl = & "$env:SystemRoot\System32\curl.exe" -fsSL -o NUL -w '%{url_effective}' $LatestUrl
+        Assert-NativeCommand "Resolving the latest release version"
+        $Version = ($ResolvedUrl -split '/')[-1]
+    }
+    if ($Version -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$' -or $Version -eq "latest") {
+        throw "A concrete release tag is required."
+    }
+    return $Version
 }
 
 function Get-ReleaseUrl([string]$Version, [string]$FileName) {
@@ -146,6 +154,61 @@ function Assert-NativeCommand([string]$Description) {
     if ($LASTEXITCODE -ne 0) {
         throw "$Description failed with exit code $LASTEXITCODE"
     }
+}
+
+function Assert-NoReparsePoint([string]$Path) {
+    $Item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($Item -and ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Installation path is a reparse point: $Path"
+    }
+}
+
+function Initialize-ProtectedInstallDirectory([string]$Path, [string]$ServiceSid) {
+    $SystemSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    $AdminSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+    $TrustedInstaller = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+    $Trusted = @($SystemSid.Value, $AdminSid.Value, $TrustedInstaller,
+        [Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
+    $Ancestors = [Collections.Generic.Stack[string]]::new()
+    for ($Parent = [IO.DirectoryInfo]::new($Path); $Parent; $Parent = $Parent.Parent) {
+        $Ancestors.Push($Parent.FullName)
+    }
+    if ($Ancestors.Count -lt 2 -or $Path.StartsWith('\\')) { throw "Choose a local installation directory below the volume root." }
+    while ($Ancestors.Count -gt 0) {
+        $Directory = $Ancestors.Pop()
+        Assert-NoReparsePoint $Directory
+        [IO.Directory]::CreateDirectory($Directory) | Out-Null
+        $Acl = Get-Acl -LiteralPath $Directory
+        if ($Acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin $Trusted) {
+            throw "Installation directory has an untrusted owner: $Directory"
+        }
+        if ($Ancestors.Count -eq 0) { break }
+        $WriteRights = [Security.AccessControl.FileSystemRights]'Write, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership'
+        if ($Directory -eq [IO.Path]::GetPathRoot($Path)) {
+            # The default system volume allows users to create directories at
+            # its root. The next path component is checked independently.
+            $WriteRights = [Security.AccessControl.FileSystemRights]'Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership'
+        }
+        foreach ($Rule in $Acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+            if ($Rule.AccessControlType -eq 'Allow' -and $Rule.IdentityReference.Value -notin $Trusted -and
+                -not ($Rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -and
+                ($Rule.FileSystemRights -band $WriteRights)) {
+                throw "Installation directory has a writable parent: $Directory"
+            }
+        }
+    }
+
+    $ProtectedAcl = [Security.AccessControl.DirectorySecurity]::new()
+    $ProtectedAcl.SetOwner($AdminSid)
+    $ProtectedAcl.SetAccessRuleProtection($true, $false)
+    $ReadSid = [Security.Principal.SecurityIdentifier]::new($ServiceSid)
+    foreach ($Sid in @($SystemSid, $AdminSid, $ReadSid)) {
+        $Rights = if ($Sid -eq $ReadSid) { 'ReadAndExecute' } else { 'FullControl' }
+        $Rule = [Security.AccessControl.FileSystemAccessRule]::new($Sid, $Rights,
+            'ContainerInherit, ObjectInherit', 'None', 'Allow')
+        $ProtectedAcl.AddAccessRule($Rule)
+    }
+    Set-Acl -LiteralPath $Path -AclObject $ProtectedAcl
 }
 
 function Set-ServiceAccount([string]$Name, [string]$Account, [string]$NssmPath) {
@@ -258,25 +321,52 @@ if ($UninstallOnly) {
     exit 0
 }
 
-function Ensure-Nssm {
-    $Existing = Get-Command nssm.exe -ErrorAction SilentlyContinue
-    if ($Existing) { return $Existing.Source }
-    $NssmPath = Join-Path $InstallDir "nssm.exe"
-    if (Test-Path $NssmPath) { return $NssmPath }
-    $ZipPath = Join-Path $env:TEMP "komari-nssm.zip"
-    $ExtractPath = Join-Path $env:TEMP "komari-nssm"
-    Invoke-WebRequest -Uri "https://nssm.cc/release/nssm-2.24.zip" -OutFile $ZipPath -UseBasicParsing
-    Remove-Item $ExtractPath -Recurse -Force -ErrorAction SilentlyContinue
-    Expand-Archive -Path $ZipPath -DestinationPath $ExtractPath -Force
-    $NssmArch = if ($Arch -eq "386") { "win32" } else { "win64" }
-    $Source = Get-ChildItem -Path $ExtractPath -Recurse -Filter nssm.exe |
-        Where-Object { $_.FullName -like "*\$NssmArch\nssm.exe" } |
-        Select-Object -First 1
-    if (-not $Source) { throw "nssm.exe was not found in the downloaded archive" }
-    Copy-Item $Source.FullName $NssmPath -Force
-    Remove-Item $ZipPath -Force -ErrorAction SilentlyContinue
-    Remove-Item $ExtractPath -Recurse -Force -ErrorAction SilentlyContinue
-    return $NssmPath
+function Assert-AgentRelease([string]$Binary, [string]$Manifest, [string]$Version, [string]$Stage) {
+    $GitRoots = @($env:ProgramW6432, $env:ProgramFiles, ${env:ProgramFiles(x86)}) |
+        Where-Object { $_ } | Select-Object -Unique
+    $OpenSSL = $GitRoots | ForEach-Object { Join-Path $_ 'Git\usr\bin\openssl.exe' } |
+        Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+    if (-not $OpenSSL) { throw "Install Git for Windows (system installation) to verify Agent release signatures." }
+    Assert-NoReparsePoint (Split-Path -Parent $OpenSSL)
+    Assert-NoReparsePoint $OpenSSL
+    if ((Get-Item -LiteralPath $Manifest).Length -gt 16384) { throw "Agent release manifest exceeds 16 KiB." }
+    $Signed = Get-Content -LiteralPath $Manifest -Raw | ConvertFrom-Json
+    if ($Signed.key_id -cne 'komari-release-8372cfc532b8f1bf') { throw "Unexpected Agent release publisher key." }
+    $Payload = [Convert]::FromBase64String($Signed.payload)
+    $Signature = [Convert]::FromBase64String($Signed.signature)
+    if ($Signature.Length -ne 64) { throw "Invalid Agent release signature length." }
+    $KeyFile = Join-Path $Stage 'publisher.der'
+    $PayloadFile = Join-Path $Stage 'release.payload'
+    $SignatureFile = Join-Path $Stage 'release.signature'
+    [IO.File]::WriteAllBytes($KeyFile, [Convert]::FromBase64String('MCowBQYDK2VwAyEABii7plda32t+iJAWXT2zBoy3uOiUuLqZa8dLqwmBQ6o='))
+    [IO.File]::WriteAllBytes($PayloadFile, $Payload)
+    [IO.File]::WriteAllBytes($SignatureFile, $Signature)
+    & $OpenSSL pkeyutl -verify -pubin -keyform DER -inkey $KeyFile -rawin -in $PayloadFile -sigfile $SignatureFile | Out-Null
+    Assert-NativeCommand "Verifying the Agent publisher signature"
+    $Release = [Text.Encoding]::UTF8.GetString($Payload) | ConvertFrom-Json
+    $Digest = (Get-FileHash -LiteralPath $Binary -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($Release.schema -cne 'komari.release.v1' -or $Release.component -cne 'komari-agent' -or
+        $Release.version -cne $Version -or $Release.os -cne 'windows' -or $Release.arch -cne $Arch -or
+        $Release.sha256 -cne $Digest) {
+        throw "Agent release component, version, platform or SHA-256 does not match."
+    }
+}
+
+function Get-VerifiedNssm([string]$Stage) {
+    $NssmVersion = '2.24-101-g897c7ad'
+    $ZipPath = Join-Path $Stage 'nssm.zip'
+    $ExtractPath = Join-Path $Stage 'nssm'
+    Invoke-WebRequest -Uri "https://nssm.cc/ci/nssm-$NssmVersion.zip" -OutFile $ZipPath -UseBasicParsing
+    $Digest = (Get-FileHash -LiteralPath $ZipPath -Algorithm SHA256).Hash
+    # Exact archive SHA-256 of the publisher ZIP, also pinned by WinGet.
+    if ($Digest -ne '99F5045FFFBFFB745D67FE3A065A953C4A3D9C253B868892D9B685B0EE7D07B8') {
+        throw "NSSM archive SHA-256 does not match."
+    }
+    Expand-Archive -LiteralPath $ZipPath -DestinationPath $ExtractPath
+    $NssmArch = if ($Arch -eq '386') { 'win32' } else { 'win64' }
+    $Binary = Join-Path $ExtractPath "nssm-$NssmVersion\$NssmArch\nssm.exe"
+    if (-not (Test-Path -LiteralPath $Binary -PathType Leaf)) { throw "NSSM archive is missing the platform executable." }
+    return $Binary
 }
 
 $Version = Get-ReleaseVersion
@@ -296,114 +386,169 @@ $UserTaskName = "$ServiceName-CurrentUser"
 $RescueServiceName = "$ServiceName-rescue"
 $ServiceAccount = "NT AUTHORITY\LocalService"
 $ServiceAccountSid = "*S-1-5-19"
-New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
-New-Item -ItemType Directory -Path $RuntimeStateDir -Force | Out-Null
-if (-not (Test-Path $RuntimeStatePath) -and (Test-Path $LegacyRuntimeStatePath)) {
-    Copy-Item $LegacyRuntimeStatePath $RuntimeStatePath -Force
-}
-
 # Fail before stopping an existing service or replacing its executable. A root
 # rescue installation must not be silently removed by a monitoring update.
 if (Get-Service -Name $RescueServiceName -ErrorAction SilentlyContinue) {
     throw "Existing rescue service $RescueServiceName requires explicit removal before installing monitoring-only mode."
 }
 
-$Nssm = Ensure-Nssm
+$Nssm = Join-Path $InstallDir 'nssm.exe'
 $AgentFile = "komari-agent-windows-$Arch.exe"
-$StagedAgentPath = Join-Path $InstallDir 'komari-agent.download.exe'
+Initialize-ProtectedInstallDirectory $InstallDir 'S-1-5-19'
+foreach ($Path in @($AgentPath, $Nssm, $ServiceConfigPath, $LogDir, $LegacyRuntimeStatePath,
+    (Join-Path $InstallDir 'privileged.json'))) {
+    Assert-NoReparsePoint $Path
+}
+$Stage = Join-Path $InstallDir ".staging-$([Guid]::NewGuid().ToString('N'))"
+$LockPath = Join-Path $InstallDir '.installer.lock'
+Assert-NoReparsePoint $LockPath
+$InstallLock = [IO.File]::Open($LockPath, 'OpenOrCreate', 'ReadWrite', 'None')
+$StagedAgentPath = Join-Path $Stage $AgentFile
+$ManifestPath = Join-Path $Stage 'agent.release.json'
+$Reg = "$env:SystemRoot\System32\reg.exe"
+$Sc = "$env:SystemRoot\System32\sc.exe"
+$ParametersKey = "HKLM\SYSTEM\CurrentControlSet\Services\$ServiceName\Parameters"
+$PreviousParameters = Join-Path $Stage 'previous-service.reg'
+$PreviousService = $null
+$InstalledService = $false
+$Replacing = $false
+$KeepStage = $false
+$Backups = @{}
 try {
+    New-Item -ItemType Directory -Path $Stage | Out-Null
     Invoke-WebRequest -Uri (Get-ReleaseUrl $Version $AgentFile) -OutFile $StagedAgentPath -UseBasicParsing
+    Invoke-WebRequest -Uri (Get-ReleaseUrl $Version "$AgentFile.release.json") -OutFile $ManifestPath -UseBasicParsing
+    Assert-AgentRelease $StagedAgentPath $ManifestPath $Version $Stage
+    $StagedNssm = Get-VerifiedNssm $Stage
+
+    $PreviousService = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'"
+    if ($PreviousService) {
+        if ($PreviousService.PathName.Trim('"') -ne $Nssm -or
+            $PreviousService.StartName -notin @('LocalService', $ServiceAccount)) {
+            throw "Existing service $ServiceName uses a different executable or identity. Migrate it before upgrading."
+        }
+        & $Reg export $ParametersKey $PreviousParameters /y | Out-Null
+        Assert-NativeCommand "Saving the previous service parameters"
+    }
+    foreach ($Path in @($AgentPath, $Nssm, $ServiceConfigPath)) {
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            $Backup = Join-Path $Stage ("previous-" + [IO.Path]::GetFileName($Path))
+            Copy-Item -LiteralPath $Path -Destination $Backup
+            $Backups[$Path] = $Backup
+        }
+        elseif (Test-Path -LiteralPath $Path) { throw "Expected a file at $Path" }
+    }
+
+    foreach ($Directory in @($RuntimeStateDir, $LogDir)) {
+        Assert-NoReparsePoint $Directory
+        New-Item -ItemType Directory -Path $Directory -Force | Out-Null
+        & "$env:SystemRoot\System32\icacls.exe" $Directory /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "${ServiceAccountSid}:(OI)(CI)M" | Out-Null
+        Assert-NativeCommand "Restricting access to $Directory"
+    }
+    $LegacyPrivilegedStatePath = Join-Path $InstallDir 'privileged.json'
+    foreach ($Migration in @(@($RuntimeStatePath, $LegacyRuntimeStatePath), @($PrivilegedStatePath, $LegacyPrivilegedStatePath))) {
+        $Target, $Legacy = $Migration
+        Assert-NoReparsePoint $Target
+        if (-not (Test-Path -LiteralPath $Target) -and (Test-Path -LiteralPath $Legacy -PathType Leaf)) {
+            Copy-Item -LiteralPath $Legacy -Destination $Target
+        }
+    }
+    if ($PreviousService -and $PreviousService.State -ne 'Stopped') {
+        Stop-Service -Name $ServiceName -Force
+    }
+    $Replacing = $true
+    Move-Item -LiteralPath $StagedAgentPath -Destination $AgentPath -Force
+    Move-Item -LiteralPath $StagedNssm -Destination $Nssm -Force
+    # Record the same state paths for the daemon and the enrolling CLI.
+    $KomariArgs += @('--runtime-state-file', $RuntimeStatePath, '--credentials-file', $CredentialsPath,
+        '--privileged-state-file', $PrivilegedStatePath, '--replay-state-file', $ReplayStatePath)
+    $ServiceConfig = @{
+        service_name = $ServiceName
+        service_user = $ServiceAccount
+        init_system = 'windows'
+        credentials_file = $CredentialsPath
+        runtime_state_file = $RuntimeStatePath
+        privileged_state_file = $PrivilegedStatePath
+        replay_state_file = $ReplayStatePath
+    }
+    $StagedConfig = Join-Path $Stage 'service-config.json'
+    [IO.File]::WriteAllText($StagedConfig, ($ServiceConfig | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $StagedConfig -Destination $ServiceConfigPath -Force
+    if (-not $PreviousService) {
+        & $Nssm install $ServiceName $AgentPath | Out-Null
+        Assert-NativeCommand "Installing service $ServiceName"
+        $InstalledService = $true
+        Set-ServiceAccount $ServiceName 'LocalService' $Nssm
+        & $Nssm set $ServiceName Start SERVICE_AUTO_START | Out-Null
+        Assert-NativeCommand "Configuring automatic startup for $ServiceName"
+    }
+    $Parameters = [ordered]@{
+        Application = $AgentPath
+        AppParameters = (Join-Arguments $KomariArgs)
+        AppDirectory = $InstallDir
+        AppStdout = $AgentOutputLog
+        AppStderr = $AgentErrorLog
+        AppRotateFiles = '1'
+        AppRestartDelay = '5000'
+    }
+    foreach ($Parameter in $Parameters.Keys) {
+        & $Nssm set $ServiceName $Parameter $Parameters[$Parameter] | Out-Null
+        Assert-NativeCommand "Configuring $Parameter for $ServiceName"
+    }
+    & $Nssm set $ServiceName AppExit Default Restart | Out-Null
+    Assert-NativeCommand "Configuring restart behavior for $ServiceName"
+
+    $AgentReady = (Test-Path -LiteralPath $CredentialsPath) -or -not [string]::IsNullOrWhiteSpace($AgentToken) -or
+        (@($KomariArgs | Where-Object { $_ -eq '--auto-discovery' -or $_ -like '--auto-discovery=?*' -or $_ -like '--token=?*' -or
+            $_ -like '-t=?*' -or $_ -eq '--config' -or $_ -like '--config=?*' }).Count -gt 0)
+    if ($AgentReady) {
+        try { Start-ServiceAndWait $ServiceName }
+        catch {
+            $Details = Get-ServiceFailureDetails $ServiceName $AgentErrorLog
+            if ($Details) { throw "Starting service $ServiceName failed: $Details" }
+            throw
+        }
+    }
+    else { Log-Info 'Agent service configured for automatic startup; waiting for enrollment before starting.' }
+    if (Get-ScheduledTask -TaskName $UserTaskName -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskName $UserTaskName -Confirm:$false
+    }
 }
 catch {
-    Remove-Item $StagedAgentPath -Force -ErrorAction SilentlyContinue
-    throw
-}
-
-$ExistingTask = Get-ScheduledTask -TaskName $UserTaskName -ErrorAction SilentlyContinue
-if ($ExistingTask) { Unregister-ScheduledTask -TaskName $UserTaskName -Confirm:$false }
-if ($IsAdministrator) {
-    foreach ($Name in @($ServiceName)) {
-        $ExistingService = Get-Service -Name $Name -ErrorAction SilentlyContinue
-        if ($ExistingService) {
-            Stop-Service -Name $Name -Force -ErrorAction SilentlyContinue
-            & (Ensure-Nssm) remove $Name confirm | Out-Null
-            Wait-ServiceAbsent $Name
+    $Failure = $_
+    if ($Replacing) {
+        try {
+            if ($PreviousService -or $InstalledService) { Stop-Service -Name $ServiceName -Force }
+            if ($InstalledService) {
+                & $Sc delete $ServiceName | Out-Null
+                Assert-NativeCommand "Removing the incomplete service"
+                Wait-ServiceAbsent $ServiceName
+            }
+            foreach ($Path in @($AgentPath, $Nssm, $ServiceConfigPath)) {
+                if ($Backups.ContainsKey($Path)) { Copy-Item -LiteralPath $Backups[$Path] -Destination $Path -Force }
+                elseif (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Force }
+            }
+            if ($PreviousService) {
+                & $Reg delete $ParametersKey /f | Out-Null
+                Assert-NativeCommand "Clearing incomplete service parameters"
+                & $Reg import $PreviousParameters | Out-Null
+                Assert-NativeCommand "Restoring the previous service parameters"
+                if ($PreviousService.State -eq 'Running') { Start-ServiceAndWait $ServiceName }
+            }
+        }
+        catch {
+            $KeepStage = $true
+            throw "Install failed: $Failure. Recovery failed: $_. Saved files: $Stage"
         }
     }
+    throw $Failure
+}
+finally {
+    if (-not $KeepStage) { Remove-Item -LiteralPath $Stage -Recurse -Force -ErrorAction SilentlyContinue }
+    $InstallLock.Dispose()
 }
 
-Remove-Item $AgentOutputLog, $AgentErrorLog -Force -ErrorAction SilentlyContinue
-
-Move-Item $StagedAgentPath $AgentPath -Force
-$LegacyPrivilegedStatePath = Join-Path $InstallDir 'privileged.json'
-if (-not (Test-Path $PrivilegedStatePath) -and (Test-Path $LegacyPrivilegedStatePath)) {
-    Copy-Item $LegacyPrivilegedStatePath $PrivilegedStatePath -Force
-}
-# Pass all paths explicitly to NSSM, and record the same defaults for the CLI.
-# LocalService does not share the enrolling user's APPDATA.
-$KomariArgs += @("--runtime-state-file", $RuntimeStatePath, "--credentials-file", $CredentialsPath,
-    "--privileged-state-file", $PrivilegedStatePath, "--replay-state-file", $ReplayStatePath)
-$ServiceConfig = @{
-    service_name = $ServiceName
-    service_user = $ServiceAccount
-    init_system = "windows"
-    credentials_file = $CredentialsPath
-    runtime_state_file = $RuntimeStatePath
-    privileged_state_file = $PrivilegedStatePath
-    replay_state_file = $ReplayStatePath
-}
-[IO.File]::WriteAllText($ServiceConfigPath, ($ServiceConfig | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
-$AgentArgumentLine = Join-Arguments $KomariArgs
-
-$Nssm = Ensure-Nssm
-& $Nssm install $ServiceName $AgentPath | Out-Null
-Assert-NativeCommand "Installing service $ServiceName"
-& $Nssm set $ServiceName AppParameters $AgentArgumentLine | Out-Null
-Assert-NativeCommand "Configuring Agent arguments"
-& $Nssm set $ServiceName AppDirectory $InstallDir | Out-Null
-Assert-NativeCommand "Configuring the working directory for $ServiceName"
-& $Nssm set $ServiceName AppStdout $AgentOutputLog | Out-Null
-Assert-NativeCommand "Configuring stdout logging for $ServiceName"
-& $Nssm set $ServiceName AppStderr $AgentErrorLog | Out-Null
-Assert-NativeCommand "Configuring stderr logging for $ServiceName"
-& $Nssm set $ServiceName AppRotateFiles 1 | Out-Null
-Assert-NativeCommand "Configuring log rotation for $ServiceName"
-Set-ServiceAccount $ServiceName "LocalService" $Nssm
 Log-Success "Monitoring Agent installed as the non-login $ServiceAccount service account."
-# LocalService can execute the Agent but cannot replace its executable or NSSM.
-& icacls.exe $InstallDir /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "${ServiceAccountSid}:(OI)(CI)RX" | Out-Null
-Assert-NativeCommand "Protecting executables in $InstallDir"
-# State, locks and logs must remain writable for the daemon and CLI to agree.
-foreach ($Directory in @($RuntimeStateDir, $LogDir)) {
-    & icacls.exe $Directory /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "${ServiceAccountSid}:(OI)(CI)M" | Out-Null
-    Assert-NativeCommand "Restricting access to $Directory"
-}
-& $Nssm set $ServiceName Start SERVICE_AUTO_START | Out-Null
-Assert-NativeCommand "Configuring automatic startup for $ServiceName"
-& $Nssm set $ServiceName AppExit Default Restart | Out-Null
-Assert-NativeCommand "Configuring restart behavior for $ServiceName"
-& $Nssm set $ServiceName AppRestartDelay 5000 | Out-Null
-Assert-NativeCommand "Configuring the restart delay for $ServiceName"
-$AgentReady = (Test-Path $CredentialsPath) -or -not [string]::IsNullOrWhiteSpace($AgentToken) -or
-    (@($KomariArgs | Where-Object { $_ -eq '--auto-discovery' -or $_ -like '--auto-discovery=?*' -or $_ -like '--token=?*' -or
-        $_ -like '-t=?*' -or $_ -eq '--config' -or $_ -like '--config=?*' }).Count -gt 0)
-if ($AgentReady) {
-    try {
-        Start-ServiceAndWait $ServiceName
-    }
-    catch {
-        $failureDetails = Get-ServiceFailureDetails $ServiceName $AgentErrorLog
-        if ($failureDetails) {
-            throw "Starting service $ServiceName failed: $failureDetails"
-        }
-        throw
-    }
-}
-else {
-    Log-Info "Agent service configured for automatic startup; waiting for enrollment before starting."
-}
-
 Log-Success "Komari Agent $Version installation completed."
 Log-Info "Monitoring only: remote control, WebSSH, remote execution and rescue are disabled. Windows privileged configuration is not supported."
 Log-Info "Runtime identity: $RuntimeIdentity"

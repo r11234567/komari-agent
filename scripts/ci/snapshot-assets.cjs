@@ -4,6 +4,8 @@ const { join, resolve } = require('node:path');
 
 const linuxArchitectures = ['386', 'amd64', 'arm', 'arm64', 'loong64'];
 const windowsArchitectures = ['386', 'amd64', 'arm64'];
+const darwinArchitectures = ['amd64', 'arm64'];
+const freeBSDArchitectures = ['386', 'amd64', 'arm', 'arm64'];
 const linuxComponents = ['komari-agent', 'komari-host', 'komari-agent-rescue'];
 const digest = data => createHash('sha256').update(data).digest('hex');
 
@@ -33,6 +35,8 @@ function prepareSnapshotAssets(directory, version, publisher = JSON.parse(readFi
   const signedTargets = [
     ...linuxArchitectures.flatMap(arch => linuxComponents.map(component => ({ component, os: 'linux', arch }))),
     ...windowsArchitectures.map(arch => ({ component: 'komari-agent', os: 'windows', arch })),
+    ...darwinArchitectures.map(arch => ({ component: 'komari-agent', os: 'darwin', arch })),
+    ...freeBSDArchitectures.map(arch => ({ component: 'komari-agent', os: 'freebsd', arch })),
   ];
   for (const { component, os, arch } of signedTargets) {
     const name = `${component}-${os}-${arch}${os === 'windows' ? '.exe' : ''}`;
@@ -59,7 +63,7 @@ function prepareSnapshotAssets(directory, version, publisher = JSON.parse(readFi
   return [...assets, 'SHA256SUMS'].map(name => join(directory, name));
 }
 
-module.exports = { prepareSnapshotAssets, linuxArchitectures, windowsArchitectures };
+module.exports = { prepareSnapshotAssets, linuxArchitectures, windowsArchitectures, darwinArchitectures, freeBSDArchitectures };
 if (require.main === module) {
   try {
     for (const asset of prepareSnapshotAssets(resolve(process.argv[2] || 'artifacts'), process.argv[3])) console.log(asset);
