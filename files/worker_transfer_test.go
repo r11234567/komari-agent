@@ -3,7 +3,11 @@ package files
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -18,6 +22,7 @@ import (
 	"time"
 
 	pkg_flags "github.com/komari-monitor/komari-agent/cmd/flags"
+	"github.com/komari-monitor/komari-agent/core/credentials"
 	"github.com/komari-monitor/komari-agent/dnsresolver"
 	"github.com/komari-monitor/komari-agent/requestheaders"
 )
@@ -112,18 +117,48 @@ func TestWorkspaceTransferClientIsolatesConfiguredTransport(t *testing.T) {
 
 func TestWorkerTransferRelayHTTPSHTTP2AndFreshCredentials(t *testing.T) {
 	data := []byte("file contents over negotiated HTTP/2")
+	pub, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const nonce = "file-test-nonce"
 	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.ProtoMajor != 2 {
 			t.Errorf("upstream protocol = %s, want HTTP/2", r.Proto)
 		}
-		if r.Header.Get("Authorization") != "Bearer latest-parent-token" || r.URL.Query().Has("token") {
+		if r.URL.Path == "/ping" {
+			if r.Header.Get("Authorization") != "" || r.Header.Get("X-Komari-Agent-Nonce-For") != "file-test-agent" {
+				t.Error("nonce request used the wrong identity or disclosed a credential")
+			}
+			w.Header().Set("DPoP-Nonce", nonce)
+			return
+		}
+		if r.Header.Get("Authorization") != "DPoP latest-parent-token" || r.URL.RawQuery != "" {
 			t.Error("transfer did not use the current parent credential exclusively in its header")
 		}
 		if r.Header.Get("CF-Access-Client-Id") != "fixture-id" || r.Header.Get("CF-Access-Client-Secret") != "fixture-secret" {
 			t.Error("parent Cloudflare Access headers missing")
 		}
-		if r.URL.Query().Get("transfer_token") != "scoped-transfer-token" || r.Header.Get("X-Komari-Transfer-Token") != "scoped-transfer-token" {
+		if r.Header.Get("X-Komari-Transfer-Token") != "scoped-transfer-token" {
 			t.Error("scoped transfer authorization lost")
+		}
+		proof := strings.Split(r.Header.Get("DPoP"), ".")
+		if len(proof) != 3 {
+			t.Error("missing compact DPoP proof")
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		signature, err := base64.RawURLEncoding.DecodeString(proof[2])
+		if err != nil || !ed25519.Verify(pub, []byte(strings.Join(proof[:2], ".")), signature) {
+			t.Error("invalid transfer proof signature")
+		}
+		payload, err := base64.RawURLEncoding.DecodeString(proof[1])
+		var claims struct {
+			Nonce string `json:"nonce"`
+			Mode  string `json:"bm"`
+		}
+		if err != nil || json.Unmarshal(payload, &claims) != nil {
+			t.Error("invalid transfer proof claims")
 		}
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -132,6 +167,9 @@ func TestWorkerTransferRelayHTTPSHTTP2AndFreshCredentials(t *testing.T) {
 		}
 		switch r.URL.Path {
 		case "/api/clients/transfer/download":
+			if claims.Nonce != nonce || claims.Mode != "stream" {
+				t.Error("fixed-length transfer sent without a fresh streaming proof")
+			}
 			if !bytes.Equal(body, data) || r.ContentLength != int64(len(data)) {
 				t.Error("download body or content length changed")
 			}
@@ -165,7 +203,16 @@ func TestWorkerTransferRelayHTTPSHTTP2AndFreshCredentials(t *testing.T) {
 			currentToken.Store("old-parent-token")
 			endpoint, closeRelay, err := newWorkerTransferRelay(t.Context(), map[string]any{
 				"transfer_id": direction, "transfer_token": "scoped-transfer-token",
-			}, authorize)
+			}, ExecutorOptions{
+				AuthorizeTransfer: authorize,
+				WrapTransferClient: func(client *http.Client) *http.Client {
+					return requestheaders.WrapWithDPoP(client, func() (credentials.Identity, bool) {
+						return credentials.Identity{
+							AgentID: "file-test-agent", PrivateKey: base64.StdEncoding.EncodeToString(key),
+						}, true
+					}, nil, nil)
+				},
+			})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -183,7 +230,7 @@ func TestWorkerTransferRelayHTTPSHTTP2AndFreshCredentials(t *testing.T) {
 			}
 			request.Header.Set("Authorization", "Bearer worker-chosen-token")
 			request.Header.Set("CF-Access-Client-Secret", "worker-chosen-secret")
-			request.Header.Set("X-Komari-Transfer-Token", "scoped-transfer-token")
+			request.Header.Set("X-Komari-Transfer-Token", "worker-chosen-secret")
 			response, err := (&http.Client{Timeout: 10 * time.Second}).Do(request)
 			if err != nil {
 				t.Fatal(err)

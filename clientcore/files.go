@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"time"
 
 	"connectrpc.com/connect"
@@ -24,6 +25,9 @@ const (
 func (c *Client) runFileOperations(ctx context.Context) {
 	executor := files.NewExecutor(ctx, files.ExecutorOptions{
 		AuthorizeTransfer: c.authorize,
+		WrapTransferClient: func(client *http.Client) *http.Client {
+			return wrapWithDPoP(client, c)
+		},
 		RootAllowed: func() bool {
 			ok, _ := capability.RootExecutionAllowed()
 			return ok

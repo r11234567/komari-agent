@@ -55,11 +55,8 @@ func TestSendDownloadStreamUsesRawHTTPBody(t *testing.T) {
 		if request.URL.Path != "/api/clients/transfer/transfer-id" {
 			t.Errorf("path = %s", request.URL.Path)
 		}
-		if request.URL.Query().Get("token") != "agent-token" {
-			t.Errorf("token query = %q", request.URL.Query().Get("token"))
-		}
-		if request.URL.Query().Get("transfer_token") != "relay-token" {
-			t.Errorf("transfer token query = %q", request.URL.Query().Get("transfer_token"))
+		if request.URL.RawQuery != "" || request.Header.Get("X-Komari-Transfer-Token") != "relay-token" {
+			t.Errorf("transfer token must only use the request header")
 		}
 		if request.ContentLength != int64(len(data)) {
 			t.Errorf("content length = %d, want %d", request.ContentLength, len(data))

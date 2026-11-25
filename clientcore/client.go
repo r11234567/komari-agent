@@ -228,7 +228,7 @@ func (c *Client) refreshCredentials(ctx context.Context, oldToken string) (resul
 }
 
 func wrapWithDPoP(httpClient *http.Client, client *Client) *http.Client {
-	return requestheaders.WithProtocolNegotiation(requestheaders.WrapWithDPoPAndNonces(httpClient, func() (credentials.Identity, bool) {
+	return requestheaders.WithNonceBootstrap(requestheaders.WrapWithDPoPAndNonces(httpClient, func() (credentials.Identity, bool) {
 		return client.identity()
 	}, func() string {
 		return client.tokenValue()
