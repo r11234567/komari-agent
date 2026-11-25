@@ -138,7 +138,9 @@ func install(args []string, out io.Writer) error {
 	// WorkingDirectory is a unit path directive, not an ExecStart argv item.
 	// Quoting it produces a literal leading quote and systemd rejects the unit.
 	// stateDir contains only a fixed prefix and the validated service ID.
-	unit.WriteString("\nWorkingDirectory=" + stateDir + "\nUser=" + *account + "\nRestart=on-failure\nRestartSec=5\nAmbientCapabilities=CAP_NET_RAW\nCapabilityBoundingSet=CAP_NET_RAW\nNoNewPrivileges=true\n[Install]\nWantedBy=multi-user.target\n")
+	unit.WriteString("\nWorkingDirectory=" + stateDir + "\nUser=" + *account + "\nRestart=on-failure\nRestartSec=5\n")
+	unit.WriteString(agentUnitPrivileges(mode == 1))
+	unit.WriteString("[Install]\nWantedBy=multi-user.target\n")
 	if err = ensureTrustedDir("/etc/systemd/system"); err != nil {
 		return err
 	}
@@ -157,4 +159,11 @@ func install(args []string, out io.Writer) error {
 	}
 	_, err = fmt.Fprintf(out, "Installed agent and non-resident host tool; rescue helper is not installed.\nEnroll as %s: sudo -u %s %s login --endpoint <panel-address>\nThen start: sudo systemctl start %s\n", *account, *account, m.Executable, *service)
 	return err
+}
+
+func agentUnitPrivileges(root bool) string {
+	if root {
+		return "NoNewPrivileges=false\nCapabilityBoundingSet=~\nAmbientCapabilities=\n"
+	}
+	return "NoNewPrivileges=true\nCapabilityBoundingSet=\nCapabilityBoundingSet=CAP_NET_RAW\nAmbientCapabilities=\nAmbientCapabilities=CAP_NET_RAW\n"
 }

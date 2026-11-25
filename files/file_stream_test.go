@@ -491,3 +491,28 @@ func TestLegacyAssignmentOnlyAcceptsTheKnownWireShapes(t *testing.T) {
 		}
 	}
 }
+
+func TestAbortedFirstChunkCanBeRemovedByAnotherWorker(t *testing.T) {
+	resetUploadStreamState(t)
+	spec := uploadStreamSpec{
+		Path: filepath.Join(t.TempDir(), "fixture.bin"), UploadID: "aborted-first",
+		WorkspaceID: "workspace", ChunkCount: 2, TotalSize: 8, ChunkSize: 4,
+		Expected: 4, First: true,
+	}
+	if _, err := writeUploadStreamChunk(spec, bytes.NewReader([]byte("x"))); err == nil {
+		t.Fatal("short chunk unexpectedly succeeded")
+	}
+	uploadChunksMu.Lock()
+	delete(uploadChunks, spec.UploadID)
+	uploadChunksMu.Unlock()
+	args := map[string]interface{}{"upload_id": spec.UploadID, "path": spec.Path}
+	if _, err := cancelFileUploadScoped("other-workspace", args); err == nil {
+		t.Fatal("different workspace removed the staged upload")
+	}
+	if _, err := cancelFileUploadScoped(spec.WorkspaceID, args); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(uploadStagePath(spec.Path, spec.UploadID)); !os.IsNotExist(err) {
+		t.Fatalf("cancel did not remove first-part staging: %v", err)
+	}
+}
