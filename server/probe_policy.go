@@ -64,23 +64,28 @@ func localProbeAddresses() (map[netip.Addr]struct{}, error) {
 	return allowed, nil
 }
 
-func resolveProbeAddress(ctx context.Context, target string, lookup func(context.Context, string, string) ([]netip.Addr, error)) (string, error) {
+func resolveProbeAddress(ctx context.Context, target, network string, lookup func(context.Context, string, string) ([]netip.Addr, error)) (string, error) {
 	allowed, err := localProbeAddresses()
 	if err != nil {
 		return "", err
 	}
+	permitted := func(address netip.Addr) bool {
+		ipv4 := address.Unmap().Is4()
+		return (network == "ip" || (network == "ip4" && ipv4) || (network == "ip6" && !ipv4)) &&
+			probeAddressAllowed(address, allowed)
+	}
 	if address, err := netip.ParseAddr(target); err == nil {
-		if probeAddressAllowed(address, allowed) {
+		if permitted(address) {
 			return address.Unmap().String(), nil
 		}
 		return "", errors.New("probe destination is blocked by local address policy")
 	}
-	addresses, err := lookup(ctx, "ip", target)
+	addresses, err := lookup(ctx, network, target)
 	if err != nil {
 		return "", fmt.Errorf("resolve probe destination: %w", err)
 	}
 	for _, address := range addresses {
-		if probeAddressAllowed(address, allowed) {
+		if permitted(address) {
 			return address.Unmap().String(), nil
 		}
 	}
@@ -88,5 +93,5 @@ func resolveProbeAddress(ctx context.Context, target string, lookup func(context
 }
 
 func resolveIP(ctx context.Context, target string) (string, error) {
-	return resolveProbeAddress(ctx, target, net.DefaultResolver.LookupNetIP)
+	return resolveProbeAddress(ctx, target, "ip", net.DefaultResolver.LookupNetIP)
 }

@@ -12,6 +12,19 @@ import (
 	"golang.org/x/net/ipv4"
 )
 
+func TestReturnRouteUsesLocalProbePolicy(t *testing.T) {
+	t.Setenv(probeAllowIPsEnv, "")
+	if _, err := resolveRouteTarget(t.Context(), "127.0.0.1", 4); err == nil {
+		t.Fatal("accepted a local route target without the node policy")
+	}
+	t.Setenv(probeAllowIPsEnv, "127.0.0.1,::1")
+	for version, target := range map[int]string{4: "127.0.0.1:443", 6: "[::1]:443"} {
+		if _, err := resolveRouteTarget(t.Context(), target, version); err != nil {
+			t.Errorf("rejected permitted IPv%d route target: %v", version, err)
+		}
+	}
+}
+
 func TestResolveRouteTargetLiteralAddress(t *testing.T) {
 	ip, err := resolveRouteTarget(context.Background(), "1.1.1.1", 4)
 	if err != nil || ip.String() != "1.1.1.1" {
@@ -24,7 +37,7 @@ func TestResolveRouteTargetLiteralAddress(t *testing.T) {
 
 func TestProbeReturnRouteConvertsPanicsToErrors(t *testing.T) {
 	assignment := &networkv1.ReturnRouteProbeAssignment{
-		Target: "192.0.2.1", IpVersion: 4, Protocol: "icmp", MaxHops: 1,
+		Target: "1.1.1.1", IpVersion: 4, Protocol: "icmp", MaxHops: 1,
 	}
 	panicProbe := func(context.Context, net.IP, int, time.Duration) ([]*networkv1.ReturnRouteHop, error) {
 		panic("probe panic")

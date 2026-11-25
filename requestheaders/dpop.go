@@ -306,13 +306,16 @@ func (d *DPoPTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	identity, ok := d.Identity()
-	if !ok || identity.PrivateKey == "" {
+	if !ok {
 		return withoutProof()
 	}
 
 	privKey, err := identity.SigningKey()
-	if err != nil || len(privKey) != ed25519.PrivateKeySize {
-		return withoutProof()
+	if err != nil {
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
+		return nil, fmt.Errorf("sign Agent request: %w", err)
 	}
 
 	token := ""

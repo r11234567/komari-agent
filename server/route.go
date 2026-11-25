@@ -67,29 +67,18 @@ func probeReturnRoute(
 	return probeIPv4(ctx, destination, maxHops, hopTimeout)
 }
 
-
 func resolveRouteTarget(ctx context.Context, target string, version int) (net.IP, error) {
 	if host, _, err := net.SplitHostPort(target); err == nil {
 		target = host
 	}
-	if ip := net.ParseIP(strings.Trim(target, "[]")); ip != nil {
-		if (version == 4 && ip.To4() != nil) || (version == 6 && ip.To4() == nil) {
-			return ip, nil
-		}
-		return nil, fmt.Errorf("target does not have the requested IPv%d address", version)
-	}
+	target = strings.Trim(target, "[]")
 	resolveCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	addresses, err := net.DefaultResolver.LookupIP(resolveCtx, "ip", target)
+	address, err := resolveProbeAddress(resolveCtx, target, fmt.Sprintf("ip%d", version), net.DefaultResolver.LookupNetIP)
 	if err != nil {
-		return nil, fmt.Errorf("resolve target: %w", err)
+		return nil, fmt.Errorf("resolve return route target: %w", err)
 	}
-	for _, ip := range addresses {
-		if (version == 4 && ip.To4() != nil) || (version == 6 && ip.To4() == nil) {
-			return ip, nil
-		}
-	}
-	return nil, fmt.Errorf("target does not have the requested IPv%d address", version)
+	return net.ParseIP(address), nil
 }
 
 func traceRouteICMPv4(ctx context.Context, destination net.IP, maxHops int, timeout time.Duration) ([]*networkv1.ReturnRouteHop, error) {

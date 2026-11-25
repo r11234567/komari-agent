@@ -49,7 +49,13 @@ func verifyTrustBundle(identity credentials.Identity, challenge []byte, envelope
 	}
 	anchors := make(map[string]credentials.PinnedKey, len(identity.ControlPlaneKeys))
 	for _, key := range identity.ControlPlaneKeys {
-		if identity.TrustSigningKeyID == "" || key.KeyID == identity.TrustSigningKeyID {
+		if identity.TrustSigningKeyID != "" {
+			if key.KeyID == identity.TrustSigningKeyID {
+				anchors[key.KeyID] = key
+			}
+			continue
+		}
+		if trustKeyActiveAt(key, now) {
 			anchors[key.KeyID] = key
 		}
 	}
@@ -103,7 +109,7 @@ func verifyTrustBundle(identity credentials.Identity, challenge []byte, envelope
 			return identity, errors.New("trust bundle contains an invalid key")
 		}
 		seen[pinned.KeyID] = true
-		if !now.Before(pinned.NotBefore) && (pinned.NotAfter == nil || now.Before(*pinned.NotAfter)) {
+		if trustKeyActiveAt(pinned, now) {
 			keys = append(keys, pinned)
 			if pinned.KeyID == signer && pinned.Value == key.Value && pinned.NotAfter == nil {
 				currentFound = true
@@ -120,6 +126,10 @@ func verifyTrustBundle(identity credentials.Identity, challenge []byte, envelope
 	identity.PolicyRequireAll = policy.GetRequireAll()
 	identity.PolicyMinimumSignatures = policy.GetMinimumSignatures()
 	return identity, nil
+}
+
+func trustKeyActiveAt(key credentials.PinnedKey, now time.Time) bool {
+	return !now.Before(key.NotBefore) && (key.NotAfter == nil || now.Before(*key.NotAfter))
 }
 
 func validTrustSignature(key credentials.PinnedKey, envelope *securityv1.SignedEnvelope) bool {
