@@ -223,7 +223,9 @@ func NetworkSpeed() (totalUp, totalDown, upSpeed, downSpeed uint64, err error) {
 	excludeNics := nicPatterns(config.ExcludeNics)
 
 	// 如果设置了月重置（非0），统计totalUp、totalDown
-	if config.TrafficResetDay != 0 {
+	trafficAccountingMode.Lock()
+	defer trafficAccountingMode.Unlock()
+	if !trafficAccountingMode.panel && config.TrafficResetDay != 0 {
 		netstatic.StartOrContinue() // 确保netstatic在运行
 		now := uint64(time.Now().Unix())
 		resetDay := uint64(utils.GetLastResetDate(int(config.TrafficResetDay), time.Now()).Unix())
