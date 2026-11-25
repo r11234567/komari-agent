@@ -6,6 +6,10 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +19,30 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+func TestRefreshWithoutPanelPinsMakesNoRequest(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer server.Close()
+	client, err := New(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := credentials.Identity{
+		AgentID: "unpinned-agent", Endpoint: server.URL, RefreshToken: "test-refresh",
+		PendingRefresh: &credentials.RefreshAttempt{},
+	}
+	got, err := client.Refresh(t.Context(), identity)
+	if err == nil || !strings.Contains(err.Error(), "--public-key") {
+		t.Fatalf("refresh did not require a locally verified key: %v", err)
+	}
+	if requests.Load() != 0 || len(got.ControlPlaneKeys) != 0 || got.RefreshToken != identity.RefreshToken {
+		t.Fatal("a refresh without a local key contacted the server or mutated the identity")
+	}
+}
 
 func TestVerifyResponseEnvelope_SuccessAndSecurity(t *testing.T) {
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)

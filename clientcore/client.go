@@ -190,6 +190,9 @@ func (c *Client) refreshCredentials(ctx context.Context, oldToken string) (resul
 	if !ok || strings.TrimSpace(identity.RefreshToken) == "" {
 		return errors.New("no refresh token available for credential refresh")
 	}
+	if len(identity.ControlPlaneKeys) == 0 {
+		return errors.New("no panel signing key is pinned; install the verified key with 'komari-agent trust refresh --public-key'")
+	}
 
 	endpoint := c.endpoint
 	if endpoint == "" {
@@ -382,9 +385,6 @@ func (c *Client) Run(ctx context.Context) error {
 	renewalDone := make(chan struct{})
 	go func() { defer close(renewalDone); c.runCredentialRenewal(renewalCtx) }()
 	defer func() { stopRenewal(); <-renewalDone }()
-	// Startup trust bundle self-healing: ensure control plane keys are pinned
-	_ = c.ensureTrustBundle(ctx)
-
 	initPending := false
 	if err := c.initializeHost(ctx); err != nil {
 		initPending = true
@@ -478,56 +478,6 @@ func (c *Client) Run(ctx context.Context) error {
 	// end-to-end HTTP/2 support and can stall behind otherwise valid HTTP/3 or
 	// HTTP/1.1 reverse proxies, while unary Connect works across all transports.
 	return c.runUnaryMetricLoop(ctx)
-}
-
-func (c *Client) ensureTrustBundle(ctx context.Context) error {
-	if c.credentialStore == nil {
-		return nil
-	}
-	identity, ok := c.credentialStore.Identity()
-	if !ok || identity.AgentID == "" {
-		return nil
-	}
-	if len(identity.ControlPlaneKeys) > 0 {
-		return nil
-	}
-	return c.fetchAndPinTrustBundle(ctx, identity.AgentID)
-}
-
-func (c *Client) fetchAndPinTrustBundle(ctx context.Context, agentID string) error {
-	if c.credentialStore == nil {
-		return nil
-	}
-	endpoint := c.endpoint
-	if endpoint == "" && c.cfg != nil {
-		endpoint = c.cfg.Endpoint
-	}
-	if endpoint == "" {
-		if id, ok := c.credentialStore.Identity(); ok && id.Endpoint != "" {
-			endpoint = id.Endpoint
-		}
-	}
-	if endpoint == "" {
-		return errors.New("cannot fetch trust bundle: empty endpoint")
-	}
-	enrollClient, err := enrollment.New(endpoint, nil)
-	if err != nil {
-		return err
-	}
-	fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	keys, algorithms, requireAll, minimum, err := enrollClient.FetchTrustBundle(fetchCtx, agentID)
-	if err != nil {
-		return err
-	}
-	if len(keys) == 0 {
-		return errors.New("control plane returned empty trust bundle")
-	}
-	if err := c.credentialStore.PinTrustBundle(keys, algorithms, requireAll, minimum); err != nil {
-		return err
-	}
-	log.Printf("[SECURITY] Successfully self-healed and pinned %d control plane keys", len(keys))
-	return nil
 }
 
 func (c *Client) runAgentEvents(ctx context.Context) {
@@ -807,11 +757,6 @@ func (c *Client) verifyExecutionAssignment(assignment *execv1.ExecutionAssignmen
 		return nil, errors.New("the panel sent an execution assignment without a SignedEnvelope")
 	}
 	identity, ok := c.identity()
-	if !ok || len(identity.ControlPlaneKeys) == 0 {
-		if err := c.ensureTrustBundle(context.Background()); err == nil {
-			identity, ok = c.identity()
-		}
-	}
 	if !ok || len(identity.ControlPlaneKeys) == 0 {
 		return nil, errors.New("no panel signing keys are pinned; cannot verify signed execution assignment")
 	}

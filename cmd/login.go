@@ -11,6 +11,7 @@ package cmd
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -105,7 +106,7 @@ is the step where a human decides this machine may join.`,
 		if !loginNoPin {
 			if err := pinTrust(ctx, client, store, identity); err != nil {
 				fmt.Fprintf(os.Stderr, "\nWarning: could not pin the panel's signing keys: %v\n", err)
-				fmt.Fprintln(os.Stderr, "Enrollment succeeded. Run 'komari-agent trust refresh' once the panel is reachable.")
+				fmt.Fprintln(os.Stderr, "Enrollment succeeded. Obtain the panel public key from the approval page and run 'komari-agent trust refresh --public-key'.")
 			}
 		}
 
@@ -280,7 +281,7 @@ var trustShowCmd = &cobra.Command{
 		}
 		if len(identity.ControlPlaneKeys) == 0 {
 			fmt.Println("No panel signing keys are pinned.")
-			fmt.Println("Run 'komari-agent trust refresh' to fetch them.")
+			fmt.Println("Run 'komari-agent trust refresh --public-key' with the verified panel key.")
 			return nil
 		}
 		out := cmd.OutOrStdout()
@@ -300,33 +301,44 @@ var trustShowCmd = &cobra.Command{
 
 var trustRefreshCmd = &cobra.Command{
 	Use:   "refresh",
-	Short: "Re-fetch the panel signing keys",
-	Long: `Re-fetch the panel signing keys.
+	Short: "Install a verified panel signing key",
+	Long: `Install the Ed25519 public key obtained through a trusted panel session.
 
-Run this after the panel rotates its keys. Compare the printed fingerprints
-against the panel before relying on them: this replaces what the Agent trusts.`,
+This replaces the Agent credential file's panel pin. Root-managed installations
+also have a separate host trust policy managed by the host administrator.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		store, err := credentials.Open(credentialsPath())
 		if err != nil {
 			return err
 		}
-		identity, ok := store.Identity()
-		if !ok {
-			return errors.New("this machine is not enrolled; run 'komari-agent login' first")
-		}
-		client, err := enrollment.New(identity.Endpoint, dnsresolver.GetHTTPClientWithPreference(30*time.Second, flags.PreferIPVersion))
+		keyValue, err := cmd.Flags().GetString("public-key")
 		if err != nil {
 			return err
 		}
-		ctx, cancel := context.WithTimeout(cmd.Context(), time.Minute)
-		defer cancel()
-		if err := pinTrust(ctx, client, store, identity); err != nil {
+		key, err := pinLocalPanelKey(store, keyValue)
+		if err != nil {
 			return err
 		}
-		fmt.Println("Pinned keys updated. Verify the fingerprints above against the panel.")
+		fmt.Fprintf(cmd.OutOrStdout(), "Pinned panel key %s\nFingerprint %s\n", key.KeyID, enrollment.Fingerprint(key))
 		return nil
 	},
+}
+
+func pinLocalPanelKey(store *credentials.Store, value string) (credentials.PinnedKey, error) {
+	raw, err := base64.StdEncoding.Strict().DecodeString(strings.TrimSpace(value))
+	if err != nil || len(raw) != ed25519.PublicKeySize {
+		return credentials.PinnedKey{}, errors.New("--public-key requires a base64-encoded Ed25519 public key from the panel")
+	}
+	digest := sha256.Sum256(raw)
+	algorithm := int32(securityv1.SignatureAlgorithm_SIGNATURE_ALGORITHM_ED25519)
+	key := credentials.PinnedKey{
+		Algorithm: algorithm,
+		Value:     base64.StdEncoding.EncodeToString(raw),
+		KeyID:     base64.RawURLEncoding.EncodeToString(digest[:16]),
+	}
+	err = store.PinTrustBundle([]credentials.PinnedKey{key}, []int32{algorithm}, false, 1)
+	return key, err
 }
 
 var reauthCmd = &cobra.Command{
@@ -466,6 +478,7 @@ func firstNonEmpty(values ...string) string {
 
 func init() {
 	loginCmd.Flags().BoolVar(&loginNoPin, "no-pin", false, "Skip pinning the panel signing keys during enrollment")
+	trustRefreshCmd.Flags().String("public-key", "", "Verified panel Ed25519 public key in base64")
 	trustCmd.AddCommand(trustShowCmd, trustRefreshCmd)
 	RootCmd.AddCommand(loginCmd, refreshCmd, reauthCmd, statusCmd, logoutCmd, trustCmd)
 }
