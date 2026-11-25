@@ -31,10 +31,6 @@ type Session struct {
 	closeOnce sync.Once
 }
 
-func OpenSession(cols, rows int) (*Session, error) {
-	return openSession(cols, rows, newTerminalImpl)
-}
-
 // OpenSessionAs requires the selected identity; failure never falls back to the Agent.
 func OpenSessionAs(cols, rows int, username, shell, directory string) (*Session, error) {
 	return openSession(cols, rows, func() (*terminalImpl, error) { return newTerminalAs(username, shell, directory) })
