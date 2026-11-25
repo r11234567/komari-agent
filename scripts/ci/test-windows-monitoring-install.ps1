@@ -12,11 +12,10 @@ function Assert-Condition($Condition, [string]$Message) {
 }
 
 try {
-    # Exercise the same in-memory invocation as irm | scriptblock users. Use
-    # the released Agent: fixing this installer must not require a new binary.
+    # Exercise the same in-memory invocation and release selection as users.
+    # The installed binary must be a real, signed published Agent.
     $Installer = [scriptblock]::Create((Get-Content ./install.ps1 -Raw))
-    $Options = @('--install-dir', $InstallDir, '--install-service-name', $ServiceName,
-        '--install-version', 'Snapshot-2611250731', '-e', 'http://127.0.0.1:9')
+    $Options = @('--install-dir', $InstallDir, '--install-service-name', $ServiceName, '-e', 'http://127.0.0.1:9')
     & $Installer @Options
     Assert-Condition ((Get-Service $ServiceName).Status -eq 'Stopped') 'Unenrolled service must wait for login'
     $AgentPath = Join-Path $InstallDir 'komari-agent.exe'

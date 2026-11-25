@@ -88,6 +88,45 @@ except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError)
 PY
 }
 
+# Discover release candidates without trusting their asset contents. The exact
+# version and binaries are still verified by the pinned publisher key.
+resolve_release_version() {
+    local platform="$1" arch="$2" version="$3" host_required="$4"
+    if [ -z "$version" ]; then
+        version=$(curl -fsSL --max-time 30 "https://api.github.com/repos/${release_repository}/releases?per_page=10" |
+            python3 -c '
+import json, re, sys
+
+platform, arch, host_required = sys.argv[1:]
+suffix = f"-{platform}-{arch}.release.json"
+required = {"komari-agent" + suffix}
+if host_required == "true":
+    required.add("komari-host" + suffix)
+snapshots = []
+for release in json.load(sys.stdin):
+    tag = release["tag_name"]
+    names = {asset["name"] for asset in release["assets"]}
+    if release["draft"] or not required.issubset(names) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", tag):
+        continue
+    if not release["prerelease"]:
+        print(tag)
+        break
+    if re.fullmatch(r"Snapshot-[0-9]{10}", tag):
+        snapshots.append(tag)
+else:
+    if snapshots:
+        print(max(snapshots))
+    else:
+        sys.exit("No signed release found for this platform. Specify a signed tag with --install-version.")
+' "$platform" "$arch" "$host_required") || return 1
+    fi
+    if [[ ! "$version" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ || "$version" = latest ]]; then
+        log_error "A concrete release tag is required." >&2
+        return 1
+    fi
+    printf '%s\n' "$version"
+}
+
 # Default values
 service_name="komari-agent"
 target_dir="/usr/lib/komari/komari-agent"
@@ -650,19 +689,8 @@ if [ "$uninstall_only" != true ]; then
     esac
     release_base="https://github.com/${release_repository}/releases"
     [ -z "$github_proxy" ] || release_base="${github_proxy%/}/${release_base}"
-    if [ -n "$install_version" ]; then
-        release_path="download/${install_version}"
-    else
-        # Resolve latest exactly once so agent and host cannot come from two
-        # releases if a publication happens between downloads.
-        latest_url=$(curl -fsSL -o /dev/null -w '%{url_effective}' "${release_base}/latest") || exit 1
-        install_version="${latest_url##*/}"
-        release_path="download/${install_version}"
-    fi
-    if [[ ! "$install_version" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ || "$install_version" = latest ]]; then
-        log_error "A concrete release tag is required."
-        exit 1
-    fi
+    install_version=$(resolve_release_version linux "$arch" "$install_version" true) || exit 1
+    release_path="download/${install_version}"
     ensure_root_dir /var/cache/komari-installer
     staging=$(mktemp -d /var/cache/komari-installer/download.XXXXXXXX) || exit 1
     agent_digest=""
@@ -1288,30 +1316,6 @@ case $arch in
 esac
 log_info "Detected OS: ${GREEN}$os_name${NC}, Architecture: ${GREEN}$arch${NC}"
 
-version_to_install="latest"
-if [ -n "$install_version" ]; then
-    log_info "Attempting to install specified version: ${GREEN}$install_version${NC}"
-    version_to_install="$install_version"
-else
-    log_info "No version specified, installing the latest version."
-fi
-
-# Construct download URL
-file_name="komari-agent-${os_name}-${arch}"
-if [ "$version_to_install" = "latest" ]; then
-    download_path="latest/download"
-else
-    download_path="download/${version_to_install}"
-fi
-
-if [ -n "$github_proxy" ]; then
-    # Use proxy for GitHub releases
-    download_url="${github_proxy}/https://github.com/${release_repository}/releases/${download_path}/${file_name}"
-else
-    # Direct access to GitHub releases
-    download_url="https://github.com/${release_repository}/releases/${download_path}/${file_name}"
-fi
-
 if [ "$os_name" = windows ]; then
     log_error "Use install.ps1 for Windows."
     exit 1
@@ -1320,14 +1324,11 @@ if [ "$rescue_enabled" = true ]; then
     log_error "Rescue installation requires Linux with a running systemd service manager."
     exit 1
 fi
-if [ "$version_to_install" = latest ]; then
-    release_base="https://github.com/${release_repository}/releases"
-    [ -z "$github_proxy" ] || release_base="${github_proxy%/}/${release_base}"
-    latest_url=$(curl -fsSL -o /dev/null -w '%{url_effective}' "$release_base/latest") || exit 1
-    version_to_install="${latest_url##*/}"
-    download_url="$release_base/download/$version_to_install/$file_name"
-fi
-[[ "$version_to_install" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ && "$version_to_install" != latest ]] || exit 1
+version_to_install=$(resolve_release_version "$os_name" "$arch" "$install_version" false) || exit 1
+file_name="komari-agent-${os_name}-${arch}"
+release_base="https://github.com/${release_repository}/releases"
+[ -z "$github_proxy" ] || release_base="${github_proxy%/}/${release_base}"
+download_url="$release_base/download/$version_to_install/$file_name"
 
 stage=$(mktemp -d /tmp/komari-install.XXXXXXXX) || exit 1
 trap 'rm -f -- "$stage/agent" "$stage/agent.release.json"; rmdir -- "$stage"' EXIT
