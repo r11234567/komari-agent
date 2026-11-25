@@ -73,10 +73,8 @@ func buildFileTransferURL(args map[string]interface{}) (string, error) {
 	}
 	base.Path = strings.TrimRight(base.Path, "/") + "/api/clients/transfer/" + url.PathEscape(id)
 	base.RawPath = ""
-	query := base.Query()
-	query.Set("token", pkg_flags.GlobalConfig.Token)
-	query.Set("transfer_token", token)
-	base.RawQuery = query.Encode()
+	base.RawQuery = ""
+	base.ForceQuery = false
 	return base.String(), nil
 }
 
