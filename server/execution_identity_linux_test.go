@@ -152,19 +152,27 @@ func TestRootWebSSHGrantOverridesNeitherDefaultDenyNorLocalUserList(t *testing.T
 
 func TestRootWebSSHGrantUsesSelectedUIDAndRestrictsOrdinaryPTY(t *testing.T) {
 	rootExecutionFixture(t, true)
-	t.Setenv("KOMARI_WORKSPACE_USERS", "root,komari")
-	for _, name := range []string{"root", "komari"} {
+	loginUser := os.Getenv("KOMARI_TERMINAL_TEST_USER")
+	if loginUser == "" {
+		loginUser = os.Getenv("SUDO_USER")
+	}
+	account, err := user.Lookup(loginUser)
+	if err != nil || account.Uid == "0" {
+		t.Fatal("component fixture needs a non-root interactive login account")
+	}
+	t.Setenv("KOMARI_WORKSPACE_USERS", "root,"+loginUser)
+	for _, name := range []string{"root", loginUser} {
 		t.Run(name, func(t *testing.T) {
 			account, err := user.Lookup(name)
 			if err != nil {
 				t.Fatal(err)
 			}
-			session, err := terminal.OpenSessionAs(80, 24, name, "/bin/sh", "/")
+			session, err := terminal.OpenSessionAs(80, 24, name, "", "/")
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer session.Close()
-			_, err = session.Write([]byte("printf '__PTY_UID__%s\\n' \"$(id -u)\"; grep '^NoNewPrivs:' /proc/self/status\n"))
+			_, err = session.Write([]byte("printf '__PTY_UID__%s\\n' \"$(id -u)\"; awk '/^NoNewPrivs:/ {print \"__PTY_PRIVS__\" $2}' /proc/self/status\n"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -175,7 +183,7 @@ func TestRootWebSSHGrantUsesSelectedUIDAndRestrictsOrdinaryPTY(t *testing.T) {
 				for output.Len() < 64<<10 {
 					n, err := session.Read(buffer)
 					output.Write(buffer[:n])
-					if err != nil || strings.Contains(output.String(), "NoNewPrivs:\t0\r\n") || strings.Contains(output.String(), "NoNewPrivs:\t1\r\n") {
+					if err != nil || strings.Contains(output.String(), "__PTY_PRIVS__0") || strings.Contains(output.String(), "__PTY_PRIVS__1") {
 						break
 					}
 				}
@@ -186,7 +194,7 @@ func TestRootWebSSHGrantUsesSelectedUIDAndRestrictsOrdinaryPTY(t *testing.T) {
 				if !strings.Contains(output, "__PTY_UID__"+account.Uid+"\r\n") {
 					t.Fatalf("terminal used the wrong account: %q", output)
 				}
-				if name == "komari" && !strings.Contains(output, "NoNewPrivs:\t1") {
+				if name == loginUser && !strings.Contains(output, "__PTY_PRIVS__1") {
 					t.Fatalf("ordinary terminal could elevate after root permission withdrawal: %q", output)
 				}
 			case <-time.After(3 * time.Second):

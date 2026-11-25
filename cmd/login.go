@@ -301,11 +301,11 @@ var trustShowCmd = &cobra.Command{
 
 var trustRefreshCmd = &cobra.Command{
 	Use:   "refresh",
-	Short: "Install a verified panel signing key",
-	Long: `Install the Ed25519 public key obtained through a trusted panel session.
+	Short: "Refresh panel signing trust or install a verified local pin",
+	Long: `Refresh a signed trust bundle anchored to the existing local pin.
 
-This replaces the Agent credential file's panel pin. Root-managed installations
-also have a separate host trust policy managed by the host administrator.`,
+Use --public-key to install an Ed25519 key obtained through a trusted panel
+session. Root-managed installations also use a separate local host trust policy.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		store, err := credentials.Open(credentialsPath())
@@ -315,6 +315,27 @@ also have a separate host trust policy managed by the host administrator.`,
 		keyValue, err := cmd.Flags().GetString("public-key")
 		if err != nil {
 			return err
+		}
+		if strings.TrimSpace(keyValue) == "" {
+			identity, ok := store.Identity()
+			if !ok || len(identity.ControlPlaneKeys) == 0 {
+				return errors.New("no panel signing key is pinned; supply the verified key using --public-key")
+			}
+			client, err := enrollment.New(identity.Endpoint, dnsresolver.GetHTTPClientWithPreference(10*time.Second, flags.PreferIPVersion))
+			if err != nil {
+				return err
+			}
+			ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second)
+			defer cancel()
+			next, err := client.FetchVerifiedTrustBundle(ctx, identity)
+			if err != nil {
+				return err
+			}
+			if err := store.ApplyVerifiedTrustBundle(identity, next); err != nil {
+				return err
+			}
+			printPanelSigningKeys(cmd.OutOrStdout(), next.ControlPlaneKeys)
+			return nil
 		}
 		key, err := pinLocalPanelKey(store, keyValue)
 		if err != nil {

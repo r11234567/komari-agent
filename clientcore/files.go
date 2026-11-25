@@ -3,6 +3,7 @@ package clientcore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/komari-monitor/komari-agent/core/capability"
 	"github.com/komari-monitor/komari-agent/files"
 	filev1 "github.com/r11234567/komari-proto/gen/go/komari/file/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -83,6 +85,11 @@ func (c *Client) runFileOperations(ctx context.Context) {
 }
 
 func (c *Client) attachFileOperation(parent context.Context, assignment *filev1.FileAssignment, executor *files.Executor) error {
+	body := proto.CloneOf(assignment)
+	body.Envelope = nil
+	if err := c.verifyAgentControl(assignment.GetEnvelope(), body, "file:lease:"+body.GetAssignmentId(), nil); err != nil {
+		return fmt.Errorf("verify file lease: %w", err)
+	}
 	timeout := fileOperationTimeout
 	if assignment.GetTimeoutSeconds() > 0 {
 		timeout = time.Duration(assignment.GetTimeoutSeconds()) * time.Second
@@ -121,12 +128,13 @@ func (c *Client) attachFileOperation(parent context.Context, assignment *filev1.
 	if command == nil {
 		return errors.New("file assignment is missing from the attach response")
 	}
-	if command.GetSystemUser() != assignment.GetSystemUser() ||
-		command.GetWorkspaceId() != assignment.GetWorkspaceId() ||
-		command.GetRequestId() != assignment.GetRequestId() ||
-		command.GetAssignmentId() != assignment.GetAssignmentId() ||
-		command.GetOperation() != assignment.GetOperation() {
-		return errors.New("file assignment binding changed before attach")
+	attached := proto.CloneOf(command)
+	attached.Envelope = nil
+	if !proto.Equal(attached, body) {
+		return errors.New("file assignment parameters changed before attach")
+	}
+	if err := c.verifyAgentControl(command.GetEnvelope(), attached, "file:attach:"+body.GetAssignmentId(), c.replayGuard); err != nil {
+		return fmt.Errorf("verify attached file operation: %w", err)
 	}
 	// Read the server side concurrently so grant expiry closes active workers,
 	// including a long transfer, instead of waiting for the operation to finish.
