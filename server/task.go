@@ -12,24 +12,15 @@ import (
 	ping "github.com/prometheus-community/pro-bing"
 )
 
-func resolveIP(target string) (string, error) {
-	if ip := net.ParseIP(target); ip != nil {
-		return target, nil
-	}
-	addrs, err := net.LookupHost(target)
-	if err != nil || len(addrs) == 0 {
-		return "", errors.New("failed to resolve target")
-	}
-	return addrs[0], nil
-}
-
 func icmpPing(target string, timeout time.Duration) (int64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 	host, _, err := net.SplitHostPort(target)
 	if err != nil {
 		host = target
 	}
 	host = strings.Trim(host, "[]")
-	ip, err := resolveIP(host)
+	ip, err := resolveIP(ctx, host)
 	if err != nil {
 		return -1, err
 	}
@@ -38,7 +29,11 @@ func icmpPing(target string, timeout time.Duration) (int64, error) {
 		return -1, err
 	}
 	pinger.Count = 1
-	pinger.Timeout = timeout
+	deadline, _ := ctx.Deadline()
+	pinger.Timeout = time.Until(deadline)
+	if pinger.Timeout <= 0 {
+		return -1, context.DeadlineExceeded
+	}
 	pinger.SetPrivileged(true)
 	if err := pinger.Run(); err != nil {
 		return -1, err
@@ -51,18 +46,20 @@ func icmpPing(target string, timeout time.Duration) (int64, error) {
 }
 
 func tcpPing(target string, timeout time.Duration) (int64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 	host, port, err := net.SplitHostPort(target)
 	if err != nil {
 		host = target
 		port = "80"
 	}
 	host = strings.Trim(host, "[]")
-	ip, err := resolveIP(host)
+	ip, err := resolveIP(ctx, host)
 	if err != nil {
 		return -1, err
 	}
 	start := time.Now()
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, port), timeout)
+	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort(ip, port))
 	if err != nil {
 		return -1, err
 	}
@@ -71,11 +68,13 @@ func tcpPing(target string, timeout time.Duration) (int64, error) {
 }
 
 func httpPing(target string, timeout time.Duration) (int64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 	targetURL, err := normalizeHTTPPingTarget(target)
 	if err != nil {
 		return -1, err
 	}
-	resolvedIP, err := resolveIP(targetURL.Hostname())
+	resolvedIP, err := resolveIP(ctx, targetURL.Hostname())
 	if err != nil {
 		return -1, err
 	}
@@ -91,13 +90,12 @@ func httpPing(target string, timeout time.Duration) (int64, error) {
 	}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{
-		Timeout:   timeout,
 		Transport: transport,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, targetURL.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL.String(), nil)
 	if err != nil {
 		return -1, err
 	}
