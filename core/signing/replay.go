@@ -27,10 +27,7 @@ import (
 const (
 	fileMode      = 0o600
 	directoryMode = 0o700
-	// maximumEntries bounds the file. Entries are pruned by expiry first, so
-	// this only matters if a panel issues a very large number of instructions
-	// with long expiries; dropping the oldest is safe because they are the
-	// ones whose deadline passes soonest.
+	// maximumEntries bounds admission without evicting any live nonce.
 	maximumEntries = 4096
 )
 
@@ -61,11 +58,15 @@ func DefaultReplayPath() string {
 
 // Consume records a nonce, rejecting one that was already used.
 //
-// expiresAt is how long the nonce must be remembered. Remembering it for
+// expiresAt is the signed expiry, before the clock-skew allowance. Remembering it for
 // exactly as long as the instruction is valid is what makes the record
 // bounded: once the instruction would be refused for being expired anyway,
 // forgetting the nonce costs nothing.
 func (g *ReplayGuard) Consume(nonce string, expiresAt time.Time) error {
+	return g.consume(nonce, expiresAt, time.Now())
+}
+
+func (g *ReplayGuard) consume(nonce string, expiresAt, now time.Time) error {
 	trimmed := strings.TrimSpace(nonce)
 	if trimmed == "" {
 		return errors.New("the instruction carries no nonce")
@@ -79,13 +80,19 @@ func (g *ReplayGuard) Consume(nonce string, expiresAt time.Time) error {
 		// than refusing one instruction and saying why.
 		return fmt.Errorf("replay protection is unavailable: %w", err)
 	}
-	g.pruneLocked(time.Now())
+	g.pruneLocked(now)
 
 	if _, seen := g.entries[trimmed]; seen {
 		return errors.New("this instruction was already carried out; refusing to repeat it")
 	}
 	if expiresAt.IsZero() {
 		return errors.New("the instruction has no expiry, so its nonce could not be retired")
+	}
+	if now.After(expiresAt.Add(maximumClockSkew)) {
+		return errors.New("the instruction is no longer within its validity window")
+	}
+	if len(g.entries) >= maximumEntries {
+		return errors.New("the instruction nonce store is full; wait for outstanding instructions to expire")
 	}
 	g.entries[trimmed] = expiresAt
 
@@ -137,22 +144,9 @@ func (g *ReplayGuard) load() error {
 
 func (g *ReplayGuard) pruneLocked(now time.Time) {
 	for nonce, expiry := range g.entries {
-		if now.After(expiry) {
+		if now.After(expiry.Add(maximumClockSkew)) {
 			delete(g.entries, nonce)
 		}
-	}
-	for len(g.entries) > maximumEntries {
-		oldest := ""
-		var oldestExpiry time.Time
-		for nonce, expiry := range g.entries {
-			if oldest == "" || expiry.Before(oldestExpiry) {
-				oldest, oldestExpiry = nonce, expiry
-			}
-		}
-		if oldest == "" {
-			break
-		}
-		delete(g.entries, oldest)
 	}
 }
 

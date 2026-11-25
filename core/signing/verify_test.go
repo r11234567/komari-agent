@@ -4,6 +4,9 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -185,5 +188,64 @@ func TestVerifyTriesOtherPinnedKeysWhenSignatureOmitsKeyID(t *testing.T) {
 	got, err := New(f.identity, f.replay).Verify(envelope)
 	if err != nil || got.VerifiedBy != "key-1" {
 		t.Fatalf("Verify with omitted ID: instruction=%+v err=%v", got, err)
+	}
+}
+
+func TestNonceRetentionMatchesVerifierClockSkew(t *testing.T) {
+	f := newFixture(t)
+	expiry := time.Now().UTC().Truncate(time.Second)
+	env := f.envelope(t, func(i *securityv1.SignedInstruction) {
+		i.IssuedAt = timestamppb.New(expiry.Add(-time.Minute))
+		i.ExpiresAt = timestamppb.New(expiry)
+	})
+	verifier := New(f.identity, f.replay)
+	verifier.nowFunc = func() time.Time { return expiry.Add(-time.Second) }
+	if _, err := verifier.Verify(env); err != nil {
+		t.Fatal(err)
+	}
+	verifier = New(f.identity, NewReplayGuard(f.replay.path))
+	verifier.nowFunc = func() time.Time { return expiry.Add(maximumClockSkew) }
+	if _, err := verifier.Verify(env); err == nil || !strings.Contains(err.Error(), "already carried out") {
+		t.Fatalf("expected nonce retention through the accepted boundary, got %v", err)
+	}
+}
+
+func TestFullNonceStorePreservesLiveEntriesAndRecovers(t *testing.T) {
+	f := newFixture(t)
+	now := time.Now().UTC()
+	deadline := now.Add(time.Minute)
+	entries := make(map[string]time.Time, maximumEntries)
+	for n := range maximumEntries {
+		entries[fmt.Sprintf("accepted-%d", n)] = deadline
+	}
+	data, err := json.Marshal(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.replay.path, data, fileMode); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.replay.consume("fresh", deadline.Add(time.Hour), now); err == nil || !strings.Contains(err.Error(), "store is full") {
+		t.Fatalf("full store should refuse new entries: %v", err)
+	}
+	if err := f.replay.consume("accepted-0", deadline, now); err == nil || !strings.Contains(err.Error(), "already carried out") {
+		t.Fatalf("live entry should be retained: %v", err)
+	}
+	if err := f.replay.consume("fresh", deadline.Add(time.Hour), deadline.Add(maximumClockSkew+time.Second)); err != nil {
+		t.Fatalf("expired entries should release capacity: %v", err)
+	}
+}
+
+func TestRequireAllEnforcesEveryPolicyAlgorithm(t *testing.T) {
+	f := newFixture(t)
+	envelope := f.envelope(t, nil)
+	f.identity.PolicyAlgorithms = []int32{int32(envelope.Signatures[0].Algorithm), 99}
+	f.identity.PolicyRequireAll = true
+	if _, err := New(f.identity, f.replay).Verify(envelope); err == nil {
+		t.Fatal("the instruction lacks a valid signature for a required algorithm")
+	}
+	f.identity.PolicyRequireAll = false
+	if _, err := New(f.identity, f.replay).Verify(envelope); err != nil {
+		t.Fatalf("one supported signature should satisfy the threshold policy: %v", err)
 	}
 }
