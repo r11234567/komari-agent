@@ -370,6 +370,12 @@ func New(config *flags_pkg.Config, store *runtimeconfig.Store) (*Client, error) 
 }
 
 func (c *Client) Run(ctx context.Context) error {
+	if identity, ok := c.identity(); ok {
+		trafficCtx, stopTraffic := context.WithCancel(ctx)
+		trafficDone := make(chan struct{})
+		go func() { defer close(trafficDone); c.runTrafficSamples(trafficCtx, identity) }()
+		defer func() { stopTraffic(); <-trafficDone }()
+	}
 	// Renewal starts before configuration synchronization so an expired AT or
 	// startup backoff cannot postpone recovery. All paths share refreshMu.
 	renewalCtx, stopRenewal := context.WithCancel(ctx)
@@ -579,6 +585,7 @@ func (c *Client) runConfigUpdates(ctx context.Context) {
 		req := connect.NewRequest(&configv1.WatchDesiredConfigRequest{
 			AgentId: c.agentIDValue(), AfterRevision: c.store.Current().Revision,
 		})
+		req.Header().Set(agentTrafficAccountingHeader, "v1")
 		c.authorize(req.Header())
 		stream, err := c.config.WatchDesiredConfig(ctx, req)
 		if err != nil {
@@ -1378,6 +1385,7 @@ func (c *Client) SyncConfig(parent context.Context) error {
 		after = 0
 	}
 	req := connect.NewRequest(&configv1.GetDesiredConfigRequest{AgentId: c.agentIDValue(), AppliedRevision: after})
+	req.Header().Set(agentTrafficAccountingHeader, "v1")
 	c.authorize(req.Header())
 	response, err := c.config.GetDesiredConfig(ctx, req)
 	if err != nil {
