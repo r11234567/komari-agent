@@ -25,6 +25,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari-agent/core/credentials"
+	"github.com/komari-monitor/komari-agent/core/signing"
 	enrollmentv1 "github.com/r11234567/komari-proto/gen/go/komari/enrollment/v1"
 	"github.com/r11234567/komari-proto/gen/go/komari/enrollment/v1/enrollmentv1connect"
 	securityv1 "github.com/r11234567/komari-proto/gen/go/komari/security/v1"
@@ -314,48 +315,13 @@ func (c *Client) FetchTrustBundle(ctx context.Context, agentID string) ([]creden
 	return keys, algorithms, policy.GetRequireAll(), policy.GetMinimumSignatures(), nil
 }
 
-// verifyResponseEnvelope checks that a SignedEnvelope from the panel verifies
-// against at least one of the pinned control-plane keys. It is intentionally
-// simpler than the full signing.Verifier: refresh responses carry no nonce or
-// agent-binding fields, so replay and binding checks are omitted here; the
-// request proof already binds the exchange to this agent and this token.
+// verifyResponseEnvelope checks the pinned key policy and binds the verified
+// response payload to the credentials issued by the legacy renewal endpoint.
 func verifyResponseEnvelope(envelope *securityv1.SignedEnvelope, identity credentials.Identity, issued *enrollmentv1.AgentCredentials) error {
+	if _, err := signing.New(identity, nil).VerifyEnvelopeSignatures(envelope); err != nil {
+		return fmt.Errorf("refresh response verification: %w", err)
+	}
 	payload := envelope.GetPayload()
-	if len(payload) == 0 {
-		return errors.New("signed response envelope has no payload")
-	}
-	verified := false
-	for _, sig := range envelope.GetSignatures() {
-		alg := sig.GetAlgorithm()
-		if alg != securityv1.SignatureAlgorithm_SIGNATURE_ALGORITHM_ED25519 {
-			// Only Ed25519 is implemented; other algorithms are skipped rather
-			// than failed so a dual-signed envelope from a newer panel still
-			// verifies against the Ed25519 key an older agent understands.
-			continue
-		}
-		for _, pinned := range identity.ControlPlaneKeys {
-			if int32(alg) != pinned.Algorithm {
-				continue
-			}
-			if sig.GetKeyId() != "" && pinned.KeyID != "" && sig.GetKeyId() != pinned.KeyID {
-				continue
-			}
-			raw, err := base64.StdEncoding.DecodeString(pinned.Value)
-			if err != nil || len(raw) != ed25519.PublicKeySize {
-				continue
-			}
-			if ed25519.Verify(ed25519.PublicKey(raw), payload, sig.GetValue()) {
-				verified = true
-				break
-			}
-		}
-		if verified {
-			break
-		}
-	}
-	if !verified {
-		return errors.New("no pinned control-plane key verified the refresh response signature")
-	}
 
 	// Verify that the signed payload binds to the newly issued credentials
 	if issued != nil {

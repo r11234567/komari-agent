@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/komari-monitor/komari-agent/core/credentials"
+	"github.com/komari-monitor/komari-agent/core/signing"
 	enrollmentv1 "github.com/r11234567/komari-proto/gen/go/komari/enrollment/v1"
 	securityv1 "github.com/r11234567/komari-proto/gen/go/komari/security/v1"
 	"google.golang.org/protobuf/proto"
@@ -58,7 +58,7 @@ func verifyRefreshV2Response(envelope *securityv1.SignedEnvelope, identity crede
 	if envelope == nil || len(envelope.Payload) > 4096 || issued == nil || identity.PendingRefresh == nil {
 		return 0, rejected
 	}
-	if err := verifyPinnedEnvelope(envelope, identity); err != nil {
+	if _, err := signing.New(identity, nil).VerifyEnvelopeSignatures(envelope); err != nil {
 		return 0, err
 	}
 	var proof refreshV2Response
@@ -85,44 +85,4 @@ func verifyRefreshV2Response(envelope *securityv1.SignedEnvelope, identity crede
 		return 0, rejected
 	}
 	return proof.Generation, nil
-}
-
-func verifyPinnedEnvelope(envelope *securityv1.SignedEnvelope, identity credentials.Identity) error {
-	if envelope == nil || len(envelope.Signatures) == 0 {
-		return errors.New("missing refresh response signature")
-	}
-	accepted := len(identity.PolicyAlgorithms) == 0
-	for _, alg := range identity.PolicyAlgorithms {
-		if alg == 1 {
-			accepted = true
-		}
-	}
-	if !accepted {
-		return errors.New("no supported pinned signature algorithm")
-	}
-	now := time.Now()
-	verified := map[string]bool{}
-	for _, sig := range envelope.Signatures {
-		valid := false
-		if sig.Algorithm == securityv1.SignatureAlgorithm_SIGNATURE_ALGORITHM_ED25519 {
-			for _, pin := range identity.ControlPlaneKeys {
-				if pin.Algorithm != 1 || (pin.KeyID != "" && sig.KeyId != pin.KeyID) || now.Before(pin.NotBefore) || (pin.NotAfter != nil && !now.Before(*pin.NotAfter)) {
-					continue
-				}
-				raw, err := base64.StdEncoding.DecodeString(pin.Value)
-				if err == nil && len(raw) == ed25519.PublicKeySize && ed25519.Verify(raw, envelope.Payload, sig.Value) {
-					verified[pin.Value] = true
-					valid = true
-					break
-				}
-			}
-		}
-		if identity.PolicyRequireAll && !valid {
-			return errors.New("refresh signature policy requires every signature")
-		}
-	}
-	if len(verified) < max(1, int(identity.PolicyMinimumSignatures)) {
-		return errors.New("insufficient pinned refresh signatures")
-	}
-	return nil
 }

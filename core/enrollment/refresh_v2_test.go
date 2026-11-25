@@ -33,6 +33,20 @@ func TestCredentialRefreshV2RejectsTamperingAndMissingProof(t *testing.T) {
 	if got, err := verifyRefreshV2Response(envelope, id, issued); err != nil || got != 9 {
 		t.Fatalf("valid response rejected: %d %v", got, err)
 	}
+	id.PolicyRequireAll = true
+	id.PolicyAlgorithms = []int32{int32(securityv1.SignatureAlgorithm_SIGNATURE_ALGORITHM_ED25519)}
+	if _, err := verifyRefreshV2Response(envelope, id, issued); err != nil {
+		t.Fatalf("valid strict-policy response rejected: %v", err)
+	}
+	id.PolicyAlgorithms = append(id.PolicyAlgorithms, 127)
+	if _, err := verifyRefreshV2Response(envelope, id, issued); err == nil {
+		t.Fatal("refresh response accepted without satisfying the strict policy")
+	}
+	if err := verifyResponseEnvelope(envelope, id, nil); err == nil {
+		t.Fatal("legacy refresh response accepted without satisfying the strict policy")
+	}
+	id.PolicyAlgorithms = nil
+	id.PolicyRequireAll = false
 	for _, field := range []string{"access", "refresh", "access-expiry", "refresh-expiry", "scopes", "agent", "request", "generation", "proof", "signature", "key-expired", "threshold"} {
 		t.Run(field, func(t *testing.T) {
 			altered := proto.Clone(issued).(*enrollmentv1.AgentCredentials)

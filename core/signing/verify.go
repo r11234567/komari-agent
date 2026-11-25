@@ -95,22 +95,11 @@ func New(identity credentials.Identity, replay *ReplayGuard) *Verifier {
 
 // Verify checks an envelope and returns the instruction it carries.
 func (v *Verifier) Verify(envelope *securityv1.SignedEnvelope) (Instruction, error) {
-	if envelope == nil {
-		return Instruction{}, errors.New("no signed instruction was provided")
-	}
-	if len(v.keys) == 0 {
-		return Instruction{}, errors.New(
-			"no panel signing keys are pinned, so this instruction cannot be verified; run 'komari-agent trust refresh'")
-	}
-	payload := envelope.GetPayload()
-	if len(payload) == 0 {
-		return Instruction{}, errors.New("the signed instruction has no payload")
-	}
-
-	verifiedBy, err := v.verifySignatures(payload, envelope.GetSignatures())
+	verifiedBy, err := v.verifyEnvelopeSignatures(envelope, maximumClockSkew)
 	if err != nil {
 		return Instruction{}, err
 	}
+	payload := envelope.GetPayload()
 
 	// The payload is parsed only after its signature is established. Decoding
 	// attacker-controlled bytes first would expose the parser to input nobody
@@ -125,9 +114,7 @@ func (v *Verifier) Verify(envelope *securityv1.SignedEnvelope) (Instruction, err
 		return Instruction{}, err
 	}
 
-	// The nonce is consumed last, once everything else has passed. Consuming
-	// it earlier would let a malformed replay burn a nonce and make the
-	// legitimate instruction fail.
+	// Consume the nonce after the signature and all instruction bindings pass.
 	if v.replay != nil {
 		if err := v.replay.consume(instruction.GetNonce(), timeOrZero(instruction.GetExpiresAt()), now); err != nil {
 			return Instruction{}, err
@@ -145,8 +132,29 @@ func (v *Verifier) Verify(envelope *securityv1.SignedEnvelope) (Instruction, err
 	}, nil
 }
 
+// VerifyEnvelopeSignatures applies the pinned key policy to the exact payload.
+// Callers must validate the payload's binding to the operation before using it.
+func (v *Verifier) VerifyEnvelopeSignatures(envelope *securityv1.SignedEnvelope) (string, error) {
+	return v.verifyEnvelopeSignatures(envelope, 0)
+}
+
+func (v *Verifier) verifyEnvelopeSignatures(envelope *securityv1.SignedEnvelope, keySkew time.Duration) (string, error) {
+	if envelope == nil {
+		return "", errors.New("no signed instruction was provided")
+	}
+	if len(v.keys) == 0 {
+		return "", errors.New(
+			"no panel signing keys are pinned, so this instruction cannot be verified; run 'komari-agent trust refresh'")
+	}
+	payload := envelope.GetPayload()
+	if len(payload) == 0 {
+		return "", errors.New("the signed instruction has no payload")
+	}
+	return v.verifySignatures(payload, envelope.GetSignatures(), keySkew)
+}
+
 // verifySignatures applies the policy and reports which key vouched.
-func (v *Verifier) verifySignatures(payload []byte, signatures []*securityv1.Signature) (string, error) {
+func (v *Verifier) verifySignatures(payload []byte, signatures []*securityv1.Signature, keySkew time.Duration) (string, error) {
 	if len(signatures) == 0 {
 		return "", errors.New("the instruction carries no signature")
 	}
@@ -168,7 +176,7 @@ func (v *Verifier) verifySignatures(payload []byte, signatures []*securityv1.Sig
 		if !accepted[algorithm] {
 			continue
 		}
-		key, keyID, ok := v.verifyPinnedSignature(signature, payload, now)
+		key, keyID, ok := v.verifyPinnedSignature(signature, payload, now, keySkew)
 		if !ok {
 			continue
 		}
@@ -201,7 +209,7 @@ func (v *Verifier) verifySignatures(payload []byte, signatures []*securityv1.Sig
 }
 
 // verifyPinnedSignature tries valid pinned keys for the signature's algorithm.
-func (v *Verifier) verifyPinnedSignature(signature *securityv1.Signature, payload []byte, now time.Time) ([]byte, string, bool) {
+func (v *Verifier) verifyPinnedSignature(signature *securityv1.Signature, payload []byte, now time.Time, keySkew time.Duration) ([]byte, string, bool) {
 	keyID, algorithm := signature.GetKeyId(), int32(signature.GetAlgorithm())
 	for _, pinned := range v.keys {
 		if pinned.Algorithm != algorithm {
@@ -212,10 +220,10 @@ func (v *Verifier) verifyPinnedSignature(signature *securityv1.Signature, payloa
 		if keyID != "" && pinned.KeyID != keyID {
 			continue
 		}
-		if !pinned.NotBefore.IsZero() && now.Add(maximumClockSkew).Before(pinned.NotBefore) {
+		if !pinned.NotBefore.IsZero() && now.Add(keySkew).Before(pinned.NotBefore) {
 			continue
 		}
-		if pinned.NotAfter != nil && now.Add(-maximumClockSkew).After(*pinned.NotAfter) {
+		if pinned.NotAfter != nil && !now.Add(-keySkew).Before(*pinned.NotAfter) {
 			continue
 		}
 		raw, err := base64.StdEncoding.DecodeString(pinned.Value)
