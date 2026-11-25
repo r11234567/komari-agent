@@ -60,17 +60,19 @@ func ServeWorker(input io.Reader, output io.Writer) error {
 }
 
 type Executor struct {
-	ctx               context.Context
-	mu                sync.Mutex
-	workers           map[string]*fileWorker
-	authorizeTransfer func(http.Header)
-	rootAllowed       func() bool
+	ctx     context.Context
+	mu      sync.Mutex
+	workers map[string]*fileWorker
+	options ExecutorOptions
 }
 
 type ExecutorOptions struct {
 	// Evaluated in the parent for each transfer, after token refreshes. The
 	// callback and its credentials are never sent to account workers.
 	AuthorizeTransfer func(http.Header)
+	// Wraps the upstream transport in the parent, so the account worker never
+	// receives the Agent signing key.
+	WrapTransferClient func(*http.Client) *http.Client
 	// Evaluated when starting a worker to align root workspace file access with
 	// remote root execution policy instead of diverging from WebSSH.
 	RootAllowed func() bool
@@ -91,8 +93,7 @@ type fileWorker struct {
 func NewExecutor(ctx context.Context, options ...ExecutorOptions) *Executor {
 	e := &Executor{ctx: ctx, workers: make(map[string]*fileWorker)}
 	if len(options) > 0 {
-		e.authorizeTransfer = options[0].AuthorizeTransfer
-		e.rootAllowed = options[0].RootAllowed
+		e.options = options[0]
 	}
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
@@ -168,12 +169,13 @@ func (e *Executor) Execute(ctx context.Context, scope, username, requestID strin
 		}
 	}
 	if operation == filev1.FileOperation_FILE_OPERATION_UPLOAD_STREAM || operation == filev1.FileOperation_FILE_OPERATION_DOWNLOAD_STREAM {
-		endpoint, closeRelay, err := newWorkerTransferRelay(ctx, workerArgs, e.authorizeTransfer)
+		endpoint, closeRelay, err := newWorkerTransferRelay(ctx, workerArgs, e.options)
 		if err != nil {
 			return failure(err)
 		}
 		defer closeRelay()
 		workerArgs[workerTransferURL] = endpoint
+		delete(workerArgs, "transfer_token")
 	}
 	e.mu.Lock()
 	w := e.workers[scope]
@@ -188,8 +190,8 @@ func (e *Executor) Execute(ctx context.Context, scope, username, requestID strin
 	}
 	if w == nil {
 		rootAllowed := false
-		if e.rootAllowed != nil {
-			rootAllowed = e.rootAllowed()
+		if e.options.RootAllowed != nil {
+			rootAllowed = e.options.RootAllowed()
 		}
 		var err error
 		w, err = startFileWorker(e.ctx, username, rootAllowed)

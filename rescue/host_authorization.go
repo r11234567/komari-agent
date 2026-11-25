@@ -48,7 +48,7 @@ func (h *Helper) checkAuthorization(parent context.Context) error {
 	}
 	ctx, cancel := context.WithTimeout(parent, 1500*time.Millisecond)
 	defer cancel()
-	client := requestheaders.WithProtocolNegotiation(requestheaders.WrapWithStaticDPoP(nil, id))
+	client := requestheaders.WrapWithStaticDPoP(nil, id)
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return errors.New("helper redirects forbidden") }
 	rpc := configconnect.NewPrivilegedDeliveryServiceClient(client, h.hostTrust.Endpoint, connect.WithReadMaxBytes(1<<20))
 	req := connect.NewRequest(&configv1.GetPrivilegedDeliveryRequest{AgentId: id.AgentID})
@@ -87,7 +87,7 @@ var authorizationWatchTransport = func() *http.Transport {
 // A response stream has no HTTP total deadline: signed-heartbeat freshness
 // and the watch context bound its lifetime. Unary RPCs retain their timeout.
 func newAuthorizationWatchClient(id credentials.Identity) *http.Client {
-	client := requestheaders.WithProtocolNegotiation(requestheaders.WrapWithStaticDPoP(&http.Client{Transport: authorizationWatchTransport}, id))
+	client := requestheaders.WithNonceBootstrap(requestheaders.WrapWithStaticDPoP(&http.Client{Transport: authorizationWatchTransport}, id))
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return errors.New("helper redirects forbidden") }
 	return client
 }

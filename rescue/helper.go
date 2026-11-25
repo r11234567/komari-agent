@@ -179,7 +179,7 @@ func New(config Config) (*Helper, error) {
 
 	return &Helper{
 		manifest: manifest, hostTrust: trust, credentialsPath: config.CredentialsFile,
-		client:               rescuev1connect.NewRescueServiceClient(requestheaders.WithProtocolNegotiation(httpClient), baseURL),
+		client:               rescuev1connect.NewRescueServiceClient(requestheaders.WithNonceBootstrap(httpClient), baseURL),
 		token:                strings.TrimSpace(config.Token),
 		agentID:              strings.TrimSpace(config.AgentID),
 		instanceID:           instanceID,

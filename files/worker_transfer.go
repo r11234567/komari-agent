@@ -9,7 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -24,26 +24,23 @@ const workerTransferURL = "_workspace_transfer_url"
 // A demoted worker must not load the Agent config or receive its long-lived
 // token. This parent-owned relay gives it one fixed transfer over loopback,
 // retaining the existing authenticated server endpoint and bounded streaming.
-func newWorkerTransferRelay(ctx context.Context, args map[string]any, authorizers ...func(http.Header)) (string, func(), error) {
+func newWorkerTransferRelay(ctx context.Context, args map[string]any, options ...ExecutorOptions) (string, func(), error) {
 	upstream, err := buildFileTransferURL(args)
 	if err != nil {
 		return "", nil, err
 	}
-	// The server accepts Bearer authentication. Never keep a stale access
-	// token in a URL: query tokens take precedence over refreshed headers.
-	upstreamURL, err := url.Parse(upstream)
-	if err != nil {
-		return "", nil, err
-	}
-	query := upstreamURL.Query()
-	query.Del("token")
-	upstreamURL.RawQuery = query.Encode()
-	upstream = upstreamURL.String()
+	transferToken := strings.TrimSpace(argString(args, "transfer_token"))
 	authorize := func(header http.Header) {
 		requestheaders.ApplyAgentAuthentication(header, pkg_flags.GlobalConfig.Token, pkg_flags.GlobalConfig.CFAccessClientID, pkg_flags.GlobalConfig.CFAccessClientSecret)
 	}
-	if len(authorizers) > 0 && authorizers[0] != nil {
-		authorize = authorizers[0]
+	client := workspaceTransferHTTPClient()
+	if len(options) > 0 {
+		if options[0].AuthorizeTransfer != nil {
+			authorize = options[0].AuthorizeTransfer
+		}
+		if options[0].WrapTransferClient != nil {
+			client = options[0].WrapTransferClient(client)
+		}
 	}
 	var secret [32]byte
 	if _, err := rand.Read(secret[:]); err != nil {
@@ -55,7 +52,6 @@ func newWorkerTransferRelay(ctx context.Context, args map[string]any, authorizer
 	}
 	path := "/" + hex.EncodeToString(secret[:])
 	var consumed atomic.Bool
-	client := workspaceTransferHTTPClient()
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	relayContext, stop := context.WithCancel(ctx)
 	server := &http.Server{ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 5 * time.Second, MaxHeaderBytes: 16 << 10}
@@ -81,15 +77,16 @@ func newWorkerTransferRelay(ctx context.Context, args map[string]any, authorizer
 			return
 		}
 		request.ContentLength = r.ContentLength
-		for _, name := range []string{"Content-Type", "Accept", "Accept-Encoding", "Content-Range", "X-Komari-Transfer-ID", "X-Komari-Transfer-Token", "X-Komari-Transfer-Offset", "X-Komari-Transfer-Length"} {
+		for _, name := range []string{"Content-Type", "Accept", "Accept-Encoding", "Content-Range", "X-Komari-Transfer-Offset", "X-Komari-Transfer-Length"} {
 			if value := r.Header.Get(name); value != "" {
 				request.Header.Set(name, value)
 			}
 		}
+		request.Header.Set("X-Komari-Transfer-Token", transferToken)
 		authorize(request.Header)
 		response, err := client.Do(request)
 		if err != nil {
-			// net/http errors include the upstream URL (and Agent token).
+			// net/http errors include the upstream URL.
 			// Never return that URL to a less privileged child or its logs.
 			http.Error(w, "workspace transfer relay failed: "+transferFailureReason(err), http.StatusBadGateway)
 			return
