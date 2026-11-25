@@ -4,12 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
-	"sync"
+	"time"
 
 	"github.com/komari-monitor/komari-agent/core/capability"
 	execv1 "github.com/r11234567/komari-proto/gen/go/komari/exec/v1"
@@ -60,37 +59,29 @@ func RunTypedExecution(ctx context.Context, spec *execv1.ExecutionSpec, emit fun
 			command.Env = append(command.Env, key+"="+value)
 		}
 	}
-	stdout, err := command.StdoutPipe()
-	if err != nil {
-		return -1, err
-	}
-	stderr, err := command.StderrPipe()
-	if err != nil {
-		return -1, err
-	}
+	output := make(chan ExecutionOutput, 32)
+	command.Stdout = executionWriter{stream: execv1.OutputStream_OUTPUT_STREAM_STDOUT, output: output}
+	command.Stderr = executionWriter{stream: execv1.OutputStream_OUTPUT_STREAM_STDERR, output: output}
+	command.WaitDelay = 2 * time.Second
 	if err := command.Start(); err != nil {
 		return -1, err
 	}
-	output := make(chan ExecutionOutput, 32)
-	readerError := make(chan error, 2)
-	var readers sync.WaitGroup
-	readers.Add(2)
-	go readExecutionOutput(stdout, execv1.OutputStream_OUTPUT_STREAM_STDOUT, output, readerError, &readers)
-	go readExecutionOutput(stderr, execv1.OutputStream_OUTPUT_STREAM_STDERR, output, readerError, &readers)
 	wait := make(chan error, 1)
 	go func() {
-		err := command.Wait()
-		readers.Wait()
+		wait <- command.Wait()
 		close(output)
-		wait <- err
 	}()
+	maxOutput := spec.MaxOutputBytes
+	if maxOutput == 0 {
+		maxOutput = 1 << 20
+	}
 	var outputBytes uint64
 	var outputErr error
 	for chunk := range output {
 		if outputErr != nil {
 			continue
 		}
-		if uint64(len(chunk.Data))+outputBytes > spec.MaxOutputBytes {
+		if uint64(len(chunk.Data))+outputBytes > maxOutput {
 			outputErr = ErrExecutionOutputLimit
 			cancel()
 			continue
@@ -102,13 +93,6 @@ func RunTypedExecution(ctx context.Context, spec *execv1.ExecutionSpec, emit fun
 		}
 	}
 	waitErr := <-wait
-	select {
-	case err := <-readerError:
-		if outputErr == nil && !errors.Is(err, os.ErrClosed) {
-			outputErr = err
-		}
-	default:
-	}
 	if outputErr != nil {
 		return exitCode(waitErr), outputErr
 	}
@@ -118,24 +102,14 @@ func RunTypedExecution(ctx context.Context, spec *execv1.ExecutionSpec, emit fun
 	return exitCode(waitErr), waitErr
 }
 
-func readExecutionOutput(reader io.Reader, stream execv1.OutputStream, output chan<- ExecutionOutput, failures chan<- error, wait *sync.WaitGroup) {
-	defer wait.Done()
-	buffer := make([]byte, 32<<10)
-	for {
-		n, err := reader.Read(buffer)
-		if n > 0 {
-			output <- ExecutionOutput{Stream: stream, Data: append([]byte(nil), buffer[:n]...)}
-		}
-		if err != nil {
-			if !errors.Is(err, io.EOF) {
-				select {
-				case failures <- err:
-				default:
-				}
-			}
-			return
-		}
-	}
+type executionWriter struct {
+	stream execv1.OutputStream
+	output chan<- ExecutionOutput
+}
+
+func (w executionWriter) Write(data []byte) (int, error) {
+	w.output <- ExecutionOutput{Stream: w.stream, Data: append([]byte(nil), data...)}
+	return len(data), nil
 }
 
 func buildTypedCommand(ctx context.Context, spec *execv1.ExecutionSpec) (*exec.Cmd, func(), error) {

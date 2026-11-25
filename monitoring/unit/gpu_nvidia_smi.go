@@ -25,10 +25,10 @@ type NvidiaSMI struct {
 
 // NVIDIAGPUInfo 包含详细的NVIDIA GPU信息
 type NVIDIAGPUInfo struct {
-	Name        string  // GPU型号
-	MemoryTotal uint64  // 总显存 (字节)
-	MemoryUsed  uint64  // 已用显存 (字节)
-	Utilization float64 // GPU使用率 (0-100)
+	Name        string   // GPU型号
+	MemoryTotal uint64   // 总显存 (字节)
+	MemoryUsed  uint64   // 已用显存 (字节)
+	Utilization float64  // GPU使用率 (0-100)
 	Temperature *float64 // 温度 (摄氏度); nil 表示传感器未提供或不可用
 }
 
@@ -56,17 +56,19 @@ func (smi *NvidiaSMI) Start() error {
 	if runtime.GOOS == "windows" {
 		// Full XML includes process names that Windows drivers can encode using
 		// the local code page. Query only GPU fields, excluding that process list.
-		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-		defer cancel()
-		data, err := exec.CommandContext(ctx, smi.BinPath,
+		data, err := runGPUCommand(smi.BinPath,
 			"--query-gpu=name,utilization.gpu,memory.total,memory.used,temperature.gpu",
-			"--format=csv,noheader,nounits").Output()
+			"--format=csv,noheader,nounits")
 		if err != nil {
 			return fmt.Errorf("query NVIDIA GPU counters: %w", err)
 		}
 		smi.data = data
 	} else {
-		smi.data = smi.pollNvidiaSMI()
+		data, err := runGPUCommand(smi.BinPath, "-q", "-x")
+		if err != nil {
+			return fmt.Errorf("query NVIDIA GPU counters: %w", err)
+		}
+		smi.data = data
 	}
 	return nil
 }
@@ -100,13 +102,16 @@ func parseNvidiaGPUCSV(data []byte) (nvidiaSMIXMLResult, error) {
 	return result, nil
 }
 
-func (smi *NvidiaSMI) pollNvidiaSMI() []byte {
-	cmd := exec.Command(smi.BinPath, "-q", "-x")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil
+func runGPUCommand(binary string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.WaitDelay = time.Second
+	output, err := cmd.Output()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
-	return output
+	return output, err
 }
 
 func (smi *NvidiaSMI) gatherModel() ([]string, error) {

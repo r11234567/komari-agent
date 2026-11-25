@@ -6,6 +6,7 @@ package monitoring
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"os/exec"
@@ -20,10 +21,10 @@ type ROCmSMI struct {
 
 // AMDGPUInfo AMD GPU详细信息
 type AMDGPUInfo struct {
-	Name        string  // GPU型号
-	MemoryTotal uint64  // 总显存 (字节)
-	MemoryUsed  uint64  // 已用显存 (字节)
-	Utilization float64 // GPU使用率 (0-100)
+	Name        string   // GPU型号
+	MemoryTotal uint64   // 总显存 (字节)
+	MemoryUsed  uint64   // 已用显存 (字节)
+	Utilization float64  // GPU使用率 (0-100)
 	Temperature *float64 // 温度 (摄氏度); nil 表示传感器未提供或不可用
 }
 
@@ -60,17 +61,12 @@ func (rsmi *ROCmSMI) Start() error {
 		rsmi.BinPath = binPath
 	}
 
-	rsmi.data = rsmi.pollROCmSMI()
-	return nil
-}
-
-func (rsmi *ROCmSMI) pollROCmSMI() []byte {
-	cmd := exec.Command(rsmi.BinPath, "--showallinfo", "--json")
-	output, err := cmd.CombinedOutput()
+	data, err := runGPUCommand(rsmi.BinPath, "--showallinfo", "--json")
 	if err != nil {
-		return nil
+		return fmt.Errorf("query ROCm GPU counters: %w", err)
 	}
-	return output
+	rsmi.data = data
+	return nil
 }
 
 func (rsmi *ROCmSMI) gatherModel() ([]string, error) {

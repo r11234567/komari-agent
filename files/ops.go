@@ -465,7 +465,7 @@ func restoreUploadSessionLocked(scope, targetPath, uploadID string) (uploadChunk
 	}
 	if manifest.ChunkSize <= 0 || manifest.ChunkSize > maxTransferChunkSize ||
 		manifest.ExpectedSize <= 0 || manifest.PartCount != uploadChunkCount(manifest.ExpectedSize, manifest.ChunkSize) ||
-		len(manifest.Parts) == 0 {
+		(len(manifest.Parts) == 0 && manifest.Received != 0) {
 		return uploadChunkState{}, false, errors.New("invalid upload manifest geometry")
 	}
 	partPath := uploadPartPathFor(targetPath, uploadID)

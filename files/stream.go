@@ -424,6 +424,13 @@ func writeUploadStreamChunk(spec uploadStreamSpec, source io.Reader) (json.RawMe
 			}
 			state.TempPath = partPath
 			state.PartIdentity = identity
+			// An interrupted first chunk must still be discoverable by a
+			// different worker when the panel later cancels the upload.
+			if err := saveUploadManifest(spec.UploadID, state); err != nil {
+				_ = removeUploadStage(uploadStagePath(spec.Path, spec.UploadID), identity)
+				uploadChunksMu.Unlock()
+				return nil, fmt.Errorf("persist initial upload manifest: %w", err)
+			}
 			uploadChunks[spec.UploadID] = state
 			exists = true
 		}

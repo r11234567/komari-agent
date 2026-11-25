@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -55,7 +56,7 @@ type TrafficData struct {
 }
 
 var (
-	mu           sync.RWMutex
+	mu           sync.Mutex
 	running      bool
 	detectTicker *time.Ticker
 	saveTicker   *time.Ticker
@@ -247,31 +248,27 @@ func flushCacheLocked(ts uint64) {
 
 // startGoroutinesLocked 启动采集和保存的 goroutines（调用前必须已持有锁）
 func startGoroutinesLocked() {
-	// 采集 goroutine
+	detect := detectTicker.C
+	save := saveTicker.C
+	stop := stopCh
 	go func() {
 		for {
 			select {
-			case <-detectTicker.C:
+			case <-detect:
 				mu.Lock()
-				sampleOnceLocked()
+				if running && stopCh == stop {
+					sampleOnceLocked()
+				}
 				mu.Unlock()
-			case <-stopCh:
-				return
-			}
-		}
-	}()
-
-	// 保存 goroutine
-	go func() {
-		for {
-			select {
-			case t := <-saveTicker.C:
+			case t := <-save:
 				mu.Lock()
-				flushCacheLocked(uint64(t.Unix()))
-				purgeExpiredLocked()
-				_ = saveToFileLocked()
+				if running && stopCh == stop {
+					flushCacheLocked(uint64(t.Unix()))
+					purgeExpiredLocked()
+					_ = saveToFileLocked()
+				}
 				mu.Unlock()
-			case <-stopCh:
+			case <-stop:
 				return
 			}
 		}
@@ -280,11 +277,12 @@ func startGoroutinesLocked() {
 
 // GetNetStatic 获取当前的所有流量统计数据
 func GetNetStatic() (*NetStatic, error) {
-	mu.RLock()
-	defer mu.RUnlock()
+	mu.Lock()
+	defer mu.Unlock()
 	ensureInitLocked()
 	// 合并 store + cache（cache 不合并为单点，直接以原样返回临时视图）
 	merged := NetStatic{Interfaces: map[string][]TrafficData{}, Config: configOrDefault(config)}
+	merged.Config.Nics = slices.Clone(merged.Config.Nics)
 	for name, arr := range store.Interfaces {
 		cp := make([]TrafficData, len(arr))
 		copy(cp, arr)
@@ -298,11 +296,11 @@ func GetNetStatic() (*NetStatic, error) {
 
 // StartOrContinue 开始或继续流量统计
 func StartOrContinue() error {
+	mu.Lock()
+	defer mu.Unlock()
 	if running {
 		return nil
 	}
-	mu.Lock()
-	defer mu.Unlock()
 	ensureInitLocked()
 	// 读取历史
 	if err := loadFromFileLocked(); err != nil {
@@ -356,10 +354,11 @@ func Stop() error {
 
 // GetNetStaticBetween 获取指定时间段内的流量统计数据，start和end为unix时间戳
 func GetNetStaticBetween(start, end uint64) (*NetStatic, error) {
-	mu.RLock()
-	defer mu.RUnlock()
+	mu.Lock()
+	defer mu.Unlock()
 	ensureInitLocked()
 	res := NetStatic{Interfaces: map[string][]TrafficData{}, Config: configOrDefault(config)}
+	res.Config.Nics = slices.Clone(res.Config.Nics)
 	inRange := func(ts uint64) bool { return (start == 0 || ts >= start) && (end == 0 || ts <= end) }
 	for name, arr := range store.Interfaces {
 		var filtered []TrafficData
@@ -385,8 +384,8 @@ func GetNetStaticBetween(start, end uint64) (*NetStatic, error) {
 
 // GetTotalTraffic 获取总流量统计数据, key为网卡名称, value为对应的流量数据总和
 func GetTotalTraffic() (map[string]TrafficData, error) {
-	mu.RLock()
-	defer mu.RUnlock()
+	mu.Lock()
+	defer mu.Unlock()
 	ensureInitLocked()
 	res := map[string]TrafficData{}
 	add := func(name string, tx, rx uint64) {
@@ -416,8 +415,8 @@ func GetTotalTraffic() (map[string]TrafficData, error) {
 
 // GetTotalTrafficBetween 获取指定时间段内的总流量统计数据，start和end为unix时间戳
 func GetTotalTrafficBetween(start, end uint64) (map[string]TrafficData, error) {
-	mu.RLock()
-	defer mu.RUnlock()
+	mu.Lock()
+	defer mu.Unlock()
 	ensureInitLocked()
 	res := map[string]TrafficData{}
 	inRange := func(ts uint64) bool { return (start == 0 || ts >= start) && (end == 0 || ts <= end) }

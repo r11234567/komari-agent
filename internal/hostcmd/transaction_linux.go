@@ -694,10 +694,11 @@ func executeTransaction(ctx context.Context, m *hostops.Manifest, p *hostops.Pol
 	if err = ensureTrustedDir(filepath.Dir(profilePath(m))); err != nil {
 		return err
 	}
-	unit := "[Service]\nUser=" + t.ServiceUser + "\nGroup=" + u.Gid + "\nSupplementaryGroups=\nExecStart=\nExecStart=" + unitQuote(m.Executable) + " --service-manifest " + unitQuote(m.ManifestPath) + " --config " + unitQuote(bootstrapPath(m)) + "\nEnvironment=\nEnvironmentFile=\nPassEnvironment=\nWorkingDirectory=" + workingDir + "\nNoNewPrivileges=true\nCapabilityBoundingSet=\nCapabilityBoundingSet=CAP_NET_RAW\nAmbientCapabilities=\nAmbientCapabilities=CAP_NET_RAW\n"
+	serviceGroup := u.Gid
 	if p.PrivilegeMode == 1 {
-		unit = "[Service]\nUser=root\nGroup=root\nSupplementaryGroups=\nExecStart=\nExecStart=" + unitQuote(m.Executable) + " --service-manifest " + unitQuote(m.ManifestPath) + " --config " + unitQuote(bootstrapPath(m)) + "\nEnvironment=\nEnvironmentFile=\nPassEnvironment=\nWorkingDirectory=" + workingDir + "\nNoNewPrivileges=false\nCapabilityBoundingSet=~\nAmbientCapabilities=\n"
+		serviceGroup = "root"
 	}
+	unit := "[Service]\nUser=" + t.ServiceUser + "\nGroup=" + serviceGroup + "\nSupplementaryGroups=\nExecStart=\nExecStart=" + unitQuote(m.Executable) + " --service-manifest " + unitQuote(m.ManifestPath) + " --config " + unitQuote(bootstrapPath(m)) + "\nEnvironment=\nEnvironmentFile=\nPassEnvironment=\nWorkingDirectory=" + workingDir + "\n" + agentUnitPrivileges(p.PrivilegeMode == 1)
 	if err = hostops.AtomicWrite(profilePath(m), []byte(unit), 0o644); err != nil {
 		return err
 	}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -32,8 +31,7 @@ var (
 		"119.29.29.29:53",    // DNSPod，中国大陆
 	}
 
-	// CustomDNSServer 自定义DNS服务器，可以通过命令行参数设置
-	CustomDNSServer string
+	customDNSServer string
 
 	preferV4Once sync.Once
 	hasIPv4      bool
@@ -45,14 +43,25 @@ type httpClientKey struct {
 	timeout          time.Duration
 	ignoreUnsafeCert bool
 	preferIPVersion  string
+	dnsServer        string
 }
 
-// SetCustomDNSServer 设置自定义DNS服务器
-func SetCustomDNSServer(dnsServer string) {
-	if dnsServer == "" {
+// SetCustomDNSServer selects the DNS resolver used by new Agent clients.
+func SetCustomDNSServer(server string) {
+	server = strings.TrimSpace(server)
+	if server != "" {
+		server = normalizeDNSServer(server)
+	}
+	httpClientMu.Lock()
+	defer httpClientMu.Unlock()
+	if customDNSServer == server {
 		return
 	}
-	CustomDNSServer = normalizeDNSServer(dnsServer)
+	for key, client := range httpClients {
+		client.CloseIdleConnections()
+		delete(httpClients, key)
+	}
+	customDNSServer = server
 }
 
 // normalizeDNSServer 将输入的 DNS 服务器字符串规范化为 host:port 形式：
@@ -75,51 +84,11 @@ func normalizeDNSServer(s string) string {
 	return s
 }
 
-// getCurrentDNSServer 获取当前要使用的DNS服务器
-func getCurrentDNSServer() string {
-	if CustomDNSServer != "" {
-		return CustomDNSServer
-	}
-	// 如果没有设置自定义DNS，返回空字符串，表示应使用系统默认解析器
-	return ""
-}
-
-// GetCustomResolver 返回一个解析器：
-// - 若设置了自定义 DNS：使用该服务器（并在失败时尝试内置列表作为兜底）。
-// - 若未设置自定义 DNS：返回系统默认解析器（不使用内置列表）。
 func GetCustomResolver() *net.Resolver {
-	// 未设置自定义 DNS，直接使用系统默认解析器
-	if getCurrentDNSServer() == "" {
-		return net.DefaultResolver
-	}
-
-	// 设置了自定义 DNS，则构造使用自定义 DNS 的解析器
-	return &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			d := net.Dialer{Timeout: 10 * time.Second}
-
-			// 优先使用自定义 DNS 服务器
-			dnsServer := getCurrentDNSServer()
-			if dnsServer != "" {
-				if conn, err := d.DialContext(ctx, "udp", dnsServer); err == nil {
-					return conn, nil
-				}
-			}
-			log.Printf("Custom DNS server %s is unreachable, trying fallback servers", dnsServer)
-			// 如果自定义DNS不可用，则尝试内置列表作为兜底
-			for _, server := range DNSServers {
-				if server == dnsServer {
-					continue
-				}
-				if conn, err := d.DialContext(ctx, "udp", server); err == nil {
-					return conn, nil
-				}
-			}
-
-			return nil, fmt.Errorf("no available DNS server")
-		},
-	}
+	httpClientMu.Lock()
+	server := customDNSServer
+	httpClientMu.Unlock()
+	return resolverForServer(server, DNSServers)
 }
 
 // buildTransport 构建带有自定义解析/拨号策略的 HTTP 传输层，可注入 TLS 配置
@@ -128,10 +97,13 @@ func buildTransport(timeout time.Duration, tlsConfig *tls.Config) *http.Transpor
 }
 
 func buildTransportWithPreference(timeout time.Duration, tlsConfig *tls.Config, preferIPVersion string) *http.Transport {
+	return buildTransportWithResolver(timeout, tlsConfig, preferIPVersion, GetCustomResolver())
+}
+
+func buildTransportWithResolver(timeout time.Duration, tlsConfig *tls.Config, preferIPVersion string, customResolver *net.Resolver) *http.Transport {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	customResolver := GetCustomResolver()
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
 	protocols.SetHTTP2(true)
@@ -172,6 +144,11 @@ type SmartStreamTransport struct {
 	BaseTransport *http.Transport
 }
 
+func (t *SmartStreamTransport) CloseIdleConnections() {
+	t.H2CTransport.CloseIdleConnections()
+	t.BaseTransport.CloseIdleConnections()
+}
+
 func (t *SmartStreamTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.URL.Scheme == "http" {
 		return t.H2CTransport.RoundTrip(req)
@@ -184,18 +161,17 @@ func (t *SmartStreamTransport) RoundTrip(req *http.Request) (*http.Response, err
 // stream. Stream deadlines and cancellation are owned by the request context.
 func GetStreamingHTTPClientWithPreference(preferIPVersion string) *http.Client {
 	preferIPVersion = normalizeIPVersionPreference(preferIPVersion)
-	key := httpClientKey{timeout: -1, ignoreUnsafeCert: flags.IgnoreUnsafeCert, preferIPVersion: preferIPVersion}
 	httpClientMu.Lock()
 	defer httpClientMu.Unlock()
+	key := httpClientKey{timeout: -1, ignoreUnsafeCert: flags.IgnoreUnsafeCert, preferIPVersion: preferIPVersion, dnsServer: customDNSServer}
 	if client := httpClients[key]; client != nil {
 		return client
 	}
-	baseTr := buildTransportWithPreference(15*time.Second, &tls.Config{
+	customResolver := resolverForServer(key.dnsServer, DNSServers)
+	baseTr := buildTransportWithResolver(15*time.Second, &tls.Config{
 		// This is controlled by the explicit --ignore-unsafe-cert compatibility option.
 		InsecureSkipVerify: flags.IgnoreUnsafeCert, // #nosec G402 // lgtm[go/disabled-certificate-check]
-	}, preferIPVersion)
-
-	customResolver := GetCustomResolver()
+	}, preferIPVersion, customResolver)
 	h2cTr := &http2.Transport{
 		AllowHTTP: true,
 		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
@@ -217,17 +193,17 @@ func getHTTPClient(timeout time.Duration, preferIPVersion string) *http.Client {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	key := httpClientKey{timeout: timeout, ignoreUnsafeCert: flags.IgnoreUnsafeCert, preferIPVersion: preferIPVersion}
 	httpClientMu.Lock()
 	defer httpClientMu.Unlock()
+	key := httpClientKey{timeout: timeout, ignoreUnsafeCert: flags.IgnoreUnsafeCert, preferIPVersion: preferIPVersion, dnsServer: customDNSServer}
 	if client := httpClients[key]; client != nil {
 		return client
 	}
 	client := &http.Client{
-		Transport: buildTransportWithPreference(timeout, &tls.Config{
+		Transport: buildTransportWithResolver(timeout, &tls.Config{
 			// This is controlled by the explicit --ignore-unsafe-cert compatibility option.
 			InsecureSkipVerify: flags.IgnoreUnsafeCert, // #nosec G402 // lgtm[go/disabled-certificate-check]
-		}, preferIPVersion),
+		}, preferIPVersion, resolverForServer(key.dnsServer, DNSServers)),
 		Timeout: timeout,
 	}
 	httpClients[key] = client

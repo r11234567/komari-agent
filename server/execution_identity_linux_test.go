@@ -203,3 +203,21 @@ func TestRootWebSSHGrantUsesSelectedUIDAndRestrictsOrdinaryPTY(t *testing.T) {
 		})
 	}
 }
+
+func TestRemoteExecutionDropsRootAndFinishesBothStreamsWithDefaultBudget(t *testing.T) {
+	rootExecutionFixture(t, true)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	outputs := make(map[execv1.OutputStream]string)
+	code, err := RunTypedExecution(ctx, &execv1.ExecutionSpec{
+		Command: "printf 'stdout-tail-%s' \"$(id -un)\"; printf 'stderr-tail' >&2",
+	}, func(chunk ExecutionOutput) error {
+		outputs[chunk.Stream] += string(chunk.Data)
+		return nil
+	})
+	if err != nil || code != 0 ||
+		outputs[execv1.OutputStream_OUTPUT_STREAM_STDOUT] != "stdout-tail-komari" ||
+		outputs[execv1.OutputStream_OUTPUT_STREAM_STDERR] != "stderr-tail" {
+		t.Fatalf("execution exit=%d error=%v outputs=%v", code, err, outputs)
+	}
+}
