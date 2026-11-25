@@ -116,22 +116,22 @@ NSSM 服务状态为 Running 并不总能证明 Agent 子进程存活。安装�
 
 ## 安装器下载与校验
 
-以下命令固定安装器提交并检查脚本 SHA-256。将 `SIGNED_RELEASE` 替换为[发布页](https://github.com/r11234567/komari-agent/releases)中带当前平台 `.release.json` 的 tag，面板地址改为自己的 HTTPS 地址。Linux systemd 需要同一 tag 内的 Agent 和 Host 签名。
+以下命令固定安装器提交并检查脚本 SHA-256。将面板地址改为自己的 HTTPS 地址。安装器按平台从 GitHub 发布列表选择带签名的稳定版，或当前带签名的 Snapshot。可用 `--install-version` 指定[发布页](https://github.com/r11234567/komari-agent/releases)的确切 tag。Linux systemd 需要同一 tag 内的 Agent 和 Host 签名。
 
 ```bash
-curl -fsSL 'https://raw.githubusercontent.com/r11234567/komari-agent/ee35277e63560af22e08a6b0b4254dc3e6c8302a/install.sh' -o install.sh &&
-printf '%s  %s\n' '538e9caf04d7276666cc2811e82e670e04ffa7d70ca94f84fe67c55d982209f6' install.sh | sha256sum -c - &&
-sudo bash ./install.sh --install-version 'SIGNED_RELEASE' -e 'https://panel.example.com'
+curl -fsSL 'https://raw.githubusercontent.com/r11234567/komari-agent/84604a6271d2f35620ebf542b5fa59ce9c1600b5/install.sh' -o install.sh &&
+printf '%s  %s\n' '4378e1221200eddd6722775957e71a7eb4c34be9eaca8155f9802eb868d7e2a0' install.sh | sha256sum -c - &&
+sudo bash ./install.sh -e 'https://panel.example.com'
 ```
 
 macOS 将 `sha256sum` 换成 `shasum -a 256`。
 
 ```powershell
-Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -Uri 'https://raw.githubusercontent.com/r11234567/komari-agent/ee35277e63560af22e08a6b0b4254dc3e6c8302a/install.ps1' -OutFile .\install.ps1
-if ((Get-FileHash -LiteralPath .\install.ps1 -Algorithm SHA256).Hash -ne '9df1e67e5613064046d9fdbe898c74fa87b66aafdb238e9512b205d04fa7dcb4') {
+Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -Uri 'https://raw.githubusercontent.com/r11234567/komari-agent/84604a6271d2f35620ebf542b5fa59ce9c1600b5/install.ps1' -OutFile .\install.ps1
+if ((Get-FileHash -LiteralPath .\install.ps1 -Algorithm SHA256).Hash -ne 'e4e6426209d264929c36723adc12aeb5cfb57592e2392047ade1f93dcb5ec808') {
     throw 'Installer SHA-256 mismatch'
 }
-& ([scriptblock]::Create((Get-Content -LiteralPath .\install.ps1 -Raw))) --install-version 'SIGNED_RELEASE' -e 'https://panel.example.com'
+& ([scriptblock]::Create((Get-Content -LiteralPath .\install.ps1 -Raw))) -e 'https://panel.example.com'
 ```
 
 安装器用固定发行公钥验证 `.release.json`，再核对组件、版本、系统、架构和文件 SHA-256。
