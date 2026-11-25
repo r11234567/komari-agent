@@ -11,6 +11,7 @@ import plistlib
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -30,6 +31,29 @@ def ps_function(name):
 
 
 class UnixInstallerTests(unittest.TestCase):
+    def test_release_resolution_uses_one_signed_release_for_required_components(self):
+        resolver = "resolve_release_version() {" + between(SH, "resolve_release_version() {", "# Default values")
+        manifest = "komari-agent-linux-amd64.release.json"
+        host = "komari-host-linux-amd64.release.json"
+        releases = [
+            {"tag_name": "1.2.91", "prerelease": False, "draft": False, "assets": [{"name": manifest}]},
+            {"tag_name": "Snapshot-2611250102", "prerelease": True, "draft": False, "assets": [{"name": manifest}]},
+            {"tag_name": "Snapshot-2611250101", "prerelease": True, "draft": False, "assets": [{"name": manifest}, {"name": host}]},
+        ]
+        interpreter = shlex.quote(Path(sys.executable).as_posix())
+        script = (f'python3() {{ {interpreter} "$@"; }}; '
+                  'curl() { cat; }; log_error() { echo "$1" >&2; }; ' + resolver +
+                  '\nresolve_release_version linux amd64 "$1" "$2"')
+        for requested, host_required, expected in [
+            ("", "true", "Snapshot-2611250101"),
+            ("", "false", "1.2.91"),
+            ("1.2.89", "true", "1.2.89"),
+        ]:
+            result = subprocess.run([BASH, "-c", script, "resolver", requested, host_required],
+                                    input=json.dumps(releases), text=True, capture_output=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), expected)
+
     def render(self, manager, extra=(), enrolled=False, running=True):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -198,6 +222,27 @@ function Get-ReleaseVersion {{ 'test' }}
             self.assertEqual(Path(config["runtime_state_file"]).resolve(), (Path(tmp) / "program data" / "Komari" / "komari-test" / "runtime-config.json").resolve())
             self.assertTrue(config["privileged_state_file"].endswith("privileged.json"))
             self.assertTrue(config["replay_state_file"].endswith("nonces.json"))
+
+    def test_windows_release_discovery_skips_unsigned_stable_and_drafts(self):
+        script = ps_function("Get-ReleaseVersion") + r"""
+$Arch = 'amd64'
+$InstallVersion = ''
+$ReleaseRepository = 'komari/test'
+function Invoke-RestMethod {
+    param($Uri, $TimeoutSec)
+    $present = @(@{ name = 'komari-agent-windows-amd64.exe.release.json' })
+    @(
+        [PSCustomObject]@{tag_name='1.2.91'; prerelease=$false; draft=$false; assets=@()},
+        [PSCustomObject]@{tag_name='Snapshot-2611250103'; prerelease=$true; draft=$true; assets=$present},
+        [PSCustomObject]@{tag_name='Snapshot-2611250101'; prerelease=$true; draft=$false; assets=$present},
+        [PSCustomObject]@{tag_name='Snapshot-2611250102'; prerelease=$true; draft=$false; assets=$present}
+    )
+}
+Get-ReleaseVersion
+$InstallVersion = '1.2.89'
+Get-ReleaseVersion
+"""
+        self.assertEqual(self.run_ps(script).splitlines(), ["Snapshot-2611250102", "1.2.89"])
 
     def test_nssm_running_with_failed_child_is_rejected(self):
         function = ps_function("Start-ServiceAndWait")

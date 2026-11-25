@@ -101,11 +101,15 @@ switch ($env:PROCESSOR_ARCHITECTURE) {
 function Get-ReleaseVersion {
     $Version = $InstallVersion
     if ([string]::IsNullOrWhiteSpace($Version)) {
-        $LatestUrl = "https://github.com/$ReleaseRepository/releases/latest"
-        if ($GitHubProxy) { $LatestUrl = "$($GitHubProxy.TrimEnd('/'))/$LatestUrl" }
-        $ResolvedUrl = & "$env:SystemRoot\System32\curl.exe" -fsSL -o NUL -w '%{url_effective}' $LatestUrl
-        Assert-NativeCommand "Resolving the latest release version"
-        $Version = ($ResolvedUrl -split '/')[-1]
+        $Releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$ReleaseRepository/releases?per_page=10" -TimeoutSec 30
+        $Manifest = "komari-agent-windows-$Arch.exe.release.json"
+        $Candidates = @($Releases | Where-Object { -not $_.draft -and $_.assets.name -contains $Manifest })
+        $Version = $Candidates | Where-Object { -not $_.prerelease } | Select-Object -First 1 -ExpandProperty tag_name
+        if (-not $Version) {
+            $Version = $Candidates | Where-Object { $_.prerelease -and $_.tag_name -cmatch '^Snapshot-[0-9]{10}$' } |
+                Select-Object -ExpandProperty tag_name | Sort-Object -Descending | Select-Object -First 1
+        }
+        if (-not $Version) { throw "No signed Windows release found. Specify a signed tag with --install-version." }
     }
     if ($Version -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$' -or $Version -eq "latest") {
         throw "A concrete release tag is required."
@@ -114,12 +118,7 @@ function Get-ReleaseVersion {
 }
 
 function Get-ReleaseUrl([string]$Version, [string]$FileName) {
-    if ($Version -eq "latest") {
-        $Url = "https://github.com/$ReleaseRepository/releases/latest/download/$FileName"
-    }
-    else {
-        $Url = "https://github.com/$ReleaseRepository/releases/download/$Version/$FileName"
-    }
+    $Url = "https://github.com/$ReleaseRepository/releases/download/$Version/$FileName"
     if (-not [string]::IsNullOrWhiteSpace($GitHubProxy)) {
         return "$($GitHubProxy.TrimEnd('/'))/$Url"
     }
