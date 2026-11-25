@@ -48,8 +48,7 @@ type Policy struct {
 	// An algorithm absent from this list is ignored even if its signature is
 	// cryptographically valid, which is what lets a deployment retire one.
 	AcceptedAlgorithms []int32
-	// RequireAll demands every accepted algorithm present in the envelope
-	// verify, for a deployment that has finished migrating to dual-signing.
+	// RequireAll demands a valid signature for every accepted algorithm, for a deployment that has finished migrating to dual-signing.
 	RequireAll bool
 	// MinimumSignatures is how many must verify. Zero means one.
 	MinimumSignatures uint32
@@ -130,7 +129,7 @@ func (v *Verifier) Verify(envelope *securityv1.SignedEnvelope) (Instruction, err
 	// it earlier would let a malformed replay burn a nonce and make the
 	// legitimate instruction fail.
 	if v.replay != nil {
-		if err := v.replay.Consume(instruction.GetNonce(), timeOrZero(instruction.GetExpiresAt())); err != nil {
+		if err := v.replay.consume(instruction.GetNonce(), timeOrZero(instruction.GetExpiresAt()), now); err != nil {
 			return Instruction{}, err
 		}
 	}
@@ -158,7 +157,6 @@ func (v *Verifier) verifySignatures(payload []byte, signatures []*securityv1.Sig
 
 	now := v.nowFunc()
 	verified := make(map[int32]bool)
-	present := make(map[int32]bool)
 	verifiedKeyIDs := make([]string, 0, len(signatures))
 	seenKeys := make(map[string]struct{}, len(signatures))
 
@@ -170,7 +168,6 @@ func (v *Verifier) verifySignatures(payload []byte, signatures []*securityv1.Sig
 		if !accepted[algorithm] {
 			continue
 		}
-		present[algorithm] = true
 		key, keyID, ok := v.verifyPinnedSignature(signature, payload, now)
 		if !ok {
 			continue
@@ -186,9 +183,9 @@ func (v *Verifier) verifySignatures(payload []byte, signatures []*securityv1.Sig
 	}
 
 	if v.policy.RequireAll {
-		for algorithm := range present {
+		for algorithm := range accepted {
 			if !verified[algorithm] {
-				return "", fmt.Errorf("a %s signature was present but did not verify", describeAlgorithm(algorithm))
+				return "", fmt.Errorf("the policy requires a valid %s signature", describeAlgorithm(algorithm))
 			}
 		}
 	}
