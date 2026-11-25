@@ -16,7 +16,7 @@ try {
     # the released Agent: fixing this installer must not require a new binary.
     $Installer = [scriptblock]::Create((Get-Content ./install.ps1 -Raw))
     $Options = @('--install-dir', $InstallDir, '--install-service-name', $ServiceName,
-        '--install-version', '1.2.89', '-e', 'http://127.0.0.1:9')
+        '--install-version', 'Snapshot-2611250731', '-e', 'http://127.0.0.1:9')
     & $Installer @Options
     Assert-Condition ((Get-Service $ServiceName).Status -eq 'Stopped') 'Unenrolled service must wait for login'
     $AgentPath = Join-Path $InstallDir 'komari-agent.exe'
@@ -45,6 +45,17 @@ try {
     $Logs = Get-Content (Join-Path $InstallDir 'logs\agent-stderr.log') -Raw
     Assert-Condition ($Logs -like '*Monitoring Interfaces:*') 'Agent did not reach collectors'
     Assert-Condition ($Logs -notmatch 'Access is denied|permission denied|failed to initialize runtime config|load privileged state:') 'Daemon cannot access its state'
+    # The previously published stable build lacks a publisher signature.
+    # A failed, unverified upgrade must leave the live service and binary intact.
+    $ExpectedHash = (Get-FileHash -LiteralPath $AgentPath).Hash
+    $Rejected = $false
+    try {
+        & $Installer --install-dir $InstallDir --install-service-name $ServiceName --install-version 1.2.89
+    }
+    catch { $Rejected = $true }
+    Assert-Condition $Rejected 'Unsigned Agent release was accepted'
+    Assert-Condition ((Get-FileHash -LiteralPath $AgentPath).Hash -eq $ExpectedHash) 'Rejected upgrade changed the Agent binary'
+    Assert-Condition ((Get-CimInstance Win32_Service -Filter "Name='$ServiceName'").ProcessId -eq $Service.ProcessId) 'Rejected upgrade restarted the live service'
     # Do not query config while its independent disk readers race initialization.
     & $AgentPath config show | Out-File (Join-Path $ArtifactDir 'windows-config.json')
     Assert-Condition ($LASTEXITCODE -eq 0) 'Installed CLI cannot read service state'

@@ -183,11 +183,13 @@ $env:ProgramData = Join-Path '{escaped_tmp}' 'program data'
 $ServiceName = 'komari-test'
 $RuntimeIdentity = 'service-account'
 $KomariArgs = @('--credentials-file=custom credentials.json')
+$Stage = Join-Path '{escaped_tmp}' 'staging'
+New-Item -ItemType Directory -Path $Stage, $InstallDir | Out-Null
 function Get-ReleaseVersion {{ 'test' }}
 """
             functions = "\n".join(ps_function(name) for name in ["Quote-Argument", "Join-Arguments", "Get-AgentOption"])
             layout = "$Version = Get-ReleaseVersion" + between(PS, "$Version = Get-ReleaseVersion", "# Fail before stopping")
-            manifest = "# Pass all paths explicitly" + between(PS, "# Pass all paths explicitly", "$Nssm = Ensure-Nssm")
+            manifest = "# Record the same state paths" + between(PS, "# Record the same state paths", "    if (-not $PreviousService)")
             output = self.run_ps(setup + functions + layout + manifest + '\nGet-Content $ServiceConfigPath -Raw\n')
             config = json.loads(output)
             # Windows PowerShell expands 8.3 temp-directory aliases (RUNNER~1)

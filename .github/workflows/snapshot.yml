@@ -106,7 +106,6 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: bash scripts/ci/build-targets.sh
       - name: Sign installation artifacts for the exact Snapshot release
-        if: matrix.goos == 'linux' || matrix.goos == 'windows'
         env:
           RELEASE_OS: ${{ matrix.goos }}
           KOMARI_RELEASE_SIGNING_KEY: ${{ secrets.KOMARI_RELEASE_SIGNING_KEY }}
@@ -117,10 +116,10 @@ jobs:
           set -euo pipefail
           for arch in $TARGET_ARCHES; do
             components=(komari-agent)
-            extension=.exe
+            extension=""
+            if [[ "$RELEASE_OS" == windows ]]; then extension=.exe; fi
             if [[ "$RELEASE_OS" == linux ]]; then
               components+=(komari-host komari-agent-rescue)
-              extension=""
             fi
             for component in "${components[@]}"; do
               binary="build/$RELEASE_OS-$arch/$component-$RELEASE_OS-$arch$extension"

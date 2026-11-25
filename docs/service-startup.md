@@ -85,11 +85,13 @@ sudo launchctl print system/com.komari.komari-agent
 sudo tail -n 60 /var/log/komari-agent.log
 ```
 
-`launchctl bootstrap` 成功只表示任务已加载，仍应检查 `state = running` 和日志。安装器会保留参数边界、转义 plist XML，并安装 macOS 的提权脚本。自定义服务名时，对应 label 为 `com.komari.<服务名>`。
+`launchctl bootstrap` 后通过 `launchctl print` 和日志确认 `state = running`。安装器会保留参数边界并转义 plist XML。自定义服务名时，对应 label 为 `com.komari.<服务名>`。
+
+macOS 和其他非 systemd 安装需要 Python 3 和支持 Ed25519 的 OpenSSL 3。若系统自带的是 LibreSSL，请先安装 OpenSSL 3，并确保管理员运行安装器时使用的是该版本。可执行文件和服务配置由 root 持有。服务账号只需写入安装目录下的 `state/`，旧版默认位置的状态文件会复制到该目录。
 
 ## Windows
 
-Windows 安装器目前仅开放普通监控模式：服务固定使用 `LocalService`，强制关闭远程控制、WebSSH、远程执行，不安装救援或提权脚本。无需新版 Agent，使用当前发布的二进制即可；Windows 的特权 v2 初始化、特权配置下发和主机动作仍不受支持。不要用面板的特权配置完成状态判断普通监控是否在线。
+Windows 安装器提供普通监控模式，服务以 `LocalService` 运行。请先为系统安装 Git for Windows，安装器使用其 OpenSSL 校验发布签名，并使用固定 SHA-256 校验 NSSM 下载包。Agent 和 NSSM 均通过校验后，安装器才会替换现有服务的程序。
 
 Windows 基础 GPU 采集默认开启，可通过普通运行时配置显式关闭；它不需要特权下发，也不改变服务身份。NVIDIA 动态指标使用限时四秒的五字段 `nvidia-smi` CSV 查询，避免完整 XML 中非 UTF-8 内容导致整次采集失败。GPU 型号、显存、利用率和温度使用后端的标准指标名及设备标签上报。
 
@@ -118,6 +120,8 @@ Get-Content "$env:ProgramFiles\Komari\logs\agent-stderr.log" -Tail 60
 NSSM 服务状态为 Running 并不总能证明 Agent 子进程存活。安装器设置 5 秒重启间隔，并在启动后复查状态；Paused 或启动异常时输出 stderr 日志和服务管理器事件。默认服务目录、状态目录的权限在 LocalSystem 模式下也会设置，以支持后续降权回 LocalService。
 
 ## 验证修复
+
+安装器使用固定发行公钥验证 `.release.json`，并校验组件、版本、系统、架构及文件 SHA-256。若默认稳定版尚未提供签名，请通过 `--install-version` 选择带签名的发布版本。Linux systemd 安装需要同一版本的 Agent 和 Host 签名。
 
 `go test ./cmd ./clientcore ./core/credentials` 验证路径选择、显式覆盖、环境变量优先级、注册前的写权限检查和客户端凭据处理。
 

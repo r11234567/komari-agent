@@ -35,6 +35,59 @@ log_config() {
     echo -e "${CYAN}[CONFIG]${NC} $1"
 }
 
+# Verify before making an artifact executable. The publisher key is pinned
+# in the installer independently of the downloaded binary and manifest.
+verify_release_asset() {
+    python3 - "$@" <<'PY'
+import base64
+import hashlib
+import json
+import pathlib
+import subprocess
+import sys
+import tempfile
+
+binary, manifest, component, version, platform, arch = sys.argv[1:]
+try:
+    with open(manifest, "rb") as source:
+        encoded = source.read(16385)
+    if len(encoded) > 16384:
+        raise ValueError("manifest exceeds 16 KiB")
+    signed = json.loads(encoded)
+    if signed["key_id"] != "komari-release-8372cfc532b8f1bf":
+        raise ValueError("unexpected publisher key ID")
+    payload = base64.b64decode(signed["payload"], validate=True)
+    signature = base64.b64decode(signed["signature"], validate=True)
+    if len(signature) != 64:
+        raise ValueError("invalid Ed25519 signature length")
+    with tempfile.TemporaryDirectory(dir=pathlib.Path(manifest).parent) as work:
+        directory = pathlib.Path(work)
+        key = bytes.fromhex("302a300506032b6570032100") + base64.b64decode(
+            "Bii7plda32t+iJAWXT2zBoy3uOiUuLqZa8dLqwmBQ6o="
+        )
+        (directory / "key").write_bytes(key)
+        (directory / "payload").write_bytes(payload)
+        (directory / "signature").write_bytes(signature)
+        subprocess.run(
+            ["openssl", "pkeyutl", "-verify", "-pubin", "-keyform", "DER",
+             "-inkey", str(directory / "key"), "-rawin", "-in", str(directory / "payload"),
+             "-sigfile", str(directory / "signature")],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    digest = hashlib.sha256()
+    with open(binary, "rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    expected = dict(schema="komari.release.v1", component=component,
+                    version=version, os=platform, arch=arch, sha256=digest.hexdigest())
+    if json.loads(payload) != expected:
+        raise ValueError("component, version, platform or SHA-256 did not match")
+    print(digest.hexdigest())
+except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as error:
+    sys.exit(f"Release verification failed for {component} {version}: {error}")
+PY
+}
+
 # Default values
 service_name="komari-agent"
 target_dir="/usr/lib/komari/komari-agent"
@@ -514,6 +567,7 @@ if [ "$uninstall_only" != true ]; then
     require_command() { command -v "$1" >/dev/null 2>&1 || missing_packages+=("$2"); }
     require_command python3 python3
     require_command curl curl
+    require_command openssl openssl
     require_command flock util-linux
     require_command runuser util-linux
     require_command useradd passwd
@@ -555,7 +609,7 @@ if [ "$uninstall_only" != true ]; then
             log_error "Install these dependencies with your distribution package manager, then retry: ${missing_packages[*]}"; exit 1
         fi
     fi
-    for required_command in python3 curl flock runuser useradd; do
+    for required_command in python3 curl openssl flock runuser useradd; do
         command -v "$required_command" >/dev/null 2>&1 || { log_error "Required command remains unavailable after dependency installation: $required_command"; exit 1; }
     done
     if [ "$metrics_only" != true ] && [ ! -x /usr/bin/pamtester ]; then
@@ -605,6 +659,10 @@ if [ "$uninstall_only" != true ]; then
         install_version="${latest_url##*/}"
         release_path="download/${install_version}"
     fi
+    if [[ ! "$install_version" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ || "$install_version" = latest ]]; then
+        log_error "A concrete release tag is required."
+        exit 1
+    fi
     ensure_root_dir /var/cache/komari-installer
     staging=$(mktemp -d /var/cache/komari-installer/download.XXXXXXXX) || exit 1
     agent_digest=""
@@ -616,8 +674,12 @@ if [ "$uninstall_only" != true ]; then
         expected="${checksum%% *}"
         [[ "$expected" =~ ^[a-fA-F0-9]{64}$ ]] || { log_error "Invalid release checksum"; exit 1; }
         (umask 077; curl -fsSL -o "$binary_path" "${release_base}/${release_path}/${asset}") || exit 1
-        actual=$(sha256sum "$binary_path") || exit 1
-        [ "${actual%% *}" = "$expected" ] || { log_error "Checksum mismatch for $asset"; exit 1; }
+        curl -fsSL -o "$binary_path.release.json" "${release_base}/${release_path}/${asset}.release.json" || {
+            log_error "Publisher signature unavailable for $asset ($install_version). Choose a signed release."
+            exit 1
+        }
+        actual=$(verify_release_asset "$binary_path" "$binary_path.release.json" "$component" "$install_version" linux "$arch") || exit 1
+        [ "$actual" = "$expected" ] || { log_error "Checksum mismatch for $asset"; exit 1; }
         chmod 755 "$binary_path" || exit 1
         [ "$component" != komari-agent ] || agent_digest="$expected"
         [ "$component" != komari-host ] || host_digest="$expected"
@@ -1110,9 +1172,8 @@ uninstall_previous() {
     fi
 }
 
-# Uninstall previous installation
-uninstall_previous
 if [ "$uninstall_only" = true ]; then
+    uninstall_previous
     case "$target_dir" in
         /opt/komari|/usr/local/komari|/c/komari|"$HOME/.komari")
             rm -rf -- "$target_dir"
@@ -1128,7 +1189,7 @@ fi
 install_dependencies() {
     log_step "Checking and installing dependencies..."
 
-    local deps="curl"
+    local deps="curl python3 openssl"
     local missing_deps=""
     for cmd in $deps; do
         if ! command -v $cmd >/dev/null 2>&1; then
@@ -1153,9 +1214,9 @@ install_dependencies() {
         elif command -v apk >/dev/null 2>&1; then
             log_info "Using apk to install dependencies..."
             apk add $missing_deps
-        elif command -v brew >/dev/null 2>&1; then
-            log_info "Using Homebrew to install dependencies..."
-            brew install $missing_deps
+        elif command -v pkg >/dev/null 2>&1; then
+            log_info "Using pkg to install dependencies..."
+            pkg install -y $missing_deps
         else
             log_error "No supported package manager found (apt/yum/apk/brew)"
             exit 1
@@ -1177,6 +1238,10 @@ install_dependencies() {
  
 # Install dependencies
 install_dependencies
+case "$(openssl version)" in
+    'OpenSSL '[3-9].*) ;;
+    *) log_error "OpenSSL 3 or newer is required for Ed25519 release verification."; exit 1 ;;
+esac
 
  
 
@@ -1247,80 +1312,118 @@ else
     download_url="https://github.com/${release_repository}/releases/${download_path}/${file_name}"
 fi
 
-log_step "Creating installation directory: ${GREEN}$target_dir${NC}"
-mkdir -p "$target_dir"
-if [ "$EUID" -eq 0 ] && [ "$service_user" != "root" ]; then
-    chown -R "$service_user" "$target_dir"
-fi
-
-# Download binary
-if [ -n "$github_proxy" ]; then
-    log_step "Downloading $file_name via proxy..."
-    log_info "URL: ${CYAN}$download_url${NC}"
-else
-    log_step "Downloading $file_name directly..."
-    log_info "URL: ${CYAN}$download_url${NC}"
-fi
-if ! curl -fL -o "$komari_agent_path" "$download_url"; then
-    log_error "Download failed"
+if [ "$os_name" = windows ]; then
+    log_error "Use install.ps1 for Windows."
     exit 1
 fi
-
-# Set executable permissions
-chmod +x "$komari_agent_path"
-if [ "$EUID" -eq 0 ] && [ "$service_user" != "root" ]; then
-    chown "$service_user" "$komari_agent_path"
+if [ "$rescue_enabled" = true ]; then
+    log_error "Rescue installation requires Linux with a running systemd service manager."
+    exit 1
 fi
+if [ "$version_to_install" = latest ]; then
+    release_base="https://github.com/${release_repository}/releases"
+    [ -z "$github_proxy" ] || release_base="${github_proxy%/}/${release_base}"
+    latest_url=$(curl -fsSL -o /dev/null -w '%{url_effective}' "$release_base/latest") || exit 1
+    version_to_install="${latest_url##*/}"
+    download_url="$release_base/download/$version_to_install/$file_name"
+fi
+[[ "$version_to_install" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ && "$version_to_install" != latest ]] || exit 1
+
+stage=$(mktemp -d /tmp/komari-install.XXXXXXXX) || exit 1
+trap 'rm -f -- "$stage/agent" "$stage/agent.release.json"; rmdir -- "$stage"' EXIT
+curl -fsSL -o "$stage/agent" "$download_url" || exit 1
+curl -fsSL -o "$stage/agent.release.json" "$download_url.release.json" || {
+    log_error "Publisher signature unavailable for $file_name ($version_to_install). Choose a signed release."
+    exit 1
+}
+verify_release_asset "$stage/agent" "$stage/agent.release.json" komari-agent "$version_to_install" "$os_name" "$arch" >/dev/null || exit 1
+
+# Protect executables in the installation directory, including upgrades
+# from the old service-owned layout. Only the state child is writable.
+python3 - "$target_dir" "$service_user" <<'PY' || exit 1
+import os
+import pathlib
+import pwd
+import shutil
+import stat
+import sys
+import tempfile
+
+target = pathlib.Path(os.path.abspath(sys.argv[1]))
+account = pwd.getpwnam(sys.argv[2])
+
+def require_directory(path, owners, writable=False):
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid not in owners or (not writable and info.st_mode & 0o022):
+        sys.exit(f"Untrusted installation directory: {path}")
+
+for parent in reversed(target.parents):
+    parent.mkdir(mode=0o755, exist_ok=True)
+    require_directory(parent, {0})
+target.mkdir(mode=0o755, exist_ok=True)
+require_directory(target, {0, account.pw_uid}, writable=True)
+directory = os.open(target, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    os.fchown(directory, 0, 0)
+    os.fchmod(directory, 0o755)
+finally:
+    os.close(directory)
+
+state = target / "state"
+try:
+    state.mkdir(mode=0o700)
+    os.chown(state, account.pw_uid, account.pw_gid, follow_symlinks=False)
+except FileExistsError:
+    require_directory(state, {account.pw_uid})
+for name in ("credentials.json", "runtime-config.json", "privileged.json", "nonces.json"):
+    source = target / name
+    if not source.exists() and not source.is_symlink():
+        continue
+    destination = state / name
+    if destination.exists() or destination.is_symlink():
+        continue
+    with os.fdopen(os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as src:
+        info = os.fstat(src.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid not in {0, account.pw_uid} or info.st_nlink != 1:
+            sys.exit(f"Invalid existing Agent state file: {source}")
+        fd, temporary = tempfile.mkstemp(prefix='.state.', dir=target)
+        try:
+            with os.fdopen(fd, 'wb') as dst:
+                shutil.copyfileobj(src, dst)
+                dst.flush()
+                os.fsync(dst.fileno())
+                os.fchown(dst.fileno(), account.pw_uid, account.pw_gid)
+            try:
+                os.link(temporary, destination)
+            except FileExistsError:
+                pass
+        finally:
+            os.unlink(temporary)
+PY
+runtime_state_path="${runtime_state_override:-$target_dir/state/runtime-config.json}"
+credentials_path="${credentials_override:-$target_dir/state/credentials.json}"
+privileged_state_path="${privileged_state_override:-$target_dir/state/privileged.json}"
+replay_state_path="${replay_state_override:-$target_dir/state/nonces.json}"
+for name in runtime_state_path credentials_path privileged_state_path replay_state_path; do
+    [[ "${!name}" = /* ]] || printf -v "$name" '%s/%s' "$target_dir" "${!name}"
+done
+
+if [ -L "$komari_agent_path" ] || { [ -e "$komari_agent_path" ] && [ ! -f "$komari_agent_path" ]; }; then
+    log_error "Invalid existing executable path: $komari_agent_path"
+    exit 1
+fi
+staged_binary=$(mktemp "$target_dir/.agent.XXXXXXXX") || exit 1
+install -m 0755 "$stage/agent" "$staged_binary" && mv -f "$staged_binary" "$komari_agent_path" || exit 1
 log_success "Komari-agent installed to ${GREEN}$komari_agent_path${NC}"
 
-# Create a symlink in /usr/local/bin so operators can run komari-agent commands
-# directly (e.g. komari-agent login, komari-agent status) without knowing the
-# Install elevate.sh and uninstall.sh scripts
-elevate_script_path="${target_dir}/elevate.sh"
-uninstall_script_path="${target_dir}/uninstall.sh"
-script_source_dir="$(dirname "$0")"
-elevate_source_name="elevate.sh"
-[ "$os_name" = "darwin" ] && elevate_source_name="elevate_darwin.sh"
-
-if [ -f "${script_source_dir}/scripts/${elevate_source_name}" ]; then
-    cp "${script_source_dir}/scripts/${elevate_source_name}" "$elevate_script_path"
-elif [ -f "${script_source_dir}/${elevate_source_name}" ]; then
-    cp "${script_source_dir}/${elevate_source_name}" "$elevate_script_path"
-else
-    elevate_download_url="https://raw.githubusercontent.com/${release_repository}/main/scripts/${elevate_source_name}"
-    [ -n "$github_proxy" ] && elevate_download_url="${github_proxy}/${elevate_download_url}"
-    curl -fsSL -o "$elevate_script_path" "$elevate_download_url" 2>/dev/null || true
-fi
-if [ -f "$elevate_script_path" ]; then
-    chmod 750 "$elevate_script_path"
-    log_success "Host elevation script installed to ${GREEN}$elevate_script_path${NC}"
-fi
-
-if [ -f "${script_source_dir}/uninstall.sh" ]; then
-    cp "${script_source_dir}/uninstall.sh" "$uninstall_script_path"
-elif [ -f "${script_source_dir}/scripts/uninstall.sh" ]; then
-    cp "${script_source_dir}/scripts/uninstall.sh" "$uninstall_script_path"
-else
-    uninstall_download_url="https://raw.githubusercontent.com/${release_repository}/main/uninstall.sh"
-    [ -n "$github_proxy" ] && uninstall_download_url="${github_proxy}/${uninstall_download_url}"
-    curl -fsSL -o "$uninstall_script_path" "$uninstall_download_url" 2>/dev/null || true
-fi
-if [ -f "$uninstall_script_path" ]; then
-    chmod 750 "$uninstall_script_path"
-    log_success "Uninstaller script installed to ${GREEN}$uninstall_script_path${NC}"
-fi
-
-# Create symlinks in /usr/local/bin so operators can run commands directly
-if [ "$os_name" != "windows" ] && [ "$EUID" -eq 0 ]; then
-    symlink_dir="/usr/local/bin"
-    if [ -d "$symlink_dir" ]; then
-        ln -sf "$komari_agent_path" "${symlink_dir}/komari-agent"
-        [ -f "$elevate_script_path" ] && ln -sf "$elevate_script_path" "${symlink_dir}/komari-elevate"
-        [ -f "$uninstall_script_path" ] && ln -sf "$uninstall_script_path" "${symlink_dir}/komari-uninstall"
-        log_success "Symlinks created: komari-agent, komari-elevate, komari-uninstall in ${symlink_dir}"
-    fi
-elif [ "$os_name" != "windows" ] && [ "$EUID" -ne 0 ]; then
-    log_info "Not running as root; skipping /usr/local/bin symlinks."
+# Do not publish privileged links to the retired scripts from old installs.
+if [ -d /usr/local/bin ] && [ ! -L /usr/local/bin ]; then
+    for name in elevate uninstall; do
+        link="/usr/local/bin/komari-$name"
+        if [ -L "$link" ] && [ "$(readlink "$link")" = "$target_dir/$name.sh" ]; then
+            rm -f -- "$link"
+        fi
+    done
 fi
 
 komari_argv+=("--runtime-state-file" "$runtime_state_path" "--credentials-file" "$credentials_path"
@@ -1458,7 +1561,8 @@ fi
 # Share the exact state paths with every CLI subcommand. This manifest contains
 # no tokens or private keys and is readable by operators without exposing them.
 service_config_path="${target_dir}/service-config.json"
-if ! (umask 022; cat > "$service_config_path" << EOF
+staged_config=$(mktemp "$target_dir/.service-config.XXXXXXXX") || exit 1
+if ! (cat > "$staged_config" << EOF
 {
   "service_name": $(json_string "$service_name"),
   "service_user": $(json_string "$service_user"),
@@ -1473,10 +1577,12 @@ EOF
     log_error "Could not write installed service configuration"
     exit 1
 fi
-chmod 644 "$service_config_path"
-if [ "$service_user" != "root" ]; then
-    chown "$service_user" "$service_config_path"
+chmod 644 "$staged_config" || exit 1
+if [ -L "$service_config_path" ] || [ -d "$service_config_path" ]; then
+    log_error "Invalid service configuration path: $service_config_path"
+    exit 1
 fi
+mv -f "$staged_config" "$service_config_path" || exit 1
 
 agent_ready=false
 if [ -s "$credentials_path" ] || [ -n "$rescue_token" ] || [ -n "$auto_discovery_key" ]; then

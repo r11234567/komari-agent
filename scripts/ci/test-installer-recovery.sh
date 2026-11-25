@@ -53,6 +53,13 @@ sudo chmod go-w /usr/local/bin
 sudo install -d -m 755 "$fixture" "$fixture/mock-bin"
 sudo install -m 755 ci-artifacts/komari-agent "$fixture/komari-agent"
 sudo install -m 755 ci-artifacts/komari-host "$fixture/komari-host"
+# Use a disposable publisher for this copy of the real installer. Requests
+# still pass through the production verification path and exact release checks.
+sudo openssl genpkey -algorithm ED25519 -out "$fixture/installer-publisher.pem"
+sudo chmod 600 "$fixture/installer-publisher.pem"
+fixture_public=$(sudo openssl pkey -in "$fixture/installer-publisher.pem" -pubout -outform DER | tail -c 32 | base64 -w0)
+sed "s|Bii7plda32t+iJAWXT2zBoy3uOiUuLqZa8dLqwmBQ6o=|$fixture_public|" "$root/install.sh" > "$log_dir/installer-with-fixture-publisher.sh"
+sudo install -m 755 "$log_dir/installer-with-fixture-publisher.sh" "$fixture/install.sh"
 cat > "$log_dir/curl" <<'CURL'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -84,6 +91,34 @@ fi
 printf '%s\n' "$url" >> "$KOMARI_INSTALLER_REQUEST_LOG"
 if [[ "$url" = *.sha256 ]]; then
     if [ "${KOMARI_INSTALLER_BAD_HASH:-}" = "$component" ]; then printf '%064d  fixture\n' 0; else sha256sum "$source"; fi
+elif [[ "$url" = *.release.json ]] && [ "$component" != komari-agent-rescue ]; then
+    if [ "${KOMARI_INSTALLER_MISSING_SIGNATURE:-}" = "$component" ]; then exit 22; fi
+    version=${url%/*}
+    python3 - "$source" "$output" "$component" "${version##*/}" "$KOMARI_INSTALLER_FIXTURE/installer-publisher.pem" <<'PY'
+import base64
+import hashlib
+import json
+import os
+import pathlib
+import subprocess
+import sys
+import tempfile
+
+source, output, component, version, key = sys.argv[1:]
+with open(source, 'rb') as binary:
+    digest = hashlib.file_digest(binary, 'sha256').hexdigest()
+    payload = json.dumps(dict(schema='komari.release.v1', component=component, version=version,
+                              os='linux', arch='amd64', sha256=digest)).encode()
+with tempfile.NamedTemporaryFile(dir=pathlib.Path(output).parent) as staged:
+    staged.write(payload)
+    staged.flush()
+    signature = subprocess.check_output(['openssl', 'pkeyutl', '-sign', '-rawin', '-inkey', key, '-in', staged.name])
+if os.environ.get('KOMARI_INSTALLER_BAD_SIGNATURE') == component:
+    signature = bytes(64)
+with open(output, 'w') as manifest:
+    json.dump(dict(key_id='komari-release-8372cfc532b8f1bf', payload=base64.b64encode(payload).decode(),
+                   signature=base64.b64encode(signature).decode()), manifest)
+PY
 else
     [ -n "$output" ]
     cp "$source" "$output"
@@ -105,8 +140,10 @@ run_installer() {
         KOMARI_INSTALLER_HOST_VARIANT="${host_variant:-}" \
         KOMARI_INSTALLER_MISSING_RESCUE="${missing_rescue:-}" \
         KOMARI_INSTALLER_BAD_RESCUE="${bad_rescue:-}" \
+        KOMARI_INSTALLER_MISSING_SIGNATURE="${missing_signature:-}" \
+        KOMARI_INSTALLER_BAD_SIGNATURE="${bad_signature:-}" \
         KOMARI_INSTALLER_REQUEST_LOG="$log_dir/release-requests.log" \
-        bash "$root/install.sh" "${installer_flags[@]}" "$@"
+        bash "$fixture/install.sh" "${installer_flags[@]}" "$@"
 }
 expect_rejected() {
     local scenario="$1"; shift
@@ -147,6 +184,16 @@ sudo cmp "$fixture/komari-agent" "/usr/lib/komari/$pristine/komari-agent"
 sudo cmp "$fixture/komari-host" "/usr/lib/komari/$pristine/komari-host"
 test "$(sudo systemctl show "$pristine" --property=User --value)" = komari
 echo 'PASS: registered node updated with credentials, policy, service identity and unit preserved'
+
+sudo sha256sum "/usr/lib/komari/$pristine/komari-agent" "/usr/lib/komari/$pristine/komari-host" > "$log_dir/verified-install-before.sha256"
+missing_signature=komari-agent
+expect_rejected 'missing Agent publisher manifest preserves installed programs' run_installer "$pristine"
+unset missing_signature
+bad_signature=komari-host
+expect_rejected 'untrusted Host signature preserves installed programs' run_installer "$pristine"
+unset bad_signature
+sudo sha256sum -c "$log_dir/verified-install-before.sha256"
+sudo sha256sum -c "$log_dir/registered-before.sha256"
 
 # Isolated synthetic pending host transaction: installer preflight must refuse
 # even an ordinary Agent/Host-only update before replacing installed files.
