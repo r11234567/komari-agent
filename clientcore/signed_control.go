@@ -4,6 +4,7 @@ import (
 	"errors"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/komari-monitor/komari-agent/core/signing"
 	securityv1 "github.com/r11234567/komari-proto/gen/go/komari/security/v1"
 	websshv1 "github.com/r11234567/komari-proto/gen/go/komari/webssh/v1"
@@ -15,7 +16,7 @@ func (c *Client) verifyAgentControl(envelope *securityv1.SignedEnvelope, expecte
 	if !ok || identity.AgentID == "" {
 		return errors.New("agent identity is required to verify control instructions")
 	}
-	verified, err := signing.New(identity, replay).Verify(envelope)
+	verified, err := signing.New(identity, nil).Verify(envelope)
 	if err != nil {
 		return err
 	}
@@ -35,6 +36,9 @@ func (c *Client) verifyAgentControl(envelope *securityv1.SignedEnvelope, expecte
 	if !proto.Equal(body, expected) {
 		return errors.New("control instruction does not match the signed parameters")
 	}
+	if replay != nil {
+		return replay.Consume(verified.Nonce, verified.ExpiresAt)
+	}
 	return nil
 }
 
@@ -53,6 +57,9 @@ func (s *signedTerminalConnection) Receive() (*websshv1.AttachSessionResponse, e
 	if err != nil {
 		return nil, err
 	}
+	if wire == nil {
+		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("terminal control frame is missing"))
+	}
 	frame := proto.CloneOf(wire)
 	frame.Envelope = nil
 	expected := &websshv1.SessionControlFrame{
@@ -60,7 +67,7 @@ func (s *signedTerminalConnection) Receive() (*websshv1.AttachSessionResponse, e
 		Frame: frame, Challenge: s.challenge, FrameNumber: s.received + 1,
 	}
 	if err := s.client.verifyAgentControl(wire.GetEnvelope(), expected, "", nil); err != nil {
-		return nil, err
+		return nil, connect.NewError(connect.CodeUnauthenticated, err)
 	}
 	s.received++
 	return frame, nil
