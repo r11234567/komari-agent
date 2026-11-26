@@ -27,6 +27,13 @@ func TestNFDumpPreservesDirectionIPv6AndUnknown(t *testing.T) {
 	}
 }
 
+func TestNFDumpIdleSliceStillCountsAsCovered(t *testing.T) {
+	out, err := readFlows(strings.NewReader("No matching flows\n"), time.Now(), nil)
+	if err != nil || out.Partial || out.totals() != (Traffic{}) {
+		t.Fatalf("idle slice decoded as %#v: %v", out, err)
+	}
+}
+
 func TestXrayPolicyRejectsUserStats(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "xray-policy.json")
 	config := XrayConfig{PolicyFile: path}

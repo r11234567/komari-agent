@@ -118,7 +118,8 @@ func readFlows(reader io.Reader, start time.Time, local map[netip.Addr]bool) (sa
 	lines.Buffer(make([]byte, 256), 512)
 	for lines.Scan() {
 		line := strings.TrimSpace(lines.Text())
-		if line == "" {
+		// nfdump emits this line on a healthy empty slice even with -q.
+		if line == "" || line == "No matching flows" {
 			continue
 		}
 		fields := strings.Split(line, ",")
