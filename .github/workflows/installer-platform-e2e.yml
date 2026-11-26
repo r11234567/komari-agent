@@ -33,7 +33,7 @@ jobs:
             runner: ubuntu-24.04
           - platform: macOS launchd
             variant: launchd
-            runner: macos-15
+            runner: macos-15-intel
     steps:
       - uses: actions/checkout@v4
         with:
