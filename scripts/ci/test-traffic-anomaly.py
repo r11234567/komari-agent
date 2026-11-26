@@ -159,7 +159,7 @@ def main(binary, xray):
             )
             for address in ("192.0.2.1", "2001:db8:1::1"):
                 run("ip", "netns", "exec", client, sys.executable, "-c", udp, address)
-            end_of_burst = time.time()
+            assert snapshot(state) is None, "incident was saved before the short burst ended"
             def both_sources():
                 event = snapshot(state)
                 if event is not None:
@@ -169,7 +169,6 @@ def main(binary, xray):
                 return None
 
             incoming = retry(both_sources, 130)
-            assert time.time() > end_of_burst
             assert incoming["reason"] == "fast_unexplained_ingress", incoming
             sources = {item["ip"]: item["bytes"] for item in incoming["ingress_sources"]}
             for address in ("192.0.2.2", "2001:db8:1::2"):
