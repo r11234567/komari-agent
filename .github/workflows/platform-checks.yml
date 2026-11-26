@@ -4,6 +4,36 @@ on:
 permissions:
   contents: read
 jobs:
+  traffic-anomaly-e2e:
+    name: Traffic anomaly pilot / real Linux flow capture
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Install the flow tools and verify the pinned Xray fixture
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nfdump iproute2 unzip
+          sudo systemctl stop nfdump
+          bash scripts/ci/fetch-traffic-test-xray.sh "$RUNNER_TEMP/traffic-e2e"
+      - name: Test policy, counters and incident retention
+        run: bash scripts/ci/run-audit-check.sh traffic-anomaly-unit go test -race ./internal/trafficwatch
+      - name: Build the Agent and capture real network flows
+        run: |
+          go build -o "$RUNNER_TEMP/traffic-e2e/komari-agent" .
+          bash scripts/ci/run-audit-check.sh traffic-anomaly-e2e sudo python3 -B scripts/ci/test-traffic-anomaly.py \
+            "$RUNNER_TEMP/traffic-e2e/komari-agent" "$RUNNER_TEMP/traffic-e2e/xray"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: traffic-anomaly-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30
   linux:
     name: Linux runtime, installer and security checks
     runs-on: ubuntu-latest

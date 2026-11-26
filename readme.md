@@ -16,6 +16,8 @@ Komari Agent 是面向现代跨平台基础设施的监控与远程运维探针�
 
 ## 一、 快速安装与部署
 
+按流量计费的 Linux 节点可选用[流量异常取证试点](docs/traffic-anomaly-pilot.md)查看本机对端 IP 和异常用量。
+
 探针默认遵循**最小权限原则（Zero-Trust Default-Deny）**：Linux 下以系统专用非登录账号 `komari` 运行，macOS 下以隐藏服务账号 `_komari` 运行，Windows 下以受限 `LocalService` 服务运行。首次部署时远程控制（WebSSH / 远程执行）默认完全关闭。
 
 ### 1. Linux 一键安装
