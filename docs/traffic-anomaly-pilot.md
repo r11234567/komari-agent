@@ -1,6 +1,6 @@
 # Linux 流量异常取证试点
 
-`komari-agent traffic-anomaly` 在单个 Linux 节点上常驻采集和分析。正常流量只写小时用量，异常才写对端 IP 快照。试点的结果保存在本机，便于用真实节点验证采集口径、误报和资源开销。
+`komari-agent traffic-anomaly` 在单个 Linux 节点上常驻采集和分析。正常流量只写小时用量，异常才写对端 IP 快照。结果默认保存在本机。需要在面板查看时，可给节点配置下文的上报目录。
 
 ## 先选对网卡
 
@@ -59,6 +59,28 @@ sudo systemd-run --unit=komari-traffic --collect \
 Ubuntu 24.04 的 `nfpcapd 1.7.3` 在 Linux 上使用固定的 256 MiB 锁定环形缓冲，`-B` 只调流缓存。出现 `mmap() failed: Resource temporarily unavailable` 时先检查 `LimitMEMLOCK`。上面的 384 MiB 是试点服务内存上限示例。资源紧张的节点先测空闲及实际流量占用，再决定是否启用。
 
 试点会拒绝 `nfpcapd 1.7.10`。在 Rocky Linux 10 的 EPEL 包上，短 UDP 突发已被内核采集，却在链路空闲后未及时导出流记录。这个版本无法满足保留突发对端证据的要求。RHEL 系的回归使用 Rocky Linux 9 的 EPEL 包。
+
+## 在面板查看
+
+面板与 Agent 都需要支持流量取证协议。先在面板绑定 Agent，再让采集程序开始捕获。现有服务名和账号可用 `systemctl show komari-agent.service -p User -p Group` 查看。
+
+1. 建立一个专用中转目录，属主为采集账号，属组为 Agent 服务可读的专用组。示例假设两个服务的账号分别为 `komari-traffic` 和 `komari`。
+
+   ```bash
+   sudo install -d -o komari-traffic -g komari -m 2750 /var/lib/komari-traffic-handoff
+   ```
+
+2. 在采集器 JSON 中设置 `"upload_dir": "/var/lib/komari-traffic-handoff"`，再重启采集器。中转目录中的记录权限为 `0640`，仅包括已封存的小时汇总和异常快照。
+3. 用 `sudo systemctl edit komari-agent.service` 添加以下配置，再执行 `sudo systemctl restart komari-agent.service`。自定义服务名需要替换。
+
+   ```ini
+   [Service]
+   Environment=KOMARI_TRAFFIC_EVIDENCE_INBOX=/var/lib/komari-traffic-handoff
+   ```
+
+4. 在面板打开 **管理 → 流量取证**，选择节点。小时汇总在小时结束或采集器正常退出后上报。异常快照在证据窗口结束后上报。
+
+中转目录由采集器负责清理。断网后 Agent 会在本机留存期限内重试。当前注册之前开始的记录不会上报。面板异常快照自采集窗口结束起保留 72 小时，小时汇总保留 7 天。移除环境变量并重启 Agent 可关闭上报。
 
 ## Xray 和分路
 

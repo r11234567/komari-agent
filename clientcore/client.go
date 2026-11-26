@@ -379,6 +379,14 @@ func (c *Client) Run(ctx context.Context) error {
 		trafficDone := make(chan struct{})
 		go func() { defer close(trafficDone); c.runTrafficSamples(trafficCtx, identity) }()
 		defer func() { stopTraffic(); <-trafficDone }()
+		if inbox := os.Getenv("KOMARI_TRAFFIC_EVIDENCE_INBOX"); inbox != "" {
+			evidenceDone := make(chan struct{})
+			go func() {
+				defer close(evidenceDone)
+				c.runTrafficEvidence(trafficCtx, identity, inbox)
+			}()
+			defer func() { stopTraffic(); <-evidenceDone }()
+		}
 	}
 	// Renewal starts before configuration synchronization so an expired AT or
 	// startup backoff cannot postpone recovery. All paths share refreshMu.

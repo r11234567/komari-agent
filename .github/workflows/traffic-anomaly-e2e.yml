@@ -1,0 +1,73 @@
+name: Traffic anomaly sampler E2E
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/traffic-anomaly-e2e.yml'
+      - 'internal/trafficwatch/**'
+      - 'cmd/traffic_anomaly*'
+      - 'clientcore/**'
+      - 'scripts/ci/*traffic*'
+      - 'third_party/komari-proto'
+      - 'go.*'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  traffic-anomaly-e2e:
+    name: Traffic anomaly pilot / ${{ matrix.distribution }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distribution: Ubuntu 24.04
+            image: native
+          - distribution: Debian 13
+            image: debian13
+          - distribution: Rocky Linux 9
+            image: rocky9
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Verify the pinned Xray fixture
+        run: |
+          bash scripts/ci/fetch-traffic-test-xray.sh "$RUNNER_TEMP/traffic-e2e"
+      - name: Install Ubuntu flow tools
+        if: matrix.image == 'native'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nfdump iproute2
+          sudo systemctl stop nfdump
+      - name: Test policy, counters and incident retention
+        if: matrix.image == 'native'
+        run: bash scripts/ci/run-audit-check.sh traffic-anomaly-unit go test -race ./internal/trafficwatch
+      - name: Build the actual Linux Agent
+        run: CGO_ENABLED=0 go build -o "$RUNNER_TEMP/traffic-e2e/komari-agent" .
+      - name: Capture real network flows on Ubuntu
+        if: matrix.image == 'native'
+        run: |
+          bash scripts/ci/run-audit-check.sh traffic-anomaly-e2e sudo python3 -B scripts/ci/test-traffic-anomaly.py \
+            "$RUNNER_TEMP/traffic-e2e/komari-agent" "$RUNNER_TEMP/traffic-e2e/xray"
+      - name: Capture real network flows using distribution packages
+        if: matrix.image != 'native'
+        env:
+          DISTRO_IMAGE: ${{ matrix.image }}
+        run: |
+          docker build --target "$DISTRO_IMAGE" --tag "komari-traffic-e2e:$DISTRO_IMAGE" - \
+            < scripts/ci/traffic-e2e.Dockerfile
+          bash scripts/ci/run-audit-check.sh traffic-anomaly-e2e docker run --rm --privileged --network none \
+            --ulimit memlock=335544320:335544320 \
+            --mount "type=bind,src=$RUNNER_TEMP/traffic-e2e,dst=/tools,readonly" \
+            --mount "type=bind,src=$PWD/scripts/ci/test-traffic-anomaly.py,dst=/test-traffic-anomaly.py,readonly" \
+            "komari-traffic-e2e:$DISTRO_IMAGE" python3 -B /test-traffic-anomaly.py /tools/komari-agent /tools/xray
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: traffic-anomaly-e2e-${{ matrix.image }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 30

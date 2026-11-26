@@ -21,6 +21,7 @@ type Config struct {
 	LocalAddresses []netip.Addr    `json:"local_addresses"`
 	ScratchDir     string          `json:"scratch_dir"`
 	StateDir       string          `json:"state_dir"`
+	UploadDir      string          `json:"upload_dir,omitempty"`
 	Xray           *XrayConfig     `json:"xray"`
 	Services       []ServiceConfig `json:"services"`
 	Thresholds     thresholds      `json:"thresholds"`
@@ -67,6 +68,34 @@ func (c Config) validate() error {
 	if !filepath.IsAbs(c.ScratchDir) || !filepath.IsAbs(c.StateDir) ||
 		containsPath(c.ScratchDir, c.StateDir) || containsPath(c.StateDir, c.ScratchDir) {
 		return errors.New("scratch_dir and state_dir must be separate absolute directories")
+	}
+	if c.UploadDir != "" {
+		if !filepath.IsAbs(c.UploadDir) {
+			return errors.New("upload_dir must be an absolute directory")
+		}
+		upload, err := filepath.EvalSymlinks(c.UploadDir)
+		if err != nil {
+			return fmt.Errorf("resolve upload_dir: %w", err)
+		}
+		for _, dir := range []string{c.ScratchDir, c.StateDir} {
+			resolved, err := filepath.EvalSymlinks(dir)
+			if errors.Is(err, os.ErrNotExist) {
+				resolved = filepath.Clean(dir)
+			} else if err != nil {
+				return err
+			}
+			if containsPath(resolved, upload) || containsPath(upload, resolved) {
+				return errors.New("upload_dir must be separate from the scratch and state directories")
+			}
+		}
+		info, err := os.Lstat(c.UploadDir)
+		if err != nil {
+			return err
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || !info.IsDir() || info.Mode().Perm() != 0o750 || info.Mode()&os.ModeSetgid == 0 || int(stat.Uid) != os.Geteuid() {
+			return errors.New("upload_dir must be owned by the analyzer with mode 2750")
+		}
 	}
 	seen := make(map[string]bool)
 	if len(c.Services) > 8 {

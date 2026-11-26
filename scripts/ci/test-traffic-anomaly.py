@@ -26,7 +26,7 @@ def retry(fn, seconds=120):
     raise AssertionError(f"timed out: {fn.__name__}")
 
 
-def main(binary, xray):
+def main(binary, xray, inbox=None):
     release = Path("/etc/os-release").read_text().splitlines()
     print(next((line for line in release if line.startswith("PRETTY_NAME=")), release[0]), flush=True)
     run("uname", "-r")
@@ -115,6 +115,8 @@ def main(binary, xray):
             if with_xray:
                 cfg["xray"] = {"endpoint": "127.0.0.1:10085", "policy_file": str(policy),
                                "inbound_tags": ["client"], "outbound_tags": ["remote"], "public_legs": "inbound"}
+                if inbox is not None:
+                    cfg["upload_dir"] = str(inbox)
             config = root / f"{name}.json"
             config.write_text(json.dumps(cfg))
             process = start(node, name, binary, "traffic-anomaly", "--config-file", str(config), env=env)
@@ -223,4 +225,5 @@ with socket.socket() as listener:
 
 
 if __name__ == "__main__":
-    main(str(Path(sys.argv[1]).resolve()), str(Path(sys.argv[2]).resolve()))
+    main(str(Path(sys.argv[1]).resolve()), str(Path(sys.argv[2]).resolve()),
+         Path(sys.argv[3]).resolve() if len(sys.argv) > 3 else None)

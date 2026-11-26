@@ -72,6 +72,11 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := pruneArchive(cfg.StateDir, time.Now()); err != nil {
 		return err
 	}
+	if cfg.UploadDir != "" {
+		if err := pruneArchive(cfg.UploadDir, time.Now()); err != nil {
+			return err
+		}
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	source, done, err := startNFDump(ctx, cfg, dir)
 	if err != nil {
@@ -86,6 +91,7 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}()
 	processor := newProcessor(source, cfg)
+	processor.recoverHandoff()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -110,14 +116,15 @@ func Run(ctx context.Context, cfg Config) error {
 }
 
 type processor struct {
-	cfg      Config
-	source   sampler
-	engine   *engine
-	counters localCounters
-	evidence map[time.Time]evidence
-	boundary time.Time
-	hour     hourSummary
-	prunedAt time.Time
+	cfg          Config
+	source       sampler
+	engine       *engine
+	counters     localCounters
+	evidence     map[time.Time]evidence
+	boundary     time.Time
+	hour         hourSummary
+	prunedAt     time.Time
+	retryHandoff bool
 }
 
 func newProcessor(src sampler, cfg Config) *processor {
@@ -167,8 +174,7 @@ func (p *processor) tick(ctx context.Context, now time.Time) error {
 			if len(data)+1 > maxSnapshotBytes {
 				return errors.New("traffic snapshot exceeded the byte limit")
 			}
-			path := filepath.Join(p.cfg.StateDir, "event-"+event.ID+".json")
-			if err := hostops.AtomicWrite(path, append(data, '\n'), 0o600); err != nil {
+			if err := p.saveRecord("event-"+event.ID+".json", append(data, '\n')); err != nil {
 				return err
 			}
 		}
@@ -178,6 +184,12 @@ func (p *processor) tick(ctx context.Context, now time.Time) error {
 	}
 	if now.Sub(p.prunedAt) >= time.Minute {
 		p.prunedAt = now
+		if p.cfg.UploadDir != "" {
+			if p.retryHandoff {
+				p.recoverHandoff()
+			}
+			return errors.Join(pruneArchive(p.cfg.StateDir, now), pruneArchive(p.cfg.UploadDir, now))
+		}
 		return pruneArchive(p.cfg.StateDir, now)
 	}
 	return nil
@@ -185,6 +197,7 @@ func (p *processor) tick(ctx context.Context, now time.Time) error {
 
 type hourSummary struct {
 	Hour        time.Time          `json:"hour_utc"`
+	StartedAt   time.Time          `json:"started_at,omitzero"`
 	Through     time.Time          `json:"through"`
 	Observed    Traffic            `json:"observed"`
 	Services    map[string]Traffic `json:"services"`
@@ -198,7 +211,7 @@ func (p *processor) addHour(o observation) error {
 		if err := p.flush(); err != nil {
 			return err
 		}
-		p.hour = hourSummary{Hour: hour, Through: hour, Services: make(map[string]Traffic)}
+		p.hour = hourSummary{Hour: hour, StartedAt: o.Start, Through: hour, Services: make(map[string]Traffic)}
 		body, err := readBoundedFile(p.hourPath(), maxSnapshotBytes)
 		if err == nil {
 			if err := json.Unmarshal(body, &p.hour); err != nil || !p.hour.Hour.Equal(hour) || p.hour.Services == nil {
@@ -234,10 +247,65 @@ func (p *processor) hourPath() string {
 }
 
 func (p *processor) flush() error {
-	if p.hour.Hour.IsZero() {
+	if !p.hour.Through.After(p.hour.Hour) {
 		return nil
 	}
-	return hostops.WriteJSON(p.hourPath(), p.hour, 0o600)
+	data, err := json.Marshal(p.hour)
+	if err != nil {
+		return err
+	}
+	return p.saveRecord(filepath.Base(p.hourPath()), append(data, '\n'))
+}
+
+func (p *processor) saveRecord(name string, body []byte) error {
+	if err := hostops.AtomicWrite(filepath.Join(p.cfg.StateDir, name), body, 0o600); err != nil {
+		return err
+	}
+	if p.cfg.UploadDir != "" {
+		if err := hostops.AtomicWrite(filepath.Join(p.cfg.UploadDir, name), body, 0o640); err != nil {
+			// The local archive succeeds independently of the handoff.
+			p.retryHandoff = true
+			log.Printf("Traffic evidence handoff unavailable: %v", err)
+		}
+	}
+	return nil
+}
+
+func (p *processor) recoverHandoff() {
+	if p.cfg.UploadDir == "" {
+		return
+	}
+	p.retryHandoff = false
+	files, err := os.ReadDir(p.cfg.StateDir)
+	if err != nil {
+		p.retryHandoff = true
+		log.Printf("Could not list traffic evidence for handoff: %v", err)
+		return
+	}
+	for _, file := range files {
+		name := file.Name()
+		if !file.Type().IsRegular() || !strings.HasSuffix(name, ".json") ||
+			(!strings.HasPrefix(name, "hour-") && !strings.HasPrefix(name, "event-")) {
+			continue
+		}
+		source, err := file.Info()
+		if err != nil {
+			p.retryHandoff = true
+			continue
+		}
+		destination := filepath.Join(p.cfg.UploadDir, name)
+		if published, err := os.Lstat(destination); err == nil && published.Mode().IsRegular() && !published.ModTime().Before(source.ModTime()) {
+			continue
+		}
+		body, err := readBoundedFile(filepath.Join(p.cfg.StateDir, name), maxSnapshotBytes)
+		if err == nil {
+			err = hostops.AtomicWrite(destination, body, 0o640)
+		}
+		if err != nil {
+			p.retryHandoff = true
+			log.Printf("Could not restore traffic evidence handoff: %v", err)
+		}
+	}
 }
 
 func pruneArchive(dir string, now time.Time) error {
