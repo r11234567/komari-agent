@@ -22,7 +22,7 @@ func TestEvidenceHandoffSkipsRecordsFromBeforeEnrollment(t *testing.T) {
 	end := now.Add(-time.Minute)
 	start := end.Add(-time.Minute)
 	event := snapshot{
-		ID: uuid.NewString(), Start: start, End: end, Complete: true,
+		ID: uuid.NewString(), Start: start, End: end,
 		Sources: []peer{{Address: netip.MustParseAddr("192.0.2.2"), Bytes: 123}},
 	}
 	name := "event-" + event.ID + ".json"
@@ -38,8 +38,8 @@ func TestEvidenceHandoffSkipsRecordsFromBeforeEnrollment(t *testing.T) {
 		if err != nil || (result == nil) != start.Before(enrolled) {
 			t.Fatalf("wrong handoff result for enrollment %s: %v, %v", enrolled, result, err)
 		}
-		if result != nil && result.GetIncident().IngressSources[0].Bytes != 123 {
-			t.Fatal("peer count did not survive conversion")
+		if result != nil && (result.GetIncident().Complete || result.GetIncident().IngressSources[0].Bytes != 123) {
+			t.Fatal("initial snapshot or peer count did not survive conversion")
 		}
 	}
 	result, err := ReadUpload(root, name, start.Add(-time.Second), end.Add(snapshotTTL))

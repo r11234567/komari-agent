@@ -70,7 +70,7 @@ Ubuntu 24.04 的 `nfpcapd 1.7.3` 在 Linux 上使用固定的 256 MiB 锁定环�
    sudo install -d -o komari-traffic -g komari -m 2750 /var/lib/komari-traffic-handoff
    ```
 
-2. 在采集器 JSON 中设置 `"upload_dir": "/var/lib/komari-traffic-handoff"`，再重启采集器。中转目录中的记录权限为 `0640`，仅包括已封存的小时汇总和异常快照。
+2. 在采集器 JSON 中设置 `"upload_dir": "/var/lib/komari-traffic-handoff"`，再重启采集器。中转目录中的记录权限为 `0640`，仅包括小时汇总和异常快照。
 3. 用 `sudo systemctl edit komari-agent.service` 添加以下配置，再执行 `sudo systemctl restart komari-agent.service`。自定义服务名需要替换。
 
    ```ini
@@ -78,7 +78,7 @@ Ubuntu 24.04 的 `nfpcapd 1.7.3` 在 Linux 上使用固定的 256 MiB 锁定环�
    Environment=KOMARI_TRAFFIC_EVIDENCE_INBOX=/var/lib/komari-traffic-handoff
    ```
 
-4. 在面板打开 **管理 → 流量取证**，选择节点。小时汇总在小时结束或采集器正常退出后上报。异常快照在证据窗口结束后上报。
+4. 在面板打开 **管理 → 流量取证**，选择节点。小时汇总在小时结束或采集器正常退出后上报。异常触发后先上报已捕获的证据，后续采集窗口继续更新同一事件。
 
 中转目录由采集器负责清理。断网后 Agent 会在本机留存期限内重试。当前注册之前开始的记录不会上报。面板异常快照自采集窗口结束起保留 72 小时，小时汇总保留 7 天。移除环境变量并重启 Agent 可关闭上报。
 

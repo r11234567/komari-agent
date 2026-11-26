@@ -86,10 +86,10 @@ func ReadUpload(root *os.Root, name string, enrolled, now time.Time) (*metrics.S
 		}}, nil
 	}
 	var s snapshot
-	if !decode(&s) || s.ID != id || !s.Complete {
+	if !decode(&s) || s.ID != id || !s.End.After(s.Start) {
 		return nil, errors.New("invalid evidence incident")
 	}
-	if s.Start.Before(enrolled) || !s.End.Add(snapshotTTL).After(now) {
+	if s.Start.Before(enrolled) || (!s.FirstPacket.IsZero() && s.FirstPacket.Before(enrolled)) || !s.End.Add(snapshotTTL).After(now) {
 		return nil, nil
 	}
 	return &metrics.SubmitTrafficEvidenceRequest{Record: &metrics.SubmitTrafficEvidenceRequest_Incident{

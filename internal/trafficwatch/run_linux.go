@@ -122,6 +122,7 @@ type processor struct {
 	counters     localCounters
 	evidence     map[time.Time]evidence
 	boundary     time.Time
+	startedAt    time.Time
 	hour         hourSummary
 	prunedAt     time.Time
 	retryHandoff bool
@@ -133,7 +134,7 @@ func newProcessor(src sampler, cfg Config) *processor {
 		legs = cfg.Xray.PublicLegs
 	}
 	return &processor{cfg: cfg, source: src, engine: newEngine(cfg.Interface, legs, src.Name(), cfg.Thresholds),
-		evidence: make(map[time.Time]evidence)}
+		evidence: make(map[time.Time]evidence), startedAt: time.Now().UTC()}
 }
 
 func (p *processor) tick(ctx context.Context, now time.Time) error {
@@ -211,7 +212,7 @@ func (p *processor) addHour(o observation) error {
 		if err := p.flush(); err != nil {
 			return err
 		}
-		p.hour = hourSummary{Hour: hour, StartedAt: o.Start, Through: hour, Services: make(map[string]Traffic)}
+		p.hour = hourSummary{Hour: hour, StartedAt: maxTime(o.Start, p.startedAt), Through: hour, Services: make(map[string]Traffic)}
 		body, err := readBoundedFile(p.hourPath(), maxSnapshotBytes)
 		if err == nil {
 			if err := json.Unmarshal(body, &p.hour); err != nil || !p.hour.Hour.Equal(hour) || p.hour.Services == nil {
@@ -247,7 +248,7 @@ func (p *processor) hourPath() string {
 }
 
 func (p *processor) flush() error {
-	if !p.hour.Through.After(p.hour.Hour) {
+	if !p.hour.Through.After(maxTime(p.hour.Hour, p.hour.StartedAt)) {
 		return nil
 	}
 	data, err := json.Marshal(p.hour)
