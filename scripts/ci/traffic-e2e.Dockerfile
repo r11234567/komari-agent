@@ -1,11 +1,17 @@
-FROM debian:13-slim AS debian13
+FROM debian:13-slim AS debian13-ebpf
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends nfdump iproute2 python3 curl util-linux \
+    && apt-get install -y --no-install-recommends iproute2 python3 curl util-linux \
     && apt-get clean
 
-FROM rockylinux/rockylinux:9 AS rocky9
+FROM debian13-ebpf AS debian13
+RUN apt-get install -y --no-install-recommends nfdump && apt-get clean
+
+FROM rockylinux/rockylinux:9 AS rocky9-ebpf
+RUN dnf -y install iproute python3 util-linux curl-minimal && dnf clean all
+
+FROM rocky9-ebpf AS rocky9
 RUN dnf -y install epel-release \
-    && dnf -y install nfdump iproute python3 util-linux curl-minimal \
+    && dnf -y install nfdump \
     && dnf clean all
 
 FROM alpine:3.22 AS alpine-capture-build
@@ -20,7 +26,10 @@ RUN curl -fsSL https://codeload.github.com/phaag/nfdump/tar.gz/refs/tags/v1.7.6 
     && ./autogen.sh && ./configure --enable-nfpcapd \
     && make -j2 && make DESTDIR=/stage install
 
-FROM alpine:3.22 AS alpine322
+FROM alpine:3.22 AS alpine322-ebpf
+RUN apk add --no-cache iproute2 python3 curl util-linux
+
+FROM alpine322-ebpf AS alpine322
 COPY --from=alpine-capture-build /stage/usr/local/ /usr/local/
-RUN apk add --no-cache libpcap libbz2 zlib lz4-libs zstd-libs iproute2 python3 curl util-linux \
+RUN apk add --no-cache libpcap libbz2 zlib lz4-libs zstd-libs \
     && command -v nfpcapd && command -v nfdump

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Exercise the actual Agent, nfpcapd, nfdump and Xray on isolated veth links."""
+"""Exercise the actual Agent and Xray on isolated veth links."""
 
+import argparse
 import contextlib
 import json
 import os
@@ -26,12 +27,13 @@ def retry(fn, seconds=120):
     raise AssertionError(f"timed out: {fn.__name__}")
 
 
-def main(binary, xray, inbox=None):
+def main(binary, xray, inbox, sampler):
     release = Path("/etc/os-release").read_text().splitlines()
     print(next((line for line in release if line.startswith("PRETTY_NAME=")), release[0]), flush=True)
     run("uname", "-r")
-    run("nfpcapd", "-V")
-    run("nfdump", "-V")
+    if sampler == "nfpcapd":
+        run("nfpcapd", "-V")
+        run("nfdump", "-V")
     suffix = uuid.uuid4().hex[:8]
     node, client, target = [f"traffic-{name}-{suffix}" for name in ("node", "client", "target")]
     with tempfile.TemporaryDirectory(prefix="komari-traffic-e2e-") as directory, contextlib.ExitStack() as cleanup:
@@ -75,9 +77,10 @@ def main(binary, xray, inbox=None):
         ])
         link("path1", target, "peer1", [("198.51.100.1/24", "198.51.100.2/24")])
         scratch = root / "scratch"
-        scratch.mkdir(mode=0o700)
-        run("mount", "-t", "tmpfs", "-o", "noswap,size=32M,mode=0700", "tmpfs", str(scratch))
-        cleanup.callback(run, "umount", str(scratch))
+        if sampler == "nfpcapd":
+            scratch.mkdir(mode=0o700)
+            run("mount", "-t", "tmpfs", "-o", "noswap,size=32M,mode=0700", "tmpfs", str(scratch))
+            cleanup.callback(run, "umount", str(scratch))
         cleanup.callback(check_cleanup)
 
         policy = root / "xray.json"
@@ -121,10 +124,12 @@ def main(binary, xray, inbox=None):
             cfg = {
                 "interface": "edge0",
                 "local_addresses": ["192.0.2.1", "2001:db8:1::1"],
-                "scratch_dir": str(scratch),
+                "sampler": sampler,
                 "state_dir": str(state),
                 "thresholds": {"fast_bytes": 300_000, "slow_bytes": 30_000_000, "sustained_bytes": 30_000_000},
             }
+            if sampler == "nfpcapd":
+                cfg["scratch_dir"] = str(scratch)
             if with_xray:
                 cfg["xray"] = {"endpoint": "127.0.0.1:10085", "policy_file": str(policy),
                                "inbound_tags": ["client"], "outbound_tags": ["remote"], "public_legs": "inbound"}
@@ -136,7 +141,8 @@ def main(binary, xray, inbox=None):
 
             def online():
                 assert process.poll() is None, (root / f"{name}.log").read_text()
-                return not expired.exists() and "nfpcapd" in (root / f"{name}.log").read_text()
+                ready_message = "Traffic sampler ebpf attached" if sampler == "ebpf" else "nfpcapd"
+                return not expired.exists() and ready_message in (root / f"{name}.log").read_text()
 
             retry(online, 20)
             return process, state
@@ -167,6 +173,8 @@ def main(binary, xray, inbox=None):
             assert snapshot(state) is None, "normal Xray transfer generated IP evidence"
             assert json.loads(run(*stat_args, capture_output=True).stdout)["stat"]["value"] == value
 
+            # Keep both address families within a single capture slice.
+            wait_for_boundary()
             udp = (
                 "import socket,sys,time; addr=sys.argv[1]; "
                 "s=socket.socket(socket.AF_INET6 if ':' in addr else socket.AF_INET,socket.SOCK_DGRAM); "
@@ -186,6 +194,7 @@ def main(binary, xray, inbox=None):
 
             incoming = retry(both_sources, 130)
             assert incoming["reason"] == "fast_unexplained_ingress", incoming
+            assert incoming["sampler"] == sampler, incoming
             sources = {item["ip"]: item["bytes"] for item in incoming["ingress_sources"]}
             for address in ("192.0.2.2", "2001:db8:1::2"):
                 assert 1_500_000 <= sources.get(address, 0) <= 1_650_000, incoming
@@ -195,6 +204,9 @@ def main(binary, xray, inbox=None):
             assert sum(hour["observed"]["tx_bytes"] for hour in hours) >= 8 << 20, hours
             assert all("192.0.2.2" not in json.dumps(hour) for hour in hours)
             assert not list(scratch.glob("flow-run-*")), "normal temporary files remained after shutdown"
+            if sampler == "ebpf":
+                assert not scratch.exists(), "eBPF unexpectedly created a flow spool"
+                assert not incoming["flows_span_slices"], incoming
             print("PASS: real Xray, split inbound and outbound links, non-resetting stats, and short IPv4/IPv6 bursts retained")
             print(f"  Xray downlink={value} bytes, ingress sources={sources}")
 
@@ -228,6 +240,7 @@ with socket.socket() as listener:
 
             outgoing = retry(active_snapshot, 150)
             assert outgoing["reason"] == "fast_unexplained_egress", outgoing
+            assert outgoing["sampler"] == sampler, outgoing
             assert any(p["ip"] == "192.0.2.2" and p["bytes"] > 300_000 for p in outgoing["egress_destinations"])
             stop(process)
             print("PASS: real active TCP egress exported before connection close, with destination and byte count")
@@ -239,5 +252,11 @@ with socket.socket() as listener:
 
 
 if __name__ == "__main__":
-    main(str(Path(sys.argv[1]).resolve()), str(Path(sys.argv[2]).resolve()),
-         Path(sys.argv[3]).resolve() if len(sys.argv) > 3 else None)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("binary", type=Path)
+    parser.add_argument("xray", type=Path)
+    parser.add_argument("inbox", nargs="?", type=Path)
+    parser.add_argument("--sampler", choices=("ebpf", "nfpcapd"), default="nfpcapd")
+    args = parser.parse_args()
+    main(str(args.binary.resolve()), str(args.xray.resolve()),
+         args.inbox.resolve() if args.inbox else None, args.sampler)

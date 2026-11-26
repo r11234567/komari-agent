@@ -26,9 +26,6 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := installedXray(cfg); err != nil {
 		return err
 	}
-	if err := checkScratch(cfg.ScratchDir); err != nil {
-		return err
-	}
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return err
 	}
@@ -40,6 +37,30 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 	defer release()
+	if err := pruneArchive(cfg.StateDir, time.Now()); err != nil {
+		return err
+	}
+	if cfg.UploadDir != "" {
+		if err := pruneArchive(cfg.UploadDir, time.Now()); err != nil {
+			return err
+		}
+	}
+	if cfg.captureBackend() == "nfpcapd" {
+		return runNFDump(ctx, cfg)
+	}
+	source, err := startEBPF(cfg)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+	log.Printf("Traffic sampler ebpf attached to %s", cfg.Interface)
+	return runSampler(ctx, cfg, source, nil, nil)
+}
+
+func runNFDump(ctx context.Context, cfg Config) error {
+	if err := checkScratch(cfg.ScratchDir); err != nil {
+		return err
+	}
 	releaseScratch, err := statelock.Acquire(filepath.Join(cfg.ScratchDir, "collector.lock"))
 	if err != nil {
 		return err
@@ -69,27 +90,25 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := os.WriteFile(filepath.Join(dir, "empty.conf"), nil, 0o600); err != nil {
 		return err
 	}
-	if err := pruneArchive(cfg.StateDir, time.Now()); err != nil {
-		return err
-	}
-	if cfg.UploadDir != "" {
-		if err := pruneArchive(cfg.UploadDir, time.Now()); err != nil {
-			return err
-		}
-	}
 	ctx, cancel := context.WithCancel(ctx)
 	source, done, err := startNFDump(ctx, cfg, dir)
 	if err != nil {
 		cancel()
 		return err
 	}
+	return runSampler(ctx, cfg, source, done, cancel)
+}
+
+func runSampler(ctx context.Context, cfg Config, source sampler, done <-chan error, cancel context.CancelFunc) error {
 	waited := false
-	defer func() {
-		cancel()
-		if !waited {
-			<-done
-		}
-	}()
+	if done != nil {
+		defer func() {
+			cancel()
+			if !waited {
+				<-done
+			}
+		}()
+	}
 	processor := newProcessor(source, cfg)
 	processor.recoverHandoff()
 	ticker := time.NewTicker(time.Second)
@@ -106,7 +125,7 @@ func Run(ctx context.Context, cfg Config) error {
 			if err == nil {
 				err = errors.New("collector stopped unexpectedly")
 			}
-			return errors.Join(fmt.Errorf("nfpcapd: %w", err), processor.flush())
+			return errors.Join(fmt.Errorf("%s: %w", source.Name(), err), processor.flush())
 		case now := <-ticker.C:
 			if err := processor.tick(ctx, now.UTC()); err != nil {
 				return errors.Join(err, processor.flush())
