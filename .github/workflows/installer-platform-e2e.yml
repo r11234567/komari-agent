@@ -25,6 +25,9 @@ jobs:
           - platform: Ubuntu 24.04 systemd
             variant: systemd
             runner: ubuntu-24.04
+          - platform: Ubuntu 24.04 systemd PAM and rescue
+            variant: host-actions
+            runner: ubuntu-24.04
           - platform: Alpine 3.22 OpenRC
             variant: openrc
             runner: ubuntu-24.04
@@ -39,15 +42,21 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - name: Ubuntu systemd, real PAM and signed rescue lifecycle
-        if: matrix.variant == 'systemd'
+      # Both suites create real accounts and mutate system state. The recovery
+      # suite checks that the default komari account is absent on entry.
+      - name: Prepare Linux systemd dependencies
+        if: matrix.variant == 'systemd' || matrix.variant == 'host-actions'
         run: |
           sudo apt-get update
           sudo apt-get install -y libpam0g-dev nftables
-          bash scripts/ci/run-audit-check.sh installer-host-actions bash scripts/ci/test-host-transactions.sh
-          bash scripts/ci/run-audit-check.sh installer-systemd bash scripts/ci/test-installer-recovery.sh
+      - name: Ubuntu systemd, real PAM and signed rescue lifecycle
+        if: matrix.variant == 'host-actions'
+        run: bash scripts/ci/run-audit-check.sh installer-host-actions bash scripts/ci/test-host-transactions.sh
+      - name: Ubuntu systemd signed install and recovery on a clean host
+        if: matrix.variant == 'systemd'
+        run: bash scripts/ci/run-audit-check.sh installer-systemd bash scripts/ci/test-installer-recovery.sh
       - name: Build the actual portable monitoring Agent
-        if: matrix.variant != 'systemd'
+        if: matrix.variant == 'openrc' || matrix.variant == 'launchd'
         run: |
           mkdir -p "$RUNNER_TEMP/komari-installer"
           CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/komari-installer/komari-agent" .
