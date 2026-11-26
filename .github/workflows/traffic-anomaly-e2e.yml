@@ -27,6 +27,8 @@ jobs:
             image: debian13
           - distribution: Rocky Linux 9
             image: rocky9
+          - distribution: Alpine 3.22 without systemd
+            image: alpine322
     steps:
       - uses: actions/checkout@v4
         with:
