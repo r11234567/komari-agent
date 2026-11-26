@@ -58,8 +58,9 @@ func (c *Client) sendTrafficEvidence(ctx context.Context, identity credentials.I
 		}
 	}
 	now := time.Now().UTC()
+	sent := 0
 	for _, entry := range entries {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || sent == 12 {
 			return
 		}
 		if !entry.Type().IsRegular() {
@@ -73,6 +74,7 @@ func (c *Client) sendTrafficEvidence(ctx context.Context, identity credentials.I
 		if err != nil {
 			log.Print("Skipping an invalid traffic evidence handoff record")
 		} else if record != nil {
+			sent++
 			record.AgentId = identity.AgentID
 			request := connect.NewRequest(record)
 			c.authorize(request.Header())
