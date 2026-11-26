@@ -18,7 +18,9 @@ func TestNFDumpPreservesDirectionIPv6AndUnknown(t *testing.T) {
 	const times = "2026-11-26 09:30:06.604,2026-11-26 09:30:07.604,"
 	input := times + "2001:db8:abcd:ef00:1234:2345:3456:4567,2001:db8::1,1234567\n" +
 		times + "192.0.2.1,203.0.113.8,999\n" + times + "192.0.2.2,192.0.2.3,100\n"
-	out, err := readFlows(strings.NewReader(input), time.Now(), local)
+	start := time.Date(2026, 11, 26, 9, 30, 0, 0, time.UTC)
+	frames, err := readFlows(strings.NewReader(input), start.Add(exportDelay), local)
+	out := frames[start]
 	if err != nil || out.totals() != (Traffic{RX: 1234567, TX: 999}) || out.Unknown != 100 {
 		t.Fatalf("decoded %#v: %v", out, err)
 	}
@@ -28,9 +30,34 @@ func TestNFDumpPreservesDirectionIPv6AndUnknown(t *testing.T) {
 }
 
 func TestNFDumpIdleSliceStillCountsAsCovered(t *testing.T) {
-	out, err := readFlows(strings.NewReader("No matching flows\n"), time.Now(), nil)
-	if err != nil || out.Partial || out.totals() != (Traffic{}) {
-		t.Fatalf("idle slice decoded as %#v: %v", out, err)
+	frames, err := readFlows(strings.NewReader("No matching flows\n"), time.Now(), nil)
+	if err != nil || len(frames) != 0 {
+		t.Fatalf("idle export decoded as %#v: %v", frames, err)
+	}
+}
+
+func TestNFDumpJoinsDelayedExportsByPacketTime(t *testing.T) {
+	start := time.Date(2026, 11, 26, 9, 30, 0, 0, time.UTC)
+	sampler := nfdumpSampler{pending: make(map[time.Time]sample)}
+	remote := netip.MustParseAddr("192.0.2.2")
+	for i := range 3 {
+		stamp := start.Add(time.Duration(i) * captureSlice)
+		got := sampler.accept(stamp, nil, false)
+		if len(got) != 1 {
+			t.Fatalf("unexpected initial observations: %+v", got)
+		}
+	}
+	packetAt := start.Add(captureSlice + time.Second)
+	record := "2026-11-26 09:30:31.000,2026-11-26 09:30:31.000,192.0.2.2,192.0.2.1,1234567\n"
+	exportStart := start.Add(captureSlice + exportDelay)
+	frames, err := readFlows(strings.NewReader(record), exportStart, map[netip.Addr]bool{netip.MustParseAddr("192.0.2.1"): true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := sampler.accept(exportStart, frames, false)
+	if len(got) != 1 || got[0].Partial || got[0].RX[remote] != 1234567 ||
+		!got[0].Start.Equal(start.Add(captureSlice)) || !got[0].LastPacket.Equal(packetAt) {
+		t.Fatalf("delayed flow matched the wrong accounting slice: %+v", got)
 	}
 }
 

@@ -27,6 +27,11 @@ def retry(fn, seconds=120):
 
 
 def main(binary, xray):
+    release = Path("/etc/os-release").read_text().splitlines()
+    print(next((line for line in release if line.startswith("PRETTY_NAME=")), release[0]), flush=True)
+    run("uname", "-r")
+    run("nfpcapd", "-V")
+    run("nfdump", "-V")
     suffix = uuid.uuid4().hex[:8]
     node, client, target = [f"traffic-{name}-{suffix}" for name in ("node", "client", "target")]
     with tempfile.TemporaryDirectory(prefix="komari-traffic-e2e-") as directory, contextlib.ExitStack() as cleanup:
@@ -142,7 +147,7 @@ def main(binary, xray):
             assert int(value) >= 8 << 20
             # Allow the entire two-minute detector window to cover the healthy
             # single-public-leg transfer before injecting unexplained traffic.
-            time.sleep(125)
+            time.sleep(175)
             assert snapshot(state) is None, "normal Xray transfer generated IP evidence"
             assert json.loads(run(*stat_args, capture_output=True).stdout)["stat"]["value"] == value
 
@@ -163,7 +168,7 @@ def main(binary, xray):
                         return event
                 return None
 
-            incoming = retry(both_sources, 100)
+            incoming = retry(both_sources, 130)
             assert time.time() > end_of_burst
             assert incoming["reason"] == "fast_unexplained_ingress", incoming
             sources = {item["ip"]: item["bytes"] for item in incoming["ingress_sources"]}
@@ -175,6 +180,7 @@ def main(binary, xray):
             assert all("192.0.2.2" not in json.dumps(hour) for hour in hours)
             assert not list(scratch.glob("flow-run-*")), "normal temporary files remained after shutdown"
             print("PASS: real Xray, split inbound and outbound links, non-resetting stats, and short IPv4/IPv6 bursts retained")
+            print(f"  Xray downlink={value} bytes, ingress sources={sources}")
 
             process, state = launch("egress", False)
             time.sleep(123)
@@ -184,14 +190,15 @@ def main(binary, xray):
             start(client, "sink", sys.executable, "-c", sink)
             time.sleep(1)
             talk = ("import socket,time; s=socket.create_connection(('192.0.2.2',19191)); "
-                    "p=b'x'*16384; [(s.sendall(p),time.sleep(.15)) for _ in range(650)]")
+                    "p=b'x'*16384; [(s.sendall(p),time.sleep(.15)) for _ in range(1200)]")
             sender = start(node, "sender", sys.executable, "-c", talk)
-            outgoing = retry(lambda: snapshot(state), 90)
+            outgoing = retry(lambda: snapshot(state), 150)
             assert sender.poll() is None, "active TCP flow was only counted after it closed"
             assert outgoing["reason"] == "fast_unexplained_egress", outgoing
             assert any(p["ip"] == "192.0.2.2" and p["bytes"] > 300_000 for p in outgoing["egress_destinations"])
             stop(process)
             print("PASS: real active TCP egress exported before connection close, with destination and byte count")
+            print(f"  egress destinations={outgoing['egress_destinations']}")
         except BaseException:
             for log in root.glob("*.log"):
                 print(f"--- {log.name} ---\n{log.read_text()[-5000:]}", file=sys.stderr)
