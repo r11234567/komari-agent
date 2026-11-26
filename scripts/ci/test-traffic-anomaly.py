@@ -93,12 +93,25 @@ def main(binary, xray, inbox=None):
                                   for direction in ("Uplink", "Downlink")}},
         }))
         run("ip", "netns", "exec", node, xray, "run", "-test", "-c", str(policy))
-        start(node, "xray", xray, "run", "-c", str(policy))
+        proxy = start(node, "xray", xray, "run", "-c", str(policy))
         (root / "test.bin").write_bytes(b"x" * (8 << 20))
-        start(target, "http", sys.executable, "-m", "http.server", "10080", "--bind", "198.51.100.2",
-              "--directory", str(root))
+        http = start(target, "http", sys.executable, "-u", "-m", "http.server", "10080",
+                     "--bind", "198.51.100.2", "--directory", str(root))
         (root / "xray").symlink_to(xray)
         env = {**os.environ, "PATH": f"{root}:{os.environ['PATH']}"}
+        url = "http://198.51.100.2:10080/test.bin"
+        stat_args = ("ip", "netns", "exec", node, xray, "api", "stats", "-server=127.0.0.1:10085",
+                     "-name=inbound>>>client>>>traffic>>>downlink", "-reset=false")
+        socks = ("--socks5", "192.0.2.1:11080")
+
+        def ready(namespace, *route):
+            assert http.poll() is None, "HTTP fixture exited before becoming ready"
+            assert proxy.poll() is None, "Xray exited before becoming ready"
+            return subprocess.run(
+                ("ip", "netns", "exec", namespace, "curl", "--noproxy", "", "--fail",
+                 "--silent", "--head", "--connect-timeout", "1", "--max-time", "2", *route, url),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            ).returncode == 0
 
         def launch(name, with_xray):
             state = root / name
@@ -138,15 +151,16 @@ def main(binary, xray, inbox=None):
 
         wait_for_boundary = lambda: time.sleep(32 - time.time() % 30)
         try:
+            # Probe only with HEAD before capture; the measured GET gets one attempt.
+            retry(lambda: ready(node), 20)
+            retry(lambda: ready(client, *socks), 20)
+            starting_bytes = int(json.loads(run(*stat_args, capture_output=True).stdout)["stat"]["value"])
             process, state = launch("ingress", True)
             wait_for_boundary()
             run("ip", "netns", "exec", client, "curl", "--noproxy", "", "--fail", "--silent", "--show-error",
-                "--max-time", "15", "--socks5", "192.0.2.1:11080", "--output", "/dev/null",
-                "http://198.51.100.2:10080/test.bin")
-            stat_args = ("ip", "netns", "exec", node, xray, "api", "stats", "-server=127.0.0.1:10085",
-                         "-name=inbound>>>client>>>traffic>>>downlink", "-reset=false")
+                "--max-time", "15", *socks, "--output", "/dev/null", url)
             value = json.loads(run(*stat_args, capture_output=True).stdout)["stat"]["value"]
-            assert int(value) >= 8 << 20
+            assert int(value) - starting_bytes >= 8 << 20
             # Allow the entire two-minute detector window to cover the healthy
             # single-public-leg transfer before injecting unexplained traffic.
             time.sleep(175)
