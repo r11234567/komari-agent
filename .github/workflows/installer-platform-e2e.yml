@@ -88,7 +88,9 @@ jobs:
         if: matrix.variant == 'launchd'
         run: |
           brew list --versions openssl@3 || brew install openssl@3
+          brew list --versions coreutils || brew install coreutils
           export PATH="$(brew --prefix openssl@3)/bin:$PATH"
+          command -v gtimeout
           bash scripts/ci/run-audit-check.sh installer-launchd bash scripts/ci/test-monitoring-install.sh "$RUNNER_TEMP/komari-installer/komari-agent"
       - uses: actions/upload-artifact@v4
         if: always()

@@ -35,7 +35,13 @@ CONTEXT
 printf 'CHECK %s\nCOMMAND ' "$name"
 printf '%q ' "$@"
 printf '\n'
-timeout --signal=TERM --kill-after=30s "${KOMARI_AUDIT_TIMEOUT:-20m}" "$@" 2>&1 | tee "$log_dir/$name.log"
+timeout_command=timeout
+if [ "$(uname -s)" = Darwin ]; then timeout_command=gtimeout; fi
+if ! command -v "$timeout_command" >/dev/null 2>&1; then
+  printf 'Missing GNU timeout command: %s\n' "$timeout_command" >&2
+  exit 127
+fi
+"$timeout_command" --signal=TERM --kill-after=30s "${KOMARI_AUDIT_TIMEOUT:-20m}" "$@" 2>&1 | tee "$log_dir/$name.log"
 statuses=("${PIPESTATUS[@]}")
 status="${statuses[0]}"
 if [ "$status" -eq 0 ] && [ "${statuses[1]}" -ne 0 ]; then status="${statuses[1]}"; fi
