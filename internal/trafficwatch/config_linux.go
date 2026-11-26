@@ -17,6 +17,7 @@ import (
 )
 
 type Config struct {
+	Sampler        string          `json:"sampler,omitempty"`
 	Interface      string          `json:"interface"`
 	LocalAddresses []netip.Addr    `json:"local_addresses"`
 	ScratchDir     string          `json:"scratch_dir"`
@@ -25,6 +26,16 @@ type Config struct {
 	Xray           *XrayConfig     `json:"xray"`
 	Services       []ServiceConfig `json:"services"`
 	Thresholds     thresholds      `json:"thresholds"`
+}
+
+func (c Config) captureBackend() string {
+	if c.Sampler != "" {
+		return c.Sampler
+	}
+	if c.ScratchDir != "" {
+		return "nfpcapd"
+	}
+	return "ebpf"
 }
 
 var (
@@ -65,9 +76,20 @@ func (c Config) validate() error {
 		max(c.Thresholds.Fast, c.Thresholds.Slow, c.Thresholds.Sustained) > 1<<50 {
 		return errors.New("traffic thresholds must be between 1 byte and 1 PiB")
 	}
-	if !filepath.IsAbs(c.ScratchDir) || !filepath.IsAbs(c.StateDir) ||
-		containsPath(c.ScratchDir, c.StateDir) || containsPath(c.StateDir, c.ScratchDir) {
-		return errors.New("scratch_dir and state_dir must be separate absolute directories")
+	if !filepath.IsAbs(c.StateDir) {
+		return errors.New("state_dir must be an absolute directory")
+	}
+	switch c.captureBackend() {
+	case "ebpf":
+		if c.ScratchDir != "" {
+			return errors.New("ebpf uses kernel maps; omit scratch_dir")
+		}
+	case "nfpcapd":
+		if !filepath.IsAbs(c.ScratchDir) || containsPath(c.ScratchDir, c.StateDir) || containsPath(c.StateDir, c.ScratchDir) {
+			return errors.New("scratch_dir and state_dir must be separate absolute directories")
+		}
+	default:
+		return errors.New("sampler must be ebpf or nfpcapd")
 	}
 	if c.UploadDir != "" {
 		if !filepath.IsAbs(c.UploadDir) {
@@ -78,6 +100,9 @@ func (c Config) validate() error {
 			return fmt.Errorf("resolve upload_dir: %w", err)
 		}
 		for _, dir := range []string{c.ScratchDir, c.StateDir} {
+			if dir == "" {
+				continue
+			}
 			resolved, err := filepath.EvalSymlinks(dir)
 			if errors.Is(err, os.ErrNotExist) {
 				resolved = filepath.Clean(dir)

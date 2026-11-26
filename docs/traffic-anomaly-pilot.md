@@ -2,19 +2,19 @@
 
 `komari-agent traffic-anomaly` 在单个 Linux 节点上常驻采集和分析。正常流量只写小时用量，异常才写对端 IP 快照。结果默认保存在本机。需要在面板查看时，可给节点配置下文的上报目录。
 
-采集器依赖 Linux 抓流和 `tmpfs noswap`，测试用网络命名空间隔离流量。普通 Agent 支持 macOS 和 Windows，流量取证子命令当前在 Linux 提供。无需 systemd 即可运行采集、Xray 归因和上报。配置 systemd 服务用量归因时，相关服务需要启用 `IPAccounting=yes`。
+流量取证子命令在 Linux 提供。默认采集器需要支持 TCX 的 Linux 内核（上游从 6.6 开始）。无需 systemd 即可运行采集、Xray 归因和上报。配置 systemd 服务用量归因时，相关服务需要启用 `IPAccounting=yes`。
 
 ## 先选对网卡
 
 选实际观测计费用量的外部网卡。填写在这张网卡上看到的本机 IPv4、IPv6，Agent 根据报文首尾地址识别入站和出站。地址双方都无法归到本机时，字节记为方向未确定。选择公网口时避免同时观测容器桥、veth、隧道内层或回环。在 NAT、反代或隧道后，快照中的 IP 是采集点实际看到的对端。
 
-准备包含 `nfpcapd` 和 `nfdump` 的发行版包。初版在 Ubuntu 24.04 的 1.7.3 上跑回归。给收集器单独的服务账号、抓取该网卡所需的能力、两个私有目录，并给进程组设 CPU 和内存预算。临时目录必须是单独挂载、有 `noswap`、容量不超过 64 MiB 的 tmpfs。两个目录权限为 0700，由收集器账号拥有。
+eBPF 采集器把对端地址和字节数聚合在内核映射表中，Go 进程每 30 秒读取封存的切片。选择一张以太网接口；出入站探针观察报文后继续交给现有网络规则处理。字节数按照探针处可见的 IP 报文长度计算，网卡卸载和隧道封装可能影响与运营商账单的对比。无需安装 `nfpcapd` 或 `nfdump`，也无需创建临时流文件目录。
 
 ```json
 {
+  "sampler": "ebpf",
   "interface": "eth0",
   "local_addresses": ["192.0.2.10", "2001:db8::10"],
-  "scratch_dir": "/run/komari-traffic",
   "state_dir": "/var/lib/komari-traffic",
   "thresholds": {
     "fast_bytes": 300000000,
@@ -37,7 +37,7 @@
 
 先修改示例里的地址、标签和实际存在的服务。没有 Xray 时省略 `xray`。没有受管任务时省略 `services`。列出的 systemd 服务需启用 `IPAccounting=yes`。任务无法采样、服务计数归零或统计 API 不可用时，对应观测窗口标为归因不完整。
 
-用专用账号运行以下子命令，或把它放进单独的 systemd 单元。给采集器所在单元配置抓网卡所需的 capability，给临时挂载指定该账号的 UID/GID，并使用 `KillMode=control-group` 一起回收采集子进程。普通 Komari Agent 保持原有启动方式。
+用有 `CAP_BPF` 和 `CAP_NET_ADMIN` 的专用采集服务运行以下子命令。`state_dir` 必须归采集账号所有，权限为 `0700`。停止服务时探针和映射表随描述符释放。普通 Komari Agent 保持原有启动方式。
 
 ```bash
 komari-agent traffic-anomaly --config-file /etc/komari/traffic-anomaly.json
@@ -46,19 +46,23 @@ komari-agent traffic-anomaly --config-file /etc/komari/traffic-anomaly.json
 命名为 `komari-traffic` 的专用账号准备好后，可用以下方式启动一次试点。把二进制路径改成节点实际安装的位置，并让该账号能读取试点配置和 Xray 的统计片段。
 
 ```bash
-sudo install -d -m 0700 -o komari-traffic -g komari-traffic /run/komari-traffic /var/lib/komari-traffic
-sudo mount -t tmpfs -o "noswap,size=32M,mode=0700,uid=$(id -u komari-traffic),gid=$(id -g komari-traffic)" tmpfs /run/komari-traffic
+sudo install -d -m 0700 -o komari-traffic -g komari-traffic /var/lib/komari-traffic
 sudo systemd-run --unit=komari-traffic --collect \
   -p User=komari-traffic -p Group=komari-traffic \
-  -p AmbientCapabilities=CAP_NET_RAW -p CapabilityBoundingSet=CAP_NET_RAW \
+  -p 'AmbientCapabilities=CAP_BPF CAP_NET_ADMIN' \
+  -p 'CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN' \
   -p NoNewPrivileges=yes -p KillMode=control-group -p LimitCORE=0 \
-  -p LimitMEMLOCK=320M -p MemoryMax=384M -p MemorySwapMax=0 \
+  -p MemoryMax=128M -p MemorySwapMax=0 \
   /usr/lib/komari/komari-agent/komari-agent traffic-anomaly --config-file /etc/komari/traffic-anomaly.json
 ```
 
-用 `journalctl -u komari-traffic.service` 看采集器状态。试点结束时先执行 `sudo systemctl stop komari-traffic.service`，再卸载该临时挂载。本机过期清理在采集服务运行时和下次启动时执行。
+用 `journalctl -u komari-traffic.service` 看采集器状态。试点结束时执行 `sudo systemctl stop komari-traffic.service`。本机过期清理在采集服务运行时和下次启动时执行。TCX 或 capability 不可用时，服务启动会给出错误。
 
-Ubuntu 24.04 的 `nfpcapd 1.7.3` 在 Linux 上使用固定的 256 MiB 锁定环形缓冲，`-B` 只调流缓存。出现 `mmap() failed: Resource temporarily unavailable` 时先检查 `LimitMEMLOCK`。上面的 384 MiB 是试点服务内存上限示例。资源紧张的节点先测空闲及实际流量占用，再决定是否启用。
+### 旧内核和原有配置
+
+已有 `scratch_dir` 且没有 `sampler` 的配置继续使用 `nfpcapd`。对缺少 TCX 的节点，可显式选择 `"sampler": "nfpcapd"`。安装发行版的 `nfpcapd` 和 `nfdump`，为采集服务使用 `CAP_NET_RAW`，配置限额不超过 64 MiB 的 `noswap` tmpfs 作为 `scratch_dir`。该目录由采集账号拥有，权限为 `0700`。停止服务后可卸载该临时挂载。
+
+Ubuntu 24.04 的 `nfpcapd 1.7.3` 在 Linux 上使用固定的 256 MiB 锁定环形缓冲，`-B` 只调流缓存。出现 `mmap() failed: Resource temporarily unavailable` 时先检查 `LimitMEMLOCK`。可用 `LimitMEMLOCK=320M` 和 `MemoryMax=384M` 作为该模式的起点。
 
 试点会拒绝 `nfpcapd 1.7.10`。在 Rocky Linux 10 的 EPEL 包上，短 UDP 突发已被内核采集，却在链路空闲后未及时导出流记录。这个版本无法满足保留突发对端证据的要求。RHEL 系的回归使用 Rocky Linux 9 的 EPEL 包。
 
@@ -114,8 +118,10 @@ StatsService 仅监听本机回环。配置的标签排除管理 API、阻断出
 
 - `hour-*.json` 包含网卡观察量、服务汇总、未解释量、覆盖状态，小时结束或正常停止时写入，保留七天。服务与网卡的字节口径可能不同，服务计数用于解释及研判。
 - `event-*.json` 包含触发原因、观测接口、证据时间段、来源和目的 Top 20、其他字节数和过期时间。发现异常后就可读，后续追加最多 5 分钟，结束后 `complete` 变为 true。事件最多 64 KiB，默认 72 小时过期，最多保留 288 项。
-- 临时文件按 30 秒轮转，长连接活跃超时也为 30 秒。分析器读取并清理分片，用每条记录最后一个报文的时间归入对应观测切片，等待额外两次轮转接收迟到的记录。跨切片的流记录保留其原始起止时间和累计字节。分析中的对端计数保留最近 15 分钟，正常记录随后覆盖。
+- eBPF 按报文到达时间分配 30 秒切片，最多同时保留 16,384 个时间片、方向与对端组合。达到上限时，方向字节仍参与检测，超出的字节计入快照的其他项，快照标记为部分证据。`nfpcapd` 模式的临时文件轮转和长连接活跃超时均为 30 秒，分析器清理已读分片。分析中的对端计数保留最近 15 分钟，正常记录随后覆盖。
 - 路径两端匹配使用短窗口聚合。快触发用近两分钟，慢触发用连续的五分钟窗口，持续异常用 30 分钟未解释量。基线从观测完整的窗口逐步建立，重启后重新学习。
 - 方向识别仅覆盖配置好的本机地址。采集点之前的丢弃不在可见范围内。特别繁忙时，关注 collector 的日志和实际可见用量，实验性采集结果不参与面板账本。
 
-真实网络回归位于 `scripts/ci/test-traffic-anomaly.py`。它启动实际二进制，在隔离 Linux 网络命名空间中运行 Xray 和流量工具，覆盖分路代理、IPv4/IPv6 入站、持续 TCP 出站和临时文件清理。CI 矩阵使用 Ubuntu 24.04 原生环境，以及 Debian 13、Rocky Linux 9 容器里的发行版原生软件包。容器用 runner 的 Linux 内核，输出会记录内核和工具版本。
+真实网络回归位于 `scripts/ci/test-traffic-anomaly.py`。它启动实际二进制，在隔离 Linux 网络命名空间中运行 Xray 和流量工具，覆盖分路代理、IPv4/IPv6 入站、持续 TCP 出站和普通流量零取证文件。eBPF 矩阵覆盖原生 Ubuntu 24.04，以及 Debian 13、Rocky Linux 9、无 systemd 的 Alpine 3.22 容器。容器使用 runner 的 Linux 内核。Ubuntu 另跑一项 `nfpcapd` 兼容回归。
+
+内核探针源码位于 `internal/trafficwatch/ebpf/capture.c`。修改后在 Linux 用 `bash scripts/ci/build-traffic-ebpf.sh` 重新生成两种字节序的对象，默认使用 `clang-18`。常规 Go 构建使用嵌入的对象。
