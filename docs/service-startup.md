@@ -80,7 +80,7 @@ sudo -u komari /opt/komari/agent status --credentials-file /opt/komari/credentia
 
 ```bash
 sudo -u _komari /usr/local/komari/agent login --endpoint https://panel.example.com
-sudo launchctl kickstart -k system/com.komari.komari-agent
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.komari.komari-agent.plist
 sudo launchctl print system/com.komari.komari-agent
 sudo tail -n 60 /var/log/komari-agent.log
 ```
@@ -88,6 +88,21 @@ sudo tail -n 60 /var/log/komari-agent.log
 `launchctl bootstrap` 后通过 `launchctl print` 和日志确认 `state = running`。安装器会保留参数边界并转义 plist XML。自定义服务名时，对应 label 为 `com.komari.<服务名>`。
 
 macOS 和其他非 systemd 安装需要 Python 3 和支持 Ed25519 的 OpenSSL 3。若系统自带的是 LibreSSL，请先安装 OpenSSL 3，并确保管理员运行安装器时使用的是该版本。可执行文件和服务配置由 root 持有。服务账号只需写入安装目录下的 `state/`，旧版默认位置的状态文件会复制到该目录。
+
+若 `/usr/local` 由 Homebrew 操作账号持有，可通过 `--install-dir '/Library/Application Support/Komari'` 指定 root 管理的目录。注册和排查时使用该目录里的 `agent`。
+
+## Linux OpenRC
+
+启动 OpenRC 后，以 root 运行同一个签名安装器。默认安装目录为 `/usr/lib/komari/komari-agent`，普通监控以 `komari` 账号运行。首次安装后，按提示注册并启用服务。
+
+```bash
+sudo -u komari /usr/lib/komari/komari-agent/agent login --endpoint https://panel.example.com
+sudo rc-update add komari-agent default
+sudo rc-service komari-agent start
+sudo rc-service komari-agent status
+```
+
+OpenRC 和 launchd 提供普通监控。面板审批提权、Host 主机事务及独立 rescue 服务需要 Linux systemd。安装器会在创建账号或写入服务前拒绝这两种服务管理器上的特权和救援选项。
 
 ## Windows
 
