@@ -176,6 +176,7 @@ def main(binary, xray):
             stop(process)
             hours = [json.loads(path.read_text()) for path in state.glob("hour-*.json")]
             assert sum(hour["services"].get("xray", {}).get("tx_bytes", 0) for hour in hours) >= 8 << 20, hours
+            assert sum(hour["observed"]["tx_bytes"] for hour in hours) >= 8 << 20, hours
             assert all("192.0.2.2" not in json.dumps(hour) for hour in hours)
             assert not list(scratch.glob("flow-run-*")), "normal temporary files remained after shutdown"
             print("PASS: real Xray, split inbound and outbound links, non-resetting stats, and short IPv4/IPv6 bursts retained")
@@ -183,16 +184,33 @@ def main(binary, xray):
 
             process, state = launch("egress", False)
             time.sleep(123)
-            sink = ("import socket; s=socket.socket(); s.bind(('192.0.2.2',19191)); "
-                    "s.listen(); c,_=s.accept(); "
-                    "exec('while c.recv(65536):\n pass')")
-            start(client, "sink", sys.executable, "-c", sink)
-            time.sleep(1)
+            sink_code = """
+import socket
+with socket.socket() as listener:
+    listener.bind(('192.0.2.2', 19191))
+    listener.listen()
+    print('ready', flush=True)
+    stream, _ = listener.accept()
+    with stream:
+        while stream.recv(65536):
+            pass
+"""
+            sink = start(client, "sink", sys.executable, "-c", sink_code)
+
+            def sink_ready():
+                assert sink.poll() is None, (root / "sink.log").read_text()
+                return "ready" in (root / "sink.log").read_text()
+
+            retry(sink_ready, 10)
             talk = ("import socket,time; s=socket.create_connection(('192.0.2.2',19191)); "
                     "p=b'x'*16384; [(s.sendall(p),time.sleep(.15)) for _ in range(1200)]")
             sender = start(node, "sender", sys.executable, "-c", talk)
-            outgoing = retry(lambda: snapshot(state), 150)
-            assert sender.poll() is None, "active TCP flow was only counted after it closed"
+
+            def active_snapshot():
+                assert sender.poll() is None, (root / "sender.log").read_text()
+                return snapshot(state)
+
+            outgoing = retry(active_snapshot, 150)
             assert outgoing["reason"] == "fast_unexplained_egress", outgoing
             assert any(p["ip"] == "192.0.2.2" and p["bytes"] > 300_000 for p in outgoing["egress_destinations"])
             stop(process)

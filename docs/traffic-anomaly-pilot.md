@@ -58,6 +58,8 @@ sudo systemd-run --unit=komari-traffic --collect \
 
 Ubuntu 24.04 的 `nfpcapd 1.7.3` 在 Linux 上使用固定的 256 MiB 锁定环形缓冲，`-B` 只调流缓存。出现 `mmap() failed: Resource temporarily unavailable` 时先检查 `LimitMEMLOCK`。上面的 384 MiB 是试点服务内存上限示例。资源紧张的节点先测空闲及实际流量占用，再决定是否启用。
 
+试点会拒绝 `nfpcapd 1.7.10`。在 Rocky Linux 10 的 EPEL 包上，短 UDP 突发已被内核采集，却在链路空闲后未及时导出流记录。这个版本无法满足保留突发对端证据的要求。RHEL 系的回归使用 Rocky Linux 9 的 EPEL 包。
+
 ## Xray 和分路
 
 让运行中的 Xray 加载下述聚合配置，且其他配置文件里的 `policy.levels` 不开启 `statsUser*`。分析器用该配置片段检查聚合统计开关，再对显式配置的标签逐个读取聚合计数。
@@ -92,4 +94,4 @@ StatsService 仅监听本机回环。配置的标签排除管理 API、阻断出
 - 路径两端匹配使用短窗口聚合。快触发用近两分钟，慢触发用连续的五分钟窗口，持续异常用 30 分钟未解释量。基线从观测完整的窗口逐步建立，重启后重新学习。
 - 方向识别仅覆盖配置好的本机地址。采集点之前的丢弃不在可见范围内。特别繁忙时，关注 collector 的日志和实际可见用量，实验性采集结果不参与面板账本。
 
-真实网络回归位于 `scripts/ci/test-traffic-anomaly.py`。它启动实际二进制，在隔离 Linux 网络命名空间中运行 Xray 和流量工具，覆盖分路代理、IPv4/IPv6 入站、持续 TCP 出站和临时文件清理。CI 矩阵使用 Ubuntu 24.04 原生环境，以及 Debian 13、Rocky Linux 10 容器里的发行版原生软件包。容器用 runner 的 Linux 内核，输出会记录内核和工具版本。
+真实网络回归位于 `scripts/ci/test-traffic-anomaly.py`。它启动实际二进制，在隔离 Linux 网络命名空间中运行 Xray 和流量工具，覆盖分路代理、IPv4/IPv6 入站、持续 TCP 出站和临时文件清理。CI 矩阵使用 Ubuntu 24.04 原生环境，以及 Debian 13、Rocky Linux 9 容器里的发行版原生软件包。容器用 runner 的 Linux 内核，输出会记录内核和工具版本。

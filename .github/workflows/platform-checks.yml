@@ -16,8 +16,8 @@ jobs:
             image: native
           - distribution: Debian 13
             image: debian13
-          - distribution: Rocky Linux 10
-            image: rocky10
+          - distribution: Rocky Linux 9
+            image: rocky9
     steps:
       - uses: actions/checkout@v4
         with:

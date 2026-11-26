@@ -36,6 +36,13 @@ func TestNFDumpIdleSliceStillCountsAsCovered(t *testing.T) {
 	}
 }
 
+func TestNFDumpVersionWithIdleFlowLossIsRejected(t *testing.T) {
+	if checkCaptureVersion("nfpcapd: Version: 1.7.10-release options: lz4 ZSTD") == nil ||
+		checkCaptureVersion("nfpcapd: Version: 1.7.5-release Options: NSEL-NEL") != nil {
+		t.Fatal("version preflight did not isolate the reproduced 1.7.10 idle-flow defect")
+	}
+}
+
 func TestNFDumpJoinsDelayedExportsByPacketTime(t *testing.T) {
 	start := time.Date(2026, 11, 26, 9, 30, 0, 0, time.UTC)
 	sampler := nfdumpSampler{pending: make(map[time.Time]sample)}

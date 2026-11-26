@@ -41,9 +41,22 @@ func startNFDump(ctx context.Context, cfg Config, dir string) (*nfdumpSampler, <
 	if err != nil {
 		return nil, nil, err
 	}
-	capture := exec.CommandContext(ctx, "nfpcapd",
+	binary, err := exec.LookPath("nfpcapd")
+	if err != nil {
+		return nil, nil, err
+	}
+	versionCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	version, err := exec.CommandContext(versionCtx, binary, "-V").CombinedOutput()
+	cancel()
+	if err != nil {
+		return nil, nil, fmt.Errorf("identify nfpcapd version: %w", err)
+	}
+	if err := checkCaptureVersion(string(version)); err != nil {
+		return nil, nil, err
+	}
+	capture := exec.CommandContext(ctx, binary,
 		"-i", cfg.Interface, "-w", dir,
-		"-t", "30", "-e", "30,15", "-B", "16384",
+		"-t", "30", "-e", "30,15", "-B", "16384", "-s", "65535",
 		"-C", filepath.Join(dir, "empty.conf"), "ip or ip6")
 	capture.Env = append(os.Environ(), "TZ=UTC", "LC_ALL=C")
 	capture.Stdout, capture.Stderr = os.Stderr, os.Stderr
@@ -59,6 +72,15 @@ func startNFDump(ctx context.Context, cfg Config, dir string) (*nfdumpSampler, <
 		local[addr.Unmap()] = true
 	}
 	return &nfdumpSampler{ctx: ctx, dir: dir, dump: dump, local: local, pending: make(map[time.Time]sample)}, done, nil
+}
+
+func checkCaptureVersion(banner string) error {
+	// Release 1.7.10 advances its expiry wheel to a single slot on each check.
+	// The Linux reader checks on coarser ticks and can skip inactive UDP flows.
+	if strings.Contains(banner, "Version: 1.7.10-release") {
+		return errors.New("nfpcapd 1.7.10 can leave idle flows unexported; use a compatible nfpcapd build")
+	}
+	return nil
 }
 
 func (s *nfdumpSampler) Next() ([]sample, error) {
