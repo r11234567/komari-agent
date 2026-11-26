@@ -52,6 +52,14 @@ jobs:
       - name: Ubuntu systemd, real PAM and signed rescue lifecycle
         if: matrix.variant == 'host-actions'
         run: bash scripts/ci/run-audit-check.sh installer-host-actions bash scripts/ci/test-host-transactions.sh
+      - name: Build the actual Agent and Host for installer recovery
+        if: matrix.variant == 'systemd'
+        env:
+          GOMAXPROCS: '2'
+        run: |
+          mkdir -p ci-artifacts
+          bash scripts/ci/run-audit-check.sh installer-agent-build go build -p=2 -o ci-artifacts/komari-agent .
+          bash scripts/ci/run-audit-check.sh installer-host-build go build -p=2 -o ci-artifacts/komari-host ./cmd/komari-host
       - name: Ubuntu systemd signed install and recovery on a clean host
         if: matrix.variant == 'systemd'
         run: bash scripts/ci/run-audit-check.sh installer-systemd bash scripts/ci/test-installer-recovery.sh
