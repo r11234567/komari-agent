@@ -516,6 +516,9 @@ func apply(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if err := confirmAuthSource(requiresSSH, operator); err != nil {
+		return err
+	}
 	var helper []byte
 	var helperVersion string
 	if installRescue {
