@@ -20,7 +20,7 @@ func Run(args []string, out io.Writer) error {
 	}
 	switch args[0] {
 	case "version":
-		_, err := fmt.Fprintf(out, "komari-host release=%s protocol=2; host actions require Linux systemd, protected trust and fresh PAM authentication\n", ReleaseVersion)
+		_, err := fmt.Fprintf(out, "komari-host release=%s protocol=2; host actions require Linux systemd, protected trust and fresh PAM authentication; %s\n", ReleaseVersion, hostops.RootExecutionApprovalFeature)
 		return err
 	case "apply":
 		return apply(args[1:], out)

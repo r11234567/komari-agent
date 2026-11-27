@@ -7,8 +7,8 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -384,18 +384,6 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	admin, err := user.Lookup("komari-stage6-admin")
-	if err != nil {
-		t.Fatal(err)
-	}
-	random := make([]byte, 24)
-	_, _ = rand.Read(random)
-	password := hex.EncodeToString(random)
-	passwd := exec.Command("/usr/sbin/chpasswd")
-	passwd.Stdin = strings.NewReader(admin.Username + ":" + password + "\n")
-	if output, err := passwd.CombinedOutput(); err != nil {
-		t.Fatalf("configure disposable PAM account: %v %s", err, output)
-	}
 	if _, err = systemctl("start", service); err != nil {
 		t.Fatal(err)
 	}
@@ -432,16 +420,34 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	if localErr == nil || !strings.Contains(string(output), "approval requires an interactive SSH login") {
 		t.Fatalf("service-launched lookalike SSH session did not fail closed: %v %s", localErr, output)
 	}
+	detachedContext, cancelDetached := context.WithTimeout(context.Background(), 8*time.Second)
+	detached := exec.CommandContext(detachedContext, host, "apply", "--manifest", m.ManifestPath, "--revision", "2")
+	terminal, err := pty.Start(detached)
+	if err != nil {
+		cancelDetached()
+		t.Fatal(err)
+	}
+	detachedOutput, _ := io.ReadAll(terminal)
+	terminal.Close()
+	detachedErr := detached.Wait()
+	cancelDetached()
+	if detachedErr == nil || !strings.Contains(string(detachedOutput), "approval requires an interactive SSH login") {
+		t.Fatalf("separate PTY inside a real SSH session was accepted: %v %s", detachedErr, detachedOutput)
+	}
+	const password = "accept"
 	run := func(passwordInput string, args ...string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
 		defer cancel()
 		c := exec.CommandContext(ctx, host, args...)
-		c.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "SUDO_USER=" + admin.Username, "SUDO_UID=" + admin.Uid}
-		terminal, err := pty.Start(c)
-		if err != nil {
+		c.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "SUDO_USER=nobody", "SUDO_UID=65534"}
+		c.Stdin = os.Stdin
+		var output strings.Builder
+		c.Stdout = io.MultiWriter(os.Stdout, &output)
+		c.Stderr = c.Stdout
+		fmt.Fprintf(os.Stdout, "HOST_PAM_FIXTURE %s %s\n", passwordInput, legacyConsentAnswer)
+		if err := c.Start(); err != nil {
 			return err
 		}
-		defer terminal.Close()
 		if interrupt != nil {
 			go func(gate <-chan struct{}) {
 				select {
@@ -451,36 +457,9 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 				}
 			}(interrupt)
 		}
-		done := make(chan struct{})
-		var output strings.Builder
-		go func() {
-			defer close(done)
-			buf := make([]byte, 1024)
-			sent := false
-			consentSent := false
-			for {
-				n, e := terminal.Read(buf)
-				if n > 0 {
-					output.Write(buf[:n])
-					if !consentSent && strings.Contains(output.String(), "Legacy remote-control consent:") {
-						_, _ = terminal.Write([]byte(legacyConsentAnswer + "\n"))
-						consentSent = true
-					}
-					if !sent && strings.Contains(strings.ToLower(output.String()), "password:") {
-						_, _ = terminal.Write([]byte(passwordInput + "\n"))
-						sent = true
-					}
-				}
-				if e != nil {
-					return
-				}
-			}
-		}()
-		err = c.Wait()
-		<-done
-		lastRunOutput = strings.ReplaceAll(output.String(), password, "[redacted]")
-		t.Log(lastRunOutput)
-		return err
+		waitErr := c.Wait()
+		lastRunOutput = output.String()
+		return waitErr
 	}
 	if err = run(password, "apply", "--manifest", m.ManifestPath, "--revision", "2"); err == nil {
 		t.Fatal("declined local legacy consent executed a host task")
@@ -926,6 +905,47 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Log("confirmed rollback archived automatically; next signed revision applied without manual journal cleanup")
+	// Existing ordinary WebSSH and rescue are independent of the root account
+	// grant. Add it without changing the daemon identity.
+	panel.set(service, 1, true)
+	if err = run(password, "apply", "--manifest", m.ManifestPath, "--revision", "13"); err != nil {
+		t.Fatal(err)
+	}
+	if err = verifyService(service, 0, 1); err != nil {
+		t.Fatal(err)
+	}
+	panel.set(service, 1, true)
+	panel.mu.Lock()
+	hasRootAction := false
+	for _, action := range panel.negotiatedActions {
+		hasRootAction = hasRootAction || action == hostv1.HostAction_HOST_ACTION_ENABLE_ROOT_EXECUTION
+	}
+	rootSettings := privileged.SettingsFromProto(panel.current.Privileged)
+	rootSettings.RootExecutionAllowed = true
+	panel.current.Privileged = rootSettings.Proto()
+	panel.current.ConfigHash = privileged.Hash(rootSettings)
+	panel.current.Authorization.ConfigHash = panel.current.ConfigHash
+	panel.current.Authorization.Actions = []hostv1.HostAction{hostv1.HostAction_HOST_ACTION_ENABLE_ROOT_EXECUTION}
+	panel.mu.Unlock()
+	if !hasRootAction {
+		t.Fatal("Agent did not discover installed Host support for local root approval")
+	}
+	if err = run("deliberately-wrong", "apply", "--manifest", m.ManifestPath, "--revision", "14"); err == nil {
+		t.Fatal("same-identity remote root increase ignored failed PAM")
+	}
+	panel.mu.Lock()
+	rootClaimed := panel.op != nil
+	panel.mu.Unlock()
+	if rootClaimed {
+		t.Fatal("same-identity remote root task was claimed without PAM")
+	}
+	if err = run(password, "apply", "--manifest", m.ManifestPath, "--revision", "14"); err != nil {
+		t.Fatal(err)
+	}
+	store, err = privileged.Open(m.PrivilegedStateFile)
+	if err != nil || store.State().AppliedRevision != 14 || !store.Effective().RootExecutionAllowed {
+		t.Fatalf("real Agent did not adopt locally approved root execution: %v", err)
+	}
 	legacyFile, err = os.Open(legacyArtifact)
 	if err != nil {
 		t.Fatal(err)

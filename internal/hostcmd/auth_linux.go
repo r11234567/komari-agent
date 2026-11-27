@@ -54,29 +54,35 @@ func authenticate(directSSH bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return authenticateAccount(account)
+	if _, err := authenticateAccount(account); err != nil {
+		return "", err
+	}
+	return account, confirmAuthSource(directSSH, account)
+}
+
+func confirmAuthSource(directSSH bool, account string) error {
+	if directSSH || account != "root" {
+		current, err := authenticationAccount(true)
+		if err != nil || current != account {
+			return errors.New("approval requires the same active SSH login after PAM authentication")
+		}
+	}
+	return nil
 }
 
 func authenticationAccount(directSSH bool) (string, error) {
-	account := "root"
-	if directSSH {
-		uid, err := hostops.DirectSSHUID()
-		if err != nil {
+	uid, err := hostops.DirectSSHUID()
+	if err != nil {
+		if directSSH {
 			return "", err
 		}
-		login, err := user.LookupId(strconv.FormatUint(uint64(uid), 10))
-		if err != nil {
-			return "", errors.New("SSH login account is unavailable")
-		}
-		account = login.Username
-	} else if os.Getenv("SUDO_USER") != "" {
-		account = os.Getenv("SUDO_USER")
-		u, err := user.Lookup(account)
-		if err != nil || u.Uid != os.Getenv("SUDO_UID") {
-			return "", errors.New("sudo caller identity is inconsistent")
-		}
+		return "root", nil
 	}
-	return account, nil
+	login, err := user.LookupId(strconv.FormatUint(uint64(uid), 10))
+	if err != nil {
+		return "", errors.New("SSH login account is unavailable")
+	}
+	return login.Username, nil
 }
 
 func authenticateAccount(account string) (string, error) {

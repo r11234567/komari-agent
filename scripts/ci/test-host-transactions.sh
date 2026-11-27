@@ -54,7 +54,7 @@ PY
 }
 trap collect EXIT
 sudo apt-get update -qq
-sudo apt-get install -y iproute2 openssh-client openssh-server pamtester
+sudo apt-get install -y iproute2 openssh-client openssh-server pamtester python3-pexpect
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin komari-stage6-agent
 sudo useradd --create-home --shell /bin/bash komari-stage6-admin
 sudo install -d -m 755 "$rootdir"
@@ -78,7 +78,7 @@ sudo install -m 0644 "$ssh_fixture/client.pub" "$ssh_fixture/authorized_keys"
 {
   printf '#!/usr/bin/env bash\n'
   printf 'cd %q\n' "$PWD"
-  printf 'loginctl --no-pager show-session self -p Remote -p RemoteHost -p Service -p Type -p TTY -p User\n'
+  printf 'loginctl --no-pager show-session self -p Remote -p RemoteHost -p Service -p Type -p TTY -p User -p State -p Active\n'
   printf 'export GITHUB_ACTIONS=true KOMARI_STAGE6_ACCEPTANCE=true KOMARI_STAGE6_SERVICE=%q\n' "$service"
   printf 'exec %q -test.v -test.run %q -test.timeout=10m\n' "$rootdir/host-acceptance.test" '^TestHost(StateFence|RescuePrepare|SystemdTransactionAcceptance)'
 } | sudo tee "$ssh_launcher" >/dev/null
@@ -86,7 +86,8 @@ sudo chmod 0755 "$ssh_launcher"
 printf 'komari-stage6-admin ALL=(root) NOPASSWD: %s\n' "$ssh_launcher" | sudo tee "$ssh_fixture/sudoers" >/dev/null
 sudo visudo -cf "$ssh_fixture/sudoers"
 sudo install -m 0440 "$ssh_fixture/sudoers" "$sudo_rule"
-printf 'komari-stage6-admin:%s\n' "$(openssl rand -hex 24)" | sudo chpasswd
+openssl rand -hex 24 | sudo sh -c 'umask 077; cat > "$1"' sh "$ssh_fixture/password"
+sudo sh -c 'printf "komari-stage6-admin:%s\n" "$(cat "$1")" | /usr/sbin/chpasswd' sh "$ssh_fixture/password"
 
 sudo ip netns add "$ssh_namespace"
 sudo ip link add komari-ci-host type veth peer name komari-ci-peer netns "$ssh_namespace"
@@ -117,7 +118,5 @@ EOF
 sudo /usr/sbin/sshd -t -f "$ssh_fixture/sshd_config"
 sudo systemd-run --quiet --unit="$ssh_unit" --property=Type=notify \
   /usr/sbin/sshd -D -f "$ssh_fixture/sshd_config"
-sudo ip netns exec "$ssh_namespace" ssh -tt -p 22327 -i "$ssh_fixture/client" \
-  -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
-  -o "UserKnownHostsFile=$ssh_fixture/known_hosts" komari-stage6-admin@192.0.2.1 \
+sudo ip netns exec "$ssh_namespace" /usr/bin/python3 -B scripts/ci/drive-host-approval.py "$ssh_fixture" \
   | tee ci-artifacts/host-transactions-tests.log
