@@ -49,12 +49,22 @@ func authenticationReady() error {
 	}
 	return nil
 }
-func authenticate() (string, error) {
+func authenticate(directSSH bool) (string, error) {
 	if err := authenticationReady(); err != nil {
 		return "", err
 	}
 	account := "root"
-	if os.Getenv("SUDO_USER") != "" {
+	if directSSH {
+		uid, err := hostops.DirectSSHUID()
+		if err != nil {
+			return "", err
+		}
+		login, err := user.LookupId(strconv.FormatUint(uint64(uid), 10))
+		if err != nil {
+			return "", errors.New("SSH login account is unavailable")
+		}
+		account = login.Username
+	} else if os.Getenv("SUDO_USER") != "" {
 		account = os.Getenv("SUDO_USER")
 		u, err := user.Lookup(account)
 		if err != nil || u.Uid != os.Getenv("SUDO_UID") {

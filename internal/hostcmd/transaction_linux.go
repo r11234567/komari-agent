@@ -507,7 +507,8 @@ func apply(args []string, out io.Writer) error {
 			return err
 		}
 	}
-	operator, err := authenticate()
+	requiresSSH := p.PrivilegeMode == 2 && r.Authorization.TargetPrivilegeMode == 1 || installRescue || reviewLegacyRemoteControl
+	operator, err := authenticate(requiresSSH)
 	if err != nil {
 		return err
 	}
@@ -1102,7 +1103,8 @@ func resume(args []string, out io.Writer, restore bool) error {
 	default:
 		return errors.New("unknown journal phase; no service changes made")
 	}
-	_, err = authenticate()
+	willRestore := (restore && j.Phase == "local_applied") || j.Phase == "mutating" || j.Phase == "restoring"
+	_, err = authenticate(willRestore && (j.PreviousMode == 1 || j.PreviousHelper))
 	if err != nil {
 		return err
 	}

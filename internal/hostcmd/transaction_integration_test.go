@@ -423,6 +423,15 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	legacyConsentAnswer := "decline"
 	var interrupt <-chan struct{}
 	var lastRunOutput string
+	// A systemd-launched process has no SSH login provenance even if an
+	// application supplies the conventional SSH environment variables.
+	local := exec.Command("/usr/bin/systemd-run", "--quiet", "--wait", "--pipe", "--collect",
+		"--setenv=SSH_CONNECTION=192.0.2.2 12345 192.0.2.1 22", "--setenv=SSH_TTY=/dev/pts/1",
+		host, "apply", "--manifest", m.ManifestPath, "--revision", "2")
+	output, localErr := local.CombinedOutput()
+	if localErr == nil || !strings.Contains(string(output), "approval requires an interactive SSH login") {
+		t.Fatalf("service-launched lookalike SSH session did not fail closed: %v %s", localErr, output)
+	}
 	run := func(passwordInput string, args ...string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
 		defer cancel()
