@@ -13,6 +13,7 @@ import (
 	commonv1 "github.com/r11234567/komari-proto/gen/go/komari/common/v1"
 	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
 	hostv1 "github.com/r11234567/komari-proto/gen/go/komari/host/v1"
+	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"time"
@@ -111,6 +112,11 @@ func (c *Client) recordPrivilegedRevision(ctx context.Context, r *configv1.Privi
 	caps.Webssh.Limitation = ""
 	caps.Execution.Available = settings.RemoteControlEnabled && settings.ExecutionEnabled
 	caps.Execution.Limitation = ""
+	caps.RootExecution.Available = settings.RemoteControlEnabled && settings.RootExecutionAllowed &&
+		actual == reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT
+	if caps.RootExecution.Available {
+		caps.RootExecution.Limitation = ""
+	}
 	caps.Gpu.Available = settings.EnableGPU
 	caps.DetailedGpu.Available = settings.EnableGPU && c.store.Current().DetailedGPU
 	helperInstalled, helperRunning, helperAuthorized := false, false, false

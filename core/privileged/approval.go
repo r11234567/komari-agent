@@ -6,6 +6,7 @@ import (
 	hostv1 "github.com/r11234567/komari-proto/gen/go/komari/host/v1"
 	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
 	"google.golang.org/protobuf/proto"
+	"slices"
 	"time"
 )
 
@@ -45,7 +46,7 @@ func (s *Store) ApplyApproved(r *configv1.PrivilegedRevision, actual reportv1.Pr
 	if err := ValidateApproval(r, r.GetAgentId(), r.GetAuthorization().GetServiceId(), actual); err != nil {
 		return err
 	}
-	return s.commitApproved(r, receipt)
+	return s.commitApproved(r, receipt, false)
 }
 
 // ApplyHostApproved is distinct from same-identity delivery. The transport must
@@ -55,9 +56,10 @@ func (s *Store) ApplyHostApproved(r *configv1.PrivilegedRevision, op *hostv1.Hos
 	if r.GetState() != configv1.PrivilegedDeliveryState_PRIVILEGED_DELIVERY_STATE_APPLYING || r.GetProtocolVersion() != 2 || op.GetPhase() != hostv1.HostOperationPhase_HOST_OPERATION_PHASE_LOCAL_APPLIED || op.GetOperationId() == "" || !proto.Equal(r.GetAuthorization(), op.GetAuthorization()) || r.GetPrivileged().GetRequiredPrivilegeMode() != actual || r.GetConfigHash() != Hash(SettingsFromProto(r.GetPrivileged())) {
 		return errors.New("matching completed host operation and actual identity required")
 	}
-	return s.commitApproved(r, receipt)
+	rootApproved := slices.Contains(r.GetAuthorization().GetActions(), hostv1.HostAction_HOST_ACTION_ENABLE_ROOT_EXECUTION)
+	return s.commitApproved(r, receipt, rootApproved)
 }
-func (s *Store) commitApproved(r *configv1.PrivilegedRevision, receipt Receipt) error {
+func (s *Store) commitApproved(r *configv1.PrivilegedRevision, receipt Receipt, rootApproved bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if r.Revision <= s.state.AppliedRevision || r.Revision < s.state.PendingRevision || r.UpdateSequence < s.state.LastSequence {
@@ -66,15 +68,21 @@ func (s *Store) commitApproved(r *configv1.PrivilegedRevision, receipt Receipt) 
 	if len(s.state.Outbox) >= 1024 {
 		return errors.New("receipt outbox is full")
 	}
+	nextSettings := SettingsFromProto(r.Privileged)
+	previous := s.state.Active
+	if nextSettings.RootExecutionAllowed && !rootApproved &&
+		(!previous.RootExecutionAllowed || (nextSettings.WebSSHEnabled && !previous.WebSSHEnabled) ||
+			(nextSettings.ExecutionEnabled && !previous.ExecutionEnabled)) {
+		return errors.New("increasing remote root access requires an approved local Host operation")
+	}
 	encoded, err := proto.Marshal(r)
 	if err != nil {
 		return err
 	}
 	next := s.state.clone()
-	previous := next.Active
 	next.Previous = &previous
 	next.PreviousRevision = next.AppliedRevision
-	next.Active = SettingsFromProto(r.Privileged)
+	next.Active = nextSettings
 	next.AppliedRevision = r.Revision
 	next.ActiveSignedRevision = encoded
 	next.LastSequence = r.UpdateSequence

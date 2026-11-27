@@ -460,10 +460,14 @@ func TestCredentialRenewalWorkerRecoversFromNativeEntryDenial(t *testing.T) {
 			for {
 				next, _ := client.credentialStore.Identity()
 				if next.Generation != nil {
-					if *next.Generation != 1 || next.PendingRefresh != nil || next.RefreshToken != "synthetic-next-refresh" || client.tokenValue() != next.AccessToken {
+					if *next.Generation != 1 || next.PendingRefresh != nil || next.RefreshToken != "synthetic-next-refresh" {
 						t.Fatal("worker failed to commit the verified next credential generation")
 					}
-					break
+					// Refresh durably saves the identity before publishing the token
+					// used by live requests. Observe both within the original deadline.
+					if client.tokenValue() == next.AccessToken {
+						break
+					}
 				}
 				select {
 				case <-done:

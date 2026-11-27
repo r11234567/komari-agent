@@ -25,6 +25,7 @@ import (
 	"github.com/komari-monitor/komari-agent/rescue"
 	configv1 "github.com/r11234567/komari-proto/gen/go/komari/config/v1"
 	hostv1 "github.com/r11234567/komari-proto/gen/go/komari/host/v1"
+	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
 	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/proto"
 )
@@ -358,6 +359,10 @@ func validateActions(m *hostops.Manifest, p *hostops.Policy, t *hostops.Trust, r
 		return errors.New("identity action does not match actual source/target diff")
 	}
 	settings := privileged.SettingsFromProto(r.Privileged)
+	if seen[hostv1.HostAction_HOST_ACTION_ENABLE_ROOT_EXECUTION] &&
+		(!settings.RootExecutionAllowed || a.TargetPrivilegeMode != reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT) {
+		return errors.New("root execution approval requires the Linux root Agent identity and an explicit root execution target")
+	}
 	if reasons := localCeilingViolations(p, settings, seen[2]); len(reasons) > 0 {
 		policyFile := "selected installation policy"
 		if m != nil && m.HostPolicyFile != "" {
@@ -488,12 +493,18 @@ func apply(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	installRescue := false
+	installRescue, enableRootExecution := false, false
 	for _, action := range r.Authorization.Actions {
 		installRescue = installRescue || action == hostv1.HostAction_HOST_ACTION_INSTALL_RESCUE_HELPER
+		enableRootExecution = enableRootExecution || action == hostv1.HostAction_HOST_ACTION_ENABLE_ROOT_EXECUTION
 	}
 	if (*artifact == "") != (*release == "") || !installRescue && (*artifact != "" || *release != "") {
 		return errors.New("--helper-artifact and --release-manifest must be supplied together for a rescue install")
+	}
+	requiresSSH := p.PrivilegeMode == 2 && r.Authorization.TargetPrivilegeMode == 1 || installRescue || reviewLegacyRemoteControl || enableRootExecution
+	account, err := authenticationAccount(requiresSSH)
+	if err != nil {
+		return err
 	}
 	fmt.Fprintf(out, "service=%s actual_user=%s main_pid=%s policy_mode=%d target_mode=%d actions=%v\n", m.ServiceName, o.User, o.MainPID, p.PrivilegeMode, r.Authorization.TargetPrivilegeMode, r.Authorization.Actions)
 	if installRescue {
@@ -507,8 +518,11 @@ func apply(args []string, out io.Writer) error {
 			return err
 		}
 	}
-	operator, err := authenticate()
+	operator, err := authenticateAccount(account)
 	if err != nil {
+		return err
+	}
+	if err := confirmAuthSource(requiresSSH, operator); err != nil {
 		return err
 	}
 	var helper []byte
@@ -1102,7 +1116,8 @@ func resume(args []string, out io.Writer, restore bool) error {
 	default:
 		return errors.New("unknown journal phase; no service changes made")
 	}
-	_, err = authenticate()
+	willRestore := (restore && j.Phase == "local_applied") || j.Phase == "mutating" || j.Phase == "restoring"
+	_, err = authenticate(willRestore && (j.PreviousMode == 1 || j.PreviousHelper))
 	if err != nil {
 		return err
 	}
