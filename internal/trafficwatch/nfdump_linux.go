@@ -204,6 +204,7 @@ func (s *nfdumpSampler) decode(path string, start time.Time) (map[time.Time]samp
 
 func readFlows(reader io.Reader, exportStart time.Time, local map[netip.Addr]bool) (map[time.Time]sample, error) {
 	frames := make(map[time.Time]sample)
+	peers := make(map[time.Time]*[2]peerTracker)
 	var tooLate bool
 	lines := bufio.NewScanner(reader)
 	lines.Buffer(make([]byte, 256), 512)
@@ -236,6 +237,7 @@ func readFlows(reader io.Reader, exportStart time.Time, local map[netip.Addr]boo
 		frame, exists := frames[start]
 		if !exists {
 			frame = sample{Start: start, End: start.Add(captureSlice), RX: make(map[netip.Addr]uint64), TX: make(map[netip.Addr]uint64)}
+			peers[start] = new([2]peerTracker)
 		}
 		if frame.FirstPacket.IsZero() || first.Before(frame.FirstPacket) {
 			frame.FirstPacket = first
@@ -246,17 +248,9 @@ func readFlows(reader io.Reader, exportStart time.Time, local map[netip.Addr]boo
 		src, dst = src.Unmap(), dst.Unmap()
 		switch {
 		case !local[src] && local[dst]:
-			if _, ok := frame.RX[src]; ok || len(frame.RX) < maxPeers {
-				frame.RX[src] += bytes
-			} else {
-				frame.RXOverflow += bytes
-			}
+			frame.RXOverflow += peers[start][0].add(frame.RX, src, bytes)
 		case local[src] && !local[dst]:
-			if _, ok := frame.TX[dst]; ok || len(frame.TX) < maxPeers {
-				frame.TX[dst] += bytes
-			} else {
-				frame.TXOverflow += bytes
-			}
+			frame.TXOverflow += peers[start][1].add(frame.TX, dst, bytes)
 		default:
 			frame.Unknown += bytes
 		}

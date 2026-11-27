@@ -39,6 +39,7 @@ type sample struct {
 	RXOverflow, TXOverflow  uint64
 	Unknown                 uint64
 	Partial                 bool
+	PeerPartial             bool
 }
 
 type sampler interface {
@@ -79,10 +80,20 @@ type snapshot struct {
 	Other              Traffic   `json:"other"`
 }
 
+func (s *snapshot) shift(delta time.Duration) {
+	for _, stamp := range []*time.Time{&s.TriggeredAt, &s.Start, &s.End, &s.ExpiresAt, &s.FirstPacket, &s.LastPacket} {
+		if !stamp.IsZero() {
+			*stamp = stamp.Add(delta)
+		}
+	}
+}
+
 type evidence struct {
-	xray     proxyTraffic
-	services map[string]Traffic
-	partial  bool
+	xray           proxyTraffic
+	services       map[string]Traffic // Service bytes eligible for public-interface attribution.
+	serviceTotals  map[string]Traffic // All measured service bytes, for hourly reporting.
+	partial        bool
+	servicePartial bool
 }
 
 type observation struct {
@@ -90,7 +101,7 @@ type observation struct {
 	evidence
 }
 
-func rankPeers(counts map[netip.Addr]uint64) ([]peer, uint64) {
+func orderedPeers(counts map[netip.Addr]uint64) []peer {
 	ranked := make([]peer, 0, len(counts))
 	for addr, n := range counts {
 		ranked = append(ranked, peer{Address: addr, Bytes: n})
@@ -105,6 +116,22 @@ func rankPeers(counts map[netip.Addr]uint64) ([]peer, uint64) {
 			return a.Address.Compare(b.Address)
 		}
 	})
+	return ranked
+}
+
+func trimPeers(counts map[netip.Addr]uint64, limit int) (overflow uint64) {
+	if len(counts) <= limit {
+		return 0
+	}
+	for _, entry := range orderedPeers(counts)[limit:] {
+		overflow += entry.Bytes
+		delete(counts, entry.Address)
+	}
+	return overflow
+}
+
+func rankPeers(counts map[netip.Addr]uint64) ([]peer, uint64) {
+	ranked := orderedPeers(counts)
 	var other uint64
 	if len(ranked) > topPeers {
 		for _, entry := range ranked[topPeers:] {

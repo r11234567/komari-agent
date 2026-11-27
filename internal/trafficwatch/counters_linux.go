@@ -81,8 +81,9 @@ func (x XrayConfig) checkPolicy() error {
 }
 
 type ServiceConfig struct {
-	Unit  string `json:"unit"`
-	Group string `json:"group"`
+	Unit                string `json:"unit"`
+	Group               string `json:"group"`
+	PublicInterfaceOnly bool   `json:"public_interface_only,omitempty"`
 }
 
 type counterValue struct {
@@ -91,41 +92,87 @@ type counterValue struct {
 }
 
 type localCounters struct {
+	xray         *xrayStats
 	lastXray     map[string]uint64
 	lastServices map[string]counterValue
 }
 
-func (c *localCounters) read(ctx context.Context, cfg Config) evidence {
-	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
-	result := evidence{services: make(map[string]Traffic)}
-	if cfg.Xray != nil {
-		var err error
-		result.xray, err = c.readXray(ctx, *cfg.Xray)
-		if err != nil {
-			result.partial = true
-		}
+func (c *localCounters) close() {
+	if c.xray != nil {
+		c.xray.transport.CloseIdleConnections()
 	}
+}
+
+func (c *localCounters) read(ctx context.Context, cfg Config) evidence {
+	result := evidence{services: make(map[string]Traffic), serviceTotals: make(map[string]Traffic)}
+	type xrayResult struct {
+		count proxyTraffic
+		err   error
+	}
+	var xrayDone chan xrayResult
+	if cfg.Xray != nil {
+		xrayDone = make(chan xrayResult, 1)
+		go func() {
+			deadline, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+			count, err := c.readXray(deadline, *cfg.Xray)
+			xrayDone <- xrayResult{count, err}
+		}()
+	}
+	if len(cfg.Services) != 0 {
+		deadline, cancel := context.WithTimeout(ctx, 3*time.Second)
+		active, err := readServices(deadline, cfg.Services)
+		cancel()
+		result.servicePartial = err != nil
+		c.addServices(&result, cfg.Services, active)
+	}
+	if xrayDone != nil {
+		proxy := <-xrayDone
+		result.xray = proxy.count
+		result.partial = result.partial || proxy.err != nil
+	}
+	return result
+}
+
+func (c *localCounters) addServices(result *evidence, configured []ServiceConfig, active map[string]counterValue) {
 	if c.lastServices == nil {
 		c.lastServices = make(map[string]counterValue)
 	}
-	for _, service := range cfg.Services {
-		current, err := readService(ctx, service.Unit)
-		if err != nil {
+	for _, service := range configured {
+		current, sampled := active[service.Unit]
+		if !sampled {
 			delete(c.lastServices, service.Unit)
-			result.partial = true
+			result.partial = result.partial || service.PublicInterfaceOnly
+			result.servicePartial = true
 			continue
 		}
 		old, ok := c.lastServices[service.Unit]
 		c.lastServices[service.Unit] = current
-		if !ok || current.instance != old.instance || current.n.RX < old.n.RX || current.n.TX < old.n.TX {
-			result.partial = true
-			continue
+		delta, complete := serviceDelta(old, current, ok)
+		result.servicePartial = result.servicePartial || !complete
+		result.serviceTotals[service.Group] = result.serviceTotals[service.Group].add(delta)
+		if service.PublicInterfaceOnly {
+			result.services[service.Group] = result.services[service.Group].add(delta)
+			result.partial = result.partial || !complete
 		}
-		delta := Traffic{RX: current.n.RX - old.n.RX, TX: current.n.TX - old.n.TX}
-		result.services[service.Group] = result.services[service.Group].add(delta)
 	}
-	return result
+}
+
+func serviceDelta(old, current counterValue, known bool) (Traffic, bool) {
+	switch {
+	case current.instance == "":
+		return Traffic{}, true // Inactive and no final counters were retained.
+	case !known:
+		return Traffic{}, false // No evidence for when this invocation started.
+	case old.instance == "":
+		return current.n, true
+	case current.instance != old.instance:
+		return current.n, false // The previous invocation's tail may be missing.
+	case current.n.RX < old.n.RX || current.n.TX < old.n.TX:
+		return Traffic{}, false
+	default:
+		return Traffic{RX: current.n.RX - old.n.RX, TX: current.n.TX - old.n.TX}, true
+	}
 }
 
 func (c *localCounters) readXray(ctx context.Context, cfg XrayConfig) (proxyTraffic, error) {
@@ -133,7 +180,9 @@ func (c *localCounters) readXray(ctx context.Context, cfg XrayConfig) (proxyTraf
 		c.lastXray = nil
 		return proxyTraffic{}, err
 	}
-	values := make(map[string]uint64)
+	if c.xray == nil {
+		c.xray = newXrayStats(cfg.Endpoint)
+	}
 	var delta proxyTraffic
 	fields := []struct {
 		side, direction string
@@ -145,22 +194,44 @@ func (c *localCounters) readXray(ctx context.Context, cfg XrayConfig) (proxyTraf
 		{"outbound", "uplink", cfg.OutboundTags, &delta.OutUp},
 		{"outbound", "downlink", cfg.OutboundTags, &delta.OutDown},
 	}
-	reset := c.lastXray == nil
+	type reading struct {
+		key   string
+		dest  *uint64
+		value uint64
+		err   error
+	}
+	const maxXrayCounters = 16
+	readings := make(chan reading, maxXrayCounters)
+	var pending int
 	for _, field := range fields {
 		for _, tag := range field.tags {
 			key := strings.Join([]string{field.side, tag, "traffic", field.direction}, ">>>")
-			n, err := getXrayCounter(ctx, cfg.Endpoint, key)
-			if err != nil {
-				c.lastXray = nil
-				return proxyTraffic{}, err
-			}
-			values[key] = n
-			if old := c.lastXray[key]; n >= old {
-				*field.dest += n - old
-			} else {
-				reset = true
-			}
+			pending++
+			go func() {
+				n, err := c.xray.counter(ctx, key)
+				readings <- reading{key: key, dest: field.dest, value: n, err: err}
+			}()
 		}
+	}
+	values := make(map[string]uint64, pending)
+	reset := c.lastXray == nil
+	var readErr error
+	for range pending {
+		result := <-readings
+		if result.err != nil {
+			readErr = result.err
+			continue
+		}
+		values[result.key] = result.value
+		if old := c.lastXray[result.key]; result.value >= old {
+			*result.dest += result.value - old
+		} else {
+			reset = true
+		}
+	}
+	if readErr != nil {
+		c.lastXray = nil
+		return proxyTraffic{}, readErr
 	}
 	c.lastXray = values
 	if reset {
@@ -169,61 +240,51 @@ func (c *localCounters) readXray(ctx context.Context, cfg XrayConfig) (proxyTraf
 	return delta, nil
 }
 
-// QueryStats applies a substring filter. GetStats requests an exact, explicitly
-// allowed aggregate name and cannot return a user counter with a similar name.
-func getXrayCounter(ctx context.Context, endpoint, key string) (uint64, error) {
-	cmd := exec.CommandContext(ctx, "xray", "api", "stats", "-server="+endpoint, "-name="+key, "-reset=false", "-timeout=2")
-	out, err := cmd.Output()
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && strings.Contains(string(exitErr.Stderr), "code = NotFound") {
-			return 0, nil // Xray may create a counter lazily on first use.
-		}
-		return 0, errors.New("Xray GetStats is unavailable")
+func readServices(ctx context.Context, units []ServiceConfig) (map[string]counterValue, error) {
+	args := []string{"show", "--no-pager", "-p", "Id", "-p", "Names", "-p", "LoadState", "-p", "ActiveState",
+		"-p", "InvocationID", "-p", "IPAccounting", "-p", "IPIngressBytes", "-p", "IPEgressBytes", "--"}
+	for _, unit := range units {
+		args = append(args, unit.Unit)
 	}
-	var result struct {
-		Stat struct {
-			Name  string          `json:"name"`
-			Value json.RawMessage `json:"value"`
-		} `json:"stat"`
-	}
-	if len(out) > 4096 || json.Unmarshal(out, &result) != nil || result.Stat.Name != key {
-		return 0, errors.New("unexpected Xray aggregate response")
-	}
-	if len(result.Stat.Value) == 0 {
-		return 0, nil
-	}
-	return strconv.ParseUint(strings.Trim(string(result.Stat.Value), "\""), 10, 63)
+	out, err := exec.CommandContext(ctx, "systemctl", args...).Output()
+	// systemctl may print healthy units even when one of the requested units
+	// does not exist. Preserve those units and let the caller mark the gap.
+	return parseServiceCounters(string(out)), err
 }
 
-func readService(ctx context.Context, unit string) (counterValue, error) {
-	out, err := exec.CommandContext(ctx, "systemctl", "show",
-		"--property=ActiveState,InvocationID,IPIngressBytes,IPEgressBytes", "--", unit).Output()
-	if err != nil {
-		return counterValue{}, err
-	}
-	fields := make(map[string]string)
-	for _, line := range strings.Split(string(out), "\n") {
-		key, value, found := strings.Cut(line, "=")
-		if found {
-			fields[key] = value
+func parseServiceCounters(output string) map[string]counterValue {
+	result := make(map[string]counterValue)
+	for _, block := range strings.Split(output, "\n\n") {
+		fields := make(map[string]string)
+		for _, line := range strings.Split(block, "\n") {
+			if key, value, found := strings.Cut(line, "="); found {
+				fields[key] = value
+			}
+		}
+		current, ok := serviceCounter(fields)
+		if !ok {
+			continue
+		}
+		for _, name := range append(strings.Fields(fields["Names"]), fields["Id"]) {
+			if name != "" {
+				result[name] = current
+			}
 		}
 	}
+	return result
+}
+
+func serviceCounter(fields map[string]string) (counterValue, bool) {
+	if fields["LoadState"] != "loaded" || fields["IPAccounting"] != "yes" {
+		return counterValue{}, false
+	}
+	inactive := fields["ActiveState"] == "inactive" || fields["ActiveState"] == "failed"
+	id := fields["InvocationID"]
+	hasInvocation := strings.Trim(id, "0") != ""
 	rx, rxErr := strconv.ParseUint(fields["IPIngressBytes"], 10, 63)
 	tx, txErr := strconv.ParseUint(fields["IPEgressBytes"], 10, 63)
-	if rxErr != nil || txErr != nil {
-		if fields["ActiveState"] == "inactive" || fields["ActiveState"] == "failed" {
-			return counterValue{instance: fields["InvocationID"]}, nil
-		}
-		return counterValue{}, errors.New("systemd IPAccounting unavailable")
+	if rxErr == nil && txErr == nil && hasInvocation {
+		return counterValue{instance: id, n: Traffic{RX: rx, TX: tx}}, true
 	}
-	return counterValue{instance: fields["InvocationID"], n: Traffic{RX: rx, TX: tx}}, nil
-}
-
-func installedXray(cfg Config) error {
-	if cfg.Xray != nil {
-		_, err := exec.LookPath("xray")
-		return err
-	}
-	return nil
+	return counterValue{}, inactive
 }
