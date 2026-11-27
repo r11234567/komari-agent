@@ -78,7 +78,7 @@ sudo install -m 0644 "$ssh_fixture/client.pub" "$ssh_fixture/authorized_keys"
 {
   printf '#!/usr/bin/env bash\n'
   printf 'cd %q\n' "$PWD"
-  printf 'loginctl --no-pager show-session self --property=Remote,RemoteHost,Service,Type,TTY,User\n'
+  printf 'loginctl --no-pager show-session self -p Remote -p RemoteHost -p Service -p Type -p TTY -p User\n'
   printf 'export GITHUB_ACTIONS=true KOMARI_STAGE6_ACCEPTANCE=true KOMARI_STAGE6_SERVICE=%q\n' "$service"
   printf 'exec %q -test.v -test.run %q -test.timeout=10m\n' "$rootdir/host-acceptance.test" '^TestHost(StateFence|RescuePrepare|SystemdTransactionAcceptance)'
 } | sudo tee "$ssh_launcher" >/dev/null
