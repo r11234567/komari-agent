@@ -9,10 +9,11 @@ import (
 )
 
 const (
-	evidenceWindow = 15 * time.Minute
-	followWindow   = 5 * time.Minute
-	longWindow     = 30 * time.Minute
-	baselineDays   = 7
+	evidenceWindow             = 15 * time.Minute
+	followWindow               = 5 * time.Minute
+	longWindow                 = 30 * time.Minute
+	baselineDays               = 7
+	partialThresholdMultiplier = 3
 )
 
 type thresholds struct {
@@ -22,8 +23,9 @@ type thresholds struct {
 }
 
 type aggregate struct {
-	End   time.Time
-	Bytes Traffic
+	End     time.Time
+	Bytes   Traffic
+	Partial bool
 }
 
 type incident struct {
@@ -38,7 +40,7 @@ func (i *incident) add(o observation) {
 	if i.Start.IsZero() {
 		i.Start = o.Start
 	}
-	i.Partial = i.Partial || o.Partial || o.partial || o.Unknown != 0 ||
+	i.Partial = i.Partial || o.Partial || o.partial || o.PeerPartial || o.Unknown != 0 ||
 		(!i.End.IsZero() && !i.End.Equal(o.Start)) || o.RXOverflow != 0 || o.TXOverflow != 0
 	i.End = o.End
 	i.Complete = !o.End.Before(i.until)
@@ -56,15 +58,11 @@ func (i *incident) add(o observation) {
 	i.extra.TX += o.TXOverflow + mergePeers(i.tx, o.TX)
 }
 
-func mergePeers(dst, src map[netip.Addr]uint64) (overflow uint64) {
+func mergePeers(dst, src map[netip.Addr]uint64) uint64 {
 	for addr, n := range src {
-		if _, ok := dst[addr]; ok || len(dst) < maxPeers {
-			dst[addr] += n
-		} else {
-			overflow += n
-		}
+		dst[addr] += n
 	}
-	return overflow
+	return trimPeers(dst, maxPeers)
 }
 
 func (i *incident) record() snapshot {
@@ -117,8 +115,13 @@ func (e *engine) add(o observation) (snapshot, error) {
 	fast := e.window(fastStart, o.End)
 	unexplained := fast.unexplained(e.legs)
 	var reason string
-	if fast.Covered == 2*time.Minute && !fast.Partial {
-		reason = selectDirection(unexplained, e.limits.Fast)
+	partial := fast.Partial || fast.Covered != 2*time.Minute
+	if fast.Covered > 0 {
+		limit := e.limits.Fast
+		if partial {
+			limit *= partialThresholdMultiplier
+		}
+		reason = selectDirection(unexplained, limit)
 	}
 	slow, sustained := e.checkBaseline(o.End)
 	switch {
@@ -126,8 +129,10 @@ func (e *engine) add(o observation) (snapshot, error) {
 		reason = "fast_" + reason
 	case slow.reason != "":
 		fastStart, reason, unexplained = o.End.Add(-10*time.Minute), "slow_"+slow.reason, slow.unexplained
+		partial = false
 	case sustained.reason != "":
 		fastStart, reason, unexplained = o.End.Add(-evidenceWindow), "sustained_"+sustained.reason, sustained.unexplained
+		partial = sustained.partial
 	}
 	if e.active != nil && o.End.After(e.active.until) {
 		e.active = nil
@@ -141,7 +146,7 @@ func (e *engine) add(o observation) (snapshot, error) {
 	}
 	e.active = &incident{
 		snapshot: snapshot{ID: uuid.NewString(), Reason: reason, Interface: e.iface, Sampler: e.backend,
-			TriggeredAt: o.End, TriggerUnexplained: unexplained},
+			TriggeredAt: o.End, TriggerUnexplained: unexplained, Partial: partial},
 		until: o.End.Add(followWindow),
 		rx:    make(map[netip.Addr]uint64),
 		tx:    make(map[netip.Addr]uint64),
@@ -158,6 +163,7 @@ func (e *engine) add(o observation) (snapshot, error) {
 type trigger struct {
 	reason      string
 	unexplained Traffic
+	partial     bool
 }
 
 func (e *engine) checkBaseline(end time.Time) (slow, sustained trigger) {
@@ -165,22 +171,29 @@ func (e *engine) checkBaseline(end time.Time) (slow, sustained trigger) {
 		return slow, sustained
 	}
 	w := e.window(end.Add(-5*time.Minute), end)
-	if w.Covered != 5*time.Minute || w.Partial {
-		e.previousSlow, e.previousExcess = time.Time{}, Traffic{}
-		e.residual = nil
-		return slow, sustained
-	}
 	residual := w.unexplained(e.legs)
-	e.residual = append(e.residual, aggregate{End: end, Bytes: residual})
+	incomplete := w.Covered != 5*time.Minute || w.Partial
+	e.residual = append(e.residual, aggregate{End: end, Bytes: residual, Partial: incomplete})
 	for !e.residual[0].End.After(end.Add(-longWindow)) {
 		e.residual = e.residual[1:]
 	}
 	if len(e.residual) == int(longWindow/(5*time.Minute)) {
 		var sum Traffic
+		limit := e.limits.Sustained
+		if !e.residual[0].End.Equal(end.Add(5*time.Minute - longWindow)) {
+			limit = e.limits.Sustained * partialThresholdMultiplier
+		}
 		for _, part := range e.residual {
 			sum = sum.add(part.Bytes)
+			if part.Partial {
+				limit = e.limits.Sustained * partialThresholdMultiplier
+			}
 		}
-		sustained = trigger{selectDirection(sum, e.limits.Sustained), sum}
+		sustained = trigger{reason: selectDirection(sum, limit), unexplained: sum, partial: limit != e.limits.Sustained}
+	}
+	if incomplete {
+		e.previousSlow, e.previousExcess = time.Time{}, Traffic{}
+		return slow, sustained
 	}
 	key := end.Hour()*12 + end.Minute()/5
 	history := e.baseline[key]
@@ -204,7 +217,7 @@ func (e *engine) checkBaseline(end time.Time) (slow, sustained trigger) {
 		if e.previousExcess.TX != 0 && excess.TX != 0 {
 			combined.TX = e.previousExcess.TX + excess.TX
 		}
-		slow = trigger{selectDirection(combined, e.limits.Slow), combined}
+		slow = trigger{reason: selectDirection(combined, e.limits.Slow), unexplained: combined}
 	}
 	if excess == (Traffic{}) && sustained.reason == "" && e.active == nil && !end.Before(e.cooldownUntil) {
 		history = append(history, aggregate{End: end, Bytes: residual})

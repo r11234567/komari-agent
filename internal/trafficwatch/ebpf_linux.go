@@ -119,6 +119,14 @@ func bootNanos() (int64, error) {
 
 func (s *ebpfSampler) Name() string { return "ebpf" }
 
+func (s *ebpfSampler) captureTime() (time.Time, error) {
+	ns, err := bootNanos()
+	if err != nil {
+		return time.Time{}, err
+	}
+	return time.Unix(0, ns+s.offset).UTC(), nil
+}
+
 func (s *ebpfSampler) Close() {
 	for _, attached := range s.links {
 		_ = attached.Close()
@@ -127,11 +135,11 @@ func (s *ebpfSampler) Close() {
 }
 
 func (s *ebpfSampler) Next() ([]sample, error) {
-	ns, err := bootNanos()
+	now, err := s.captureTime()
 	if err != nil {
 		return nil, err
 	}
-	end := uint64((ns + s.offset - int64(sealDelay)) / int64(captureSlice))
+	end := uint64(now.Add(-sealDelay).UnixNano() / int64(captureSlice))
 	if end <= s.next {
 		return nil, nil
 	}
@@ -168,8 +176,12 @@ func (s *ebpfSampler) Next() ([]sample, error) {
 			frame.TX[address] = count
 		}
 	}
+	var peerErr error
 	if err := iter.Err(); err != nil {
-		return nil, fmt.Errorf("read eBPF peer map: %w", err)
+		peerErr = fmt.Errorf("read eBPF peer map: %w", err)
+		for i := range frames {
+			frames[i].PeerPartial = true
+		}
 	}
 	for i := range frames {
 		bucket := start + uint64(i)
@@ -182,10 +194,10 @@ func (s *ebpfSampler) Next() ([]sample, error) {
 	s.next = end
 	for _, key := range consumed {
 		if err := s.peers.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-			return frames, fmt.Errorf("release sealed eBPF peers: %w", err)
+			return frames, errors.Join(peerErr, fmt.Errorf("release sealed eBPF peers: %w", err))
 		}
 	}
-	return frames, nil
+	return frames, peerErr
 }
 
 func applyEBPFTotals(frame *sample, bucket uint64, values []ebpfTotals) {
@@ -216,15 +228,8 @@ func applyEBPFTotals(frame *sample, bucket uint64, values []ebpfTotals) {
 
 func capEBPFPeers(peers map[netip.Addr]uint64, observed uint64) (overflow uint64, partial bool) {
 	before := total(peers)
-	if len(peers) > maxPeers {
-		// Keep the biggest peers even when smaller flows exhaust the map.
-		ranked, _ := rankPeers(peers)
-		clear(peers)
-		for _, entry := range ranked {
-			peers[entry.Address] = entry.Bytes
-		}
-	}
-	return max(observed, before) - total(peers), before > observed
+	trimmed := trimPeers(peers, maxPeers)
+	return max(observed, before) - before + trimmed, before > observed
 }
 
 func ebpfTimestamp(ns uint64) time.Time { return time.Unix(0, int64(ns)).UTC() }

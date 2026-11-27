@@ -56,7 +56,7 @@ struct {
 } bucket_totals SEC(".maps");
 
 struct {
-    UINT(type, BPF_MAP_TYPE_HASH);
+    UINT(type, BPF_MAP_TYPE_LRU_HASH);
     UINT(max_entries, PEER_LIMIT);
     TYPE(key, struct peer_key);
     TYPE(value, __u64);

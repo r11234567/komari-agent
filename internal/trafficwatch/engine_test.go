@@ -74,3 +74,50 @@ func TestTrafficEngineSustainedEgressKeepsOnlyCoveredHistory(t *testing.T) {
 		t.Fatalf("unexpected sustained evidence: %+v", got)
 	}
 }
+
+func TestPartialAttributionStillTriggersOnHighObservedResidual(t *testing.T) {
+	start := time.Date(2026, 11, 26, 0, 0, 0, 0, time.UTC)
+	e := newEngine("edge0", "both", "fixture", thresholds{Fast: 300, Slow: 1000, Sustained: 1500})
+	remote := netip.MustParseAddr("203.0.113.80")
+	got, err := e.add(observation{
+		sample:   sample{Start: start, End: start.Add(captureSlice), RX: map[netip.Addr]uint64{remote: 6000}},
+		evidence: evidence{partial: true, services: map[string]Traffic{"backup": {RX: 2000}}},
+	})
+	if err != nil || got.Reason != "fast_unexplained_ingress" || !got.Partial ||
+		got.TriggerUnexplained.RX != 3600 || len(got.Sources) != 1 || got.Sources[0].Address != remote {
+		t.Fatalf("lost the high-water event during attribution failure: %+v, %v", got, err)
+	}
+}
+
+func TestSustainedDetectorRetainsHistoryAcrossAnAttributionGap(t *testing.T) {
+	start := time.Date(2026, 11, 26, 0, 0, 0, 0, time.UTC)
+	e := newEngine("edge0", "both", "fixture", thresholds{Fast: 9000, Slow: 9000, Sustained: 1000})
+	remote := netip.MustParseAddr("203.0.113.80")
+	var got snapshot
+	for i := range 60 {
+		var err error
+		got, err = e.add(observation{
+			sample:   sample{Start: start, End: start.Add(captureSlice), RX: map[netip.Addr]uint64{remote: 80}},
+			evidence: evidence{partial: i == 11},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		start = start.Add(captureSlice)
+	}
+	if got.Reason != "sustained_unexplained_ingress" || !got.Partial || got.TriggerUnexplained.RX != 4800 {
+		t.Fatalf("sustained history was erased or its gap was lost: %+v", got)
+	}
+}
+
+func TestPeerMergeRetainsLargeNewcomerAndPreservesTotals(t *testing.T) {
+	counts := make(map[netip.Addr]uint64)
+	for i := range maxPeers {
+		counts[netip.AddrFrom4([4]byte{198, 51, byte(i >> 8), byte(i)})] = 1
+	}
+	heavy := netip.MustParseAddr("203.0.113.80")
+	overflow := mergePeers(counts, map[netip.Addr]uint64{heavy: 8000})
+	if len(counts) != maxPeers || counts[heavy] != 8000 || overflow != 1 || total(counts)+overflow != maxPeers+8000 {
+		t.Fatalf("lost a late heavy peer or miscounted overflow: count=%d overflow=%d", counts[heavy], overflow)
+	}
+}

@@ -23,9 +23,6 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := cfg.validate(); err != nil {
 		return err
 	}
-	if err := installedXray(cfg); err != nil {
-		return err
-	}
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return err
 	}
@@ -110,6 +107,7 @@ func runSampler(ctx context.Context, cfg Config, source sampler, done <-chan err
 		}()
 	}
 	processor := newProcessor(source, cfg)
+	defer processor.counters.close()
 	processor.recoverHandoff()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -126,8 +124,8 @@ func runSampler(ctx context.Context, cfg Config, source sampler, done <-chan err
 				err = errors.New("collector stopped unexpectedly")
 			}
 			return errors.Join(fmt.Errorf("%s: %w", source.Name(), err), processor.flush())
-		case now := <-ticker.C:
-			if err := processor.tick(ctx, now.UTC()); err != nil {
+		case <-ticker.C:
+			if err := processor.tick(ctx, time.Now().UTC()); err != nil {
 				return errors.Join(err, processor.flush())
 			}
 		}
@@ -139,10 +137,13 @@ type processor struct {
 	source       sampler
 	engine       *engine
 	counters     localCounters
+	attribution  bool
 	evidence     map[time.Time]evidence
 	boundary     time.Time
 	startedAt    time.Time
 	hour         hourSummary
+	eventID      string
+	eventShift   time.Duration
 	prunedAt     time.Time
 	retryHandoff bool
 }
@@ -152,12 +153,29 @@ func newProcessor(src sampler, cfg Config) *processor {
 	if cfg.Xray != nil {
 		legs = cfg.Xray.PublicLegs
 	}
+	attribution := cfg.Xray != nil || slices.ContainsFunc(cfg.Services, func(service ServiceConfig) bool {
+		return service.PublicInterfaceOnly
+	})
 	return &processor{cfg: cfg, source: src, engine: newEngine(cfg.Interface, legs, src.Name(), cfg.Thresholds),
-		evidence: make(map[time.Time]evidence), startedAt: time.Now().UTC()}
+		attribution: attribution, evidence: make(map[time.Time]evidence)}
 }
 
 func (p *processor) tick(ctx context.Context, now time.Time) error {
-	boundary := now.Truncate(captureSlice)
+	captureNow := now
+	if clock, ok := p.source.(interface{ captureTime() (time.Time, error) }); ok {
+		var err error
+		captureNow, err = clock.captureTime()
+		if err != nil {
+			return err
+		}
+	}
+	if p.startedAt.IsZero() {
+		p.startedAt = captureNow
+	}
+	boundary := captureNow.Truncate(captureSlice)
+	// Keep joins and detection on the sampler clock. Translate persisted
+	// timestamps in whole slices to preserve UTC hourly boundaries.
+	wallShift := now.Sub(captureNow).Round(captureSlice)
 	if boundary.After(p.boundary) {
 		last := p.boundary
 		p.boundary = boundary
@@ -178,8 +196,9 @@ func (p *processor) tick(ctx context.Context, now time.Time) error {
 	for _, frame := range slices {
 		stats, available := p.evidence[frame.Start]
 		delete(p.evidence, frame.Start)
-		if !available && (p.cfg.Xray != nil || len(p.cfg.Services) != 0) {
-			stats.partial = true
+		if !available {
+			stats.partial = p.attribution
+			stats.servicePartial = len(p.cfg.Services) != 0
 		}
 		o := observation{sample: frame, evidence: stats}
 		event, err := p.engine.add(o)
@@ -187,6 +206,10 @@ func (p *processor) tick(ctx context.Context, now time.Time) error {
 			return err
 		}
 		if event.ID != "" {
+			if event.ID != p.eventID {
+				p.eventID, p.eventShift = event.ID, wallShift
+			}
+			event.shift(p.eventShift)
 			data, err := json.Marshal(event)
 			if err != nil {
 				return err
@@ -198,7 +221,8 @@ func (p *processor) tick(ctx context.Context, now time.Time) error {
 				return err
 			}
 		}
-		if err := p.addHour(o); err != nil {
+		o.Start, o.End = o.Start.Add(wallShift), o.End.Add(wallShift)
+		if err := p.addHour(o, p.startedAt.Add(wallShift)); err != nil {
 			return err
 		}
 	}
@@ -225,13 +249,13 @@ type hourSummary struct {
 	Partial     bool               `json:"partial"`
 }
 
-func (p *processor) addHour(o observation) error {
+func (p *processor) addHour(o observation, startedAt time.Time) error {
 	hour := o.Start.Truncate(time.Hour)
 	if !p.hour.Hour.Equal(hour) {
 		if err := p.flush(); err != nil {
 			return err
 		}
-		p.hour = hourSummary{Hour: hour, StartedAt: maxTime(o.Start, p.startedAt), Through: hour, Services: make(map[string]Traffic)}
+		p.hour = hourSummary{Hour: hour, StartedAt: maxTime(o.Start, startedAt), Through: hour, Services: make(map[string]Traffic)}
 		body, err := readBoundedFile(p.hourPath(), maxSnapshotBytes)
 		if err == nil {
 			if err := json.Unmarshal(body, &p.hour); err != nil || !p.hour.Hour.Equal(hour) || p.hour.Services == nil {
@@ -242,9 +266,10 @@ func (p *processor) addHour(o observation) error {
 		}
 	}
 	if !o.End.After(p.hour.Through) {
+		p.hour.Partial = true // UTC moved into an already published interval.
 		return nil
 	}
-	p.hour.Partial = p.hour.Partial || !p.hour.Through.Equal(o.Start) || o.Partial || o.partial || o.Unknown != 0
+	p.hour.Partial = p.hour.Partial || !p.hour.Through.Equal(o.Start) || o.Partial || o.partial || o.servicePartial || o.Unknown != 0
 	p.hour.Through = o.End
 	p.hour.Observed = p.hour.Observed.add(o.totals())
 	w := observationWindow{Services: make(map[string]Traffic)}
@@ -253,7 +278,7 @@ func (p *processor) addHour(o observation) error {
 	if p.cfg.Xray != nil {
 		p.hour.Services["xray"] = p.hour.Services["xray"].add(o.xray.explained(p.engine.legs))
 	}
-	for name, count := range o.services {
+	for name, count := range o.serviceTotals {
 		p.hour.Services[name] = p.hour.Services[name].add(count)
 	}
 	if o.End.Equal(hour.Add(time.Hour)) {
