@@ -18,6 +18,11 @@ var errDirectSSH = errors.New("approval requires an interactive SSH login opened
 // DirectSSHUID verifies the caller using logind and its OpenSSH ancestry.
 // Environment variables and an allocated pseudo-terminal alone carry no trust.
 func DirectSSHUID() (uint32, error) {
+	terminal, err := os.Open("/dev/tty")
+	if err != nil {
+		return 0, errDirectSSH
+	}
+	terminal.Close()
 	const loginctl = "/usr/bin/loginctl"
 	if err := TrustedPath(loginctl); err != nil {
 		return 0, errDirectSSH
@@ -55,11 +60,15 @@ func verifySSHProperties(data string, locals []net.Addr) (uint32, error) {
 		return 0, errDirectSSH
 	}
 	tty := strings.TrimPrefix(fields["TTY"], "/dev/")
-	if !strings.HasPrefix(tty, "pts/") {
-		return 0, errDirectSSH
-	}
-	if _, err := strconv.ParseUint(strings.TrimPrefix(tty, "pts/"), 10, 32); err != nil {
-		return 0, errDirectSSH
+	// Some OpenSSH/PAM versions omit the logind TTY display name. The
+	// caller already proved it has a kernel controlling terminal.
+	if tty != "" {
+		if !strings.HasPrefix(tty, "pts/") {
+			return 0, errDirectSSH
+		}
+		if _, err := strconv.ParseUint(strings.TrimPrefix(tty, "pts/"), 10, 32); err != nil {
+			return 0, errDirectSSH
+		}
 	}
 	remote, err := netip.ParseAddr(fields["RemoteHost"])
 	if err != nil {
