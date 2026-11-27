@@ -6,6 +6,7 @@ mkdir -p ci-artifacts
 exec > >(tee ci-artifacts/host-transactions.log) 2>&1
 service="komari-stage6-${GITHUB_RUN_ID}"
 rootdir="/usr/lib/komari/$service"
+ssh_launcher="$rootdir/host-acceptance-run"
 ssh_fixture=
 ssh_namespace="komari-approval-ci"
 sudo_rule=/etc/sudoers.d/komari-approval-fixture
@@ -55,7 +56,7 @@ trap collect EXIT
 sudo apt-get update -qq
 sudo apt-get install -y iproute2 openssh-client openssh-server pamtester
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin komari-stage6-agent
-sudo useradd --no-create-home --shell /bin/bash komari-stage6-admin
+sudo useradd --create-home --shell /bin/bash komari-stage6-admin
 sudo install -d -m 755 "$rootdir"
 export GOMAXPROCS=2
 go build -p=2 -ldflags="-X github.com/komari-monitor/komari-agent/internal/hostcmd.ReleaseVersion=ci-stage6" -o ci-artifacts/komari-host ./cmd/komari-host
@@ -70,7 +71,7 @@ go test -p=2 -c -o ci-artifacts/host-acceptance.test ./internal/hostcmd
 # separate network namespace. Only the fixture launcher is granted sudo.
 ssh_fixture=$(sudo mktemp -d /run/komari-approval-ci.XXXXXXXX)
 sudo chmod 0755 "$ssh_fixture"
-sudo install -m 0755 ci-artifacts/host-acceptance.test "$ssh_fixture/acceptance"
+sudo install -m 0755 ci-artifacts/host-acceptance.test "$rootdir/host-acceptance.test"
 sudo ssh-keygen -q -t ed25519 -N '' -f "$ssh_fixture/server"
 sudo ssh-keygen -q -t ed25519 -N '' -f "$ssh_fixture/client"
 sudo install -m 0644 "$ssh_fixture/client.pub" "$ssh_fixture/authorized_keys"
@@ -78,10 +79,10 @@ sudo install -m 0644 "$ssh_fixture/client.pub" "$ssh_fixture/authorized_keys"
   printf '#!/usr/bin/env bash\n'
   printf 'cd %q\n' "$PWD"
   printf 'export GITHUB_ACTIONS=true KOMARI_STAGE6_ACCEPTANCE=true KOMARI_STAGE6_SERVICE=%q\n' "$service"
-  printf 'exec %q -test.v -test.run %q -test.timeout=10m\n' "$ssh_fixture/acceptance" '^TestHost(StateFence|RescuePrepare|SystemdTransactionAcceptance)'
-} | sudo tee "$ssh_fixture/run" >/dev/null
-sudo chmod 0755 "$ssh_fixture/run"
-printf 'komari-stage6-admin ALL=(root) NOPASSWD: %s/run\n' "$ssh_fixture" | sudo tee "$ssh_fixture/sudoers" >/dev/null
+  printf 'exec %q -test.v -test.run %q -test.timeout=10m\n' "$rootdir/host-acceptance.test" '^TestHost(StateFence|RescuePrepare|SystemdTransactionAcceptance)'
+} | sudo tee "$ssh_launcher" >/dev/null
+sudo chmod 0755 "$ssh_launcher"
+printf 'komari-stage6-admin ALL=(root) NOPASSWD: %s\n' "$ssh_launcher" | sudo tee "$ssh_fixture/sudoers" >/dev/null
 sudo visudo -cf "$ssh_fixture/sudoers"
 sudo install -m 0440 "$ssh_fixture/sudoers" "$sudo_rule"
 printf 'komari-stage6-admin:%s\n' "$(openssl rand -hex 24)" | sudo chpasswd
@@ -107,7 +108,7 @@ PasswordAuthentication no
 KbdInteractiveAuthentication no
 AllowUsers komari-stage6-admin
 DisableForwarding yes
-ForceCommand /usr/bin/sudo -n $ssh_fixture/run
+ForceCommand /usr/bin/sudo -n $ssh_launcher
 EOF
 { printf '[192.0.2.1]:22327 '; sudo cat "$ssh_fixture/server.pub"; } | sudo tee "$ssh_fixture/known_hosts" >/dev/null
 sudo /usr/sbin/sshd -f "$ssh_fixture/sshd_config"
