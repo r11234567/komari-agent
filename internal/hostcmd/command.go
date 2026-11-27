@@ -16,7 +16,7 @@ var ReleaseVersion string
 
 func Run(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: komari-host diagnose|migrate|update|trust|apply|resume|restore")
+		return errors.New("usage: komari-host diagnose|migrate|update|trust|apply|resume|restore|qga-forensics")
 	}
 	switch args[0] {
 	case "version":
@@ -30,6 +30,8 @@ func Run(args []string, out io.Writer) error {
 		return fetchHelper(args[1:], out)
 	case "resume", "restore":
 		return resume(args[1:], out, args[0] == "restore")
+	case "qga-forensics":
+		return runQGAForensics(args[1:], out)
 	case "diagnose":
 		fs := flag.NewFlagSet("diagnose", flag.ContinueOnError)
 		fs.SetOutput(out)

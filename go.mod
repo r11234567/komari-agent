@@ -23,6 +23,7 @@ require (
 )
 
 require (
+	github.com/cloudflare/circl v1.6.4 // indirect
 	github.com/ebitengine/purego v0.11.2 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
