@@ -9,13 +9,13 @@ rootdir="/usr/lib/komari/$service"
 ssh_launcher="$rootdir/host-acceptance-run"
 ssh_fixture=
 ssh_namespace="komari-approval-ci"
+ssh_unit="komari-approval-sshd-${GITHUB_RUN_ID}.service"
 sudo_rule=/etc/sudoers.d/komari-approval-fixture
 collect() {
   status=$?
   if [[ -n "$ssh_fixture" ]]; then
-    if sudo test -f "$ssh_fixture/sshd.pid"; then
-      sudo kill "$(sudo cat "$ssh_fixture/sshd.pid")" 2>/dev/null || true
-    fi
+    sudo journalctl -u "$ssh_unit" --no-pager -n 40 > ci-artifacts/host-sshd.log 2>&1 || true
+    sudo systemctl stop "$ssh_unit" 2>/dev/null || true
     sudo ip netns del "$ssh_namespace" 2>/dev/null || true
     sudo ip link del komari-ci-host 2>/dev/null || true
     sudo rm -f "$sudo_rule"
@@ -78,6 +78,7 @@ sudo install -m 0644 "$ssh_fixture/client.pub" "$ssh_fixture/authorized_keys"
 {
   printf '#!/usr/bin/env bash\n'
   printf 'cd %q\n' "$PWD"
+  printf 'loginctl show-session self --property=Remote,RemoteHost,Service,Type,TTY,User\n'
   printf 'export GITHUB_ACTIONS=true KOMARI_STAGE6_ACCEPTANCE=true KOMARI_STAGE6_SERVICE=%q\n' "$service"
   printf 'exec %q -test.v -test.run %q -test.timeout=10m\n' "$rootdir/host-acceptance.test" '^TestHost(StateFence|RescuePrepare|SystemdTransactionAcceptance)'
 } | sudo tee "$ssh_launcher" >/dev/null
@@ -111,7 +112,11 @@ DisableForwarding yes
 ForceCommand /usr/bin/sudo -n $ssh_launcher
 EOF
 { printf '[192.0.2.1]:22327 '; sudo cat "$ssh_fixture/server.pub"; } | sudo tee "$ssh_fixture/known_hosts" >/dev/null
-sudo /usr/sbin/sshd -f "$ssh_fixture/sshd_config"
+# Start sshd in its own service cgroup so PAM can create a fresh logind
+# session instead of inheriting the Actions runner's session.
+sudo /usr/sbin/sshd -t -f "$ssh_fixture/sshd_config"
+sudo systemd-run --quiet --unit="$ssh_unit" --property=Type=notify \
+  /usr/sbin/sshd -D -f "$ssh_fixture/sshd_config"
 sudo ip netns exec "$ssh_namespace" ssh -tt -p 22327 -i "$ssh_fixture/client" \
   -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
   -o "UserKnownHostsFile=$ssh_fixture/known_hosts" komari-stage6-admin@192.0.2.1 \
