@@ -908,9 +908,11 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	// Existing ordinary WebSSH and rescue are independent of the root account
 	// grant. Add it without changing the daemon identity.
 	panel.set(service, 1, true)
+	legacyConsentAnswer = "authorize " + service + " 13"
 	if err = run(password, "apply", "--manifest", m.ManifestPath, "--revision", "13"); err != nil {
 		t.Fatal(err)
 	}
+	legacyConsentAnswer = ""
 	if err = verifyService(service, 0, 1); err != nil {
 		t.Fatal(err)
 	}
