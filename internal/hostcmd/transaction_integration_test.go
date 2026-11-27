@@ -905,6 +905,47 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Log("confirmed rollback archived automatically; next signed revision applied without manual journal cleanup")
+	// Existing ordinary WebSSH and rescue are independent of the root account
+	// grant. Add it without changing the daemon identity.
+	panel.set(service, 1, true)
+	if err = run(password, "apply", "--manifest", m.ManifestPath, "--revision", "13"); err != nil {
+		t.Fatal(err)
+	}
+	if err = verifyService(service, 0, 1); err != nil {
+		t.Fatal(err)
+	}
+	panel.set(service, 1, true)
+	panel.mu.Lock()
+	hasRootAction := false
+	for _, action := range panel.negotiatedActions {
+		hasRootAction = hasRootAction || action == hostv1.HostAction_HOST_ACTION_ENABLE_ROOT_EXECUTION
+	}
+	rootSettings := privileged.SettingsFromProto(panel.current.Privileged)
+	rootSettings.RootExecutionAllowed = true
+	panel.current.Privileged = rootSettings.Proto()
+	panel.current.ConfigHash = privileged.Hash(rootSettings)
+	panel.current.Authorization.ConfigHash = panel.current.ConfigHash
+	panel.current.Authorization.Actions = []hostv1.HostAction{hostv1.HostAction_HOST_ACTION_ENABLE_ROOT_EXECUTION}
+	panel.mu.Unlock()
+	if !hasRootAction {
+		t.Fatal("Agent did not discover installed Host support for local root approval")
+	}
+	if err = run("deliberately-wrong", "apply", "--manifest", m.ManifestPath, "--revision", "14"); err == nil {
+		t.Fatal("same-identity remote root increase ignored failed PAM")
+	}
+	panel.mu.Lock()
+	rootClaimed := panel.op != nil
+	panel.mu.Unlock()
+	if rootClaimed {
+		t.Fatal("same-identity remote root task was claimed without PAM")
+	}
+	if err = run(password, "apply", "--manifest", m.ManifestPath, "--revision", "14"); err != nil {
+		t.Fatal(err)
+	}
+	store, err = privileged.Open(m.PrivilegedStateFile)
+	if err != nil || store.State().AppliedRevision != 14 || !store.Effective().RootExecutionAllowed {
+		t.Fatalf("real Agent did not adopt locally approved root execution: %v", err)
+	}
 	legacyFile, err = os.Open(legacyArtifact)
 	if err != nil {
 		t.Fatal(err)

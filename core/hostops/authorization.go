@@ -129,7 +129,8 @@ func VerifyRevision(t *Trust, r *configv1.PrivilegedRevision) error {
 	}
 	seen := map[hostv1.HostAction]bool{}
 	for _, action := range a.Actions {
-		if action < 1 || action > 3 || seen[action] {
+		if action < hostv1.HostAction_HOST_ACTION_SET_SERVICE_IDENTITY ||
+			action > hostv1.HostAction_HOST_ACTION_ENABLE_ROOT_EXECUTION || seen[action] {
 			return errors.New("unknown or duplicate host action")
 		}
 		seen[action] = true
