@@ -49,17 +49,39 @@ func authenticationReady() error {
 	}
 	return nil
 }
-func authenticate() (string, error) {
-	if err := authenticationReady(); err != nil {
+func authenticate(directSSH bool) (string, error) {
+	account, err := authenticationAccount(directSSH)
+	if err != nil {
 		return "", err
 	}
+	return authenticateAccount(account)
+}
+
+func authenticationAccount(directSSH bool) (string, error) {
 	account := "root"
-	if os.Getenv("SUDO_USER") != "" {
+	if directSSH {
+		uid, err := hostops.DirectSSHUID()
+		if err != nil {
+			return "", err
+		}
+		login, err := user.LookupId(strconv.FormatUint(uint64(uid), 10))
+		if err != nil {
+			return "", errors.New("SSH login account is unavailable")
+		}
+		account = login.Username
+	} else if os.Getenv("SUDO_USER") != "" {
 		account = os.Getenv("SUDO_USER")
 		u, err := user.Lookup(account)
 		if err != nil || u.Uid != os.Getenv("SUDO_UID") {
 			return "", errors.New("sudo caller identity is inconsistent")
 		}
+	}
+	return account, nil
+}
+
+func authenticateAccount(account string) (string, error) {
+	if err := authenticationReady(); err != nil {
+		return "", err
 	}
 	if !hostops.ValidService(account) {
 		return "", errors.New("invalid local authentication account")

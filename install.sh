@@ -157,12 +157,7 @@ os_type=$(uname -s)
 case $os_type in
     Darwin)
         os_name="darwin"
-        target_dir="/usr/local/komari"  # Use /usr/local on macOS
-        # Check if we can write to /usr/local, fallback to user directory
-        if [ ! -w "/usr/local" ] && [ "$EUID" -ne 0 ]; then
-            target_dir="$HOME/.komari"
-            log_info "No write permission to /usr/local, using user directory: $target_dir"
-        fi
+        target_dir="/usr/local/komari"
         ;;
     Linux)
         os_name="linux"
@@ -319,10 +314,59 @@ if { [ -n "$cf_access_client_id" ] && [ -z "$cf_access_client_secret" ]; } || { 
     exit 1
 fi
 
+# Decide the installation path before creating accounts or touching services.
+init_system=""
+if [ "$uninstall_only" != true ]; then
+    if [[ ! "$service_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || [[ "$service_name" = *.service ]]; then
+        log_error "Invalid service name"; exit 64
+    fi
+    if [ "$EUID" -ne 0 ]; then
+        log_error "Run this installer as root"; exit 1
+    fi
+    case "$os_name" in
+        linux)
+            if [ -d /run/systemd/system ]; then
+                if ! command -v systemctl >/dev/null 2>&1 || ! systemctl list-units >/dev/null 2>&1; then
+                    log_error "systemd is present but unavailable"; exit 1
+                fi
+                init_system=systemd
+            elif command -v rc-service >/dev/null 2>&1 && command -v rc-update >/dev/null 2>&1 && [ -x /sbin/openrc-run ]; then
+                if [ ! -s /run/openrc/softlevel ]; then
+                    log_error "OpenRC is installed but has no active runlevel"; exit 1
+                fi
+                init_system=openrc
+            else
+                log_error "Linux installation requires a running systemd or OpenRC"; exit 1
+            fi
+            ;;
+        darwin) init_system=launchd ;;
+        *) log_error "This installer supports Linux systemd, Linux OpenRC and macOS launchd"; exit 1 ;;
+    esac
+    if [ "$init_system" != systemd ]; then
+        if [ "$rescue_enabled" = true ] || [ "$runtime_identity" = root-or-administrator ] ||
+           [ -n "$panel_key_id$panel_public_key$host_service_user$host_access_config" ]; then
+            log_error "Host privilege changes and rescue require Linux systemd. $init_system installs monitoring under a service account."; exit 64
+        fi
+        if [ "$register_only" = true ] || [ -n "$runtime_state_override$credentials_override$privileged_state_override$replay_state_override" ]; then
+            log_error "$init_system uses the installed state directory and separate browser enrollment"; exit 64
+        fi
+        for argument in "${komari_argv[@]}"; do
+            case "$argument" in
+                --|--service-manifest|--service-manifest=*)
+                    log_error "$init_system uses the installed monitoring service configuration"; exit 64 ;;
+            esac
+        done
+        case "$init_system" in
+            openrc) [ "$install_dir_explicit" = true ] || target_dir="/usr/lib/komari/$service_name" ;;
+            launchd) command -v launchctl >/dev/null 2>&1 || { log_error "launchctl unavailable"; exit 1; } ;;
+        esac
+    fi
+fi
+
 # Detect before account creation: updates preserve the actual installed identity.
 install_mode=fresh
 installed_manifest="/etc/komari/services/$service_name.json"
-if [ "$uninstall_only" != true ] && [ "$os_name" = linux ]; then
+if [ "$init_system" = systemd ]; then
     if [[ ! "$service_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || [[ "$service_name" = *.service ]]; then
         log_error "Invalid service name"; exit 64
     fi
@@ -393,6 +437,7 @@ if [ "$uninstall_only" != true ] && [ "$os_name" = "linux" ]; then
     fi
     }
 elif [ "$uninstall_only" != true ] && [ "$runtime_identity" = "service-account" ] && [ "$os_name" = "darwin" ]; then
+    create_darwin_service_account() {
     if ! id -u "$service_user" >/dev/null 2>&1; then
 		service_group="_komari"
 		if ! dscl . -read "/Groups/${service_group}" >/dev/null 2>&1; then
@@ -428,15 +473,12 @@ elif [ "$uninstall_only" != true ] && [ "$runtime_identity" = "service-account" 
         log_error "The existing ${service_user} account has a login shell; refusing installation"
         exit 1
     fi
+    }
 fi
 
 # Installation, identity-preserving migration and binary updates use the same
 # reviewed host tool. Re-running this script never uninstalls an existing node.
-if [ "$uninstall_only" != true ]; then
-    if [ "$os_name" != linux ] || [ ! -d /run/systemd/system ]; then
-        log_error "Trusted v2 installation currently supports Linux systemd only"
-        exit 1
-    fi
+if [ "$init_system" = systemd ]; then
     if [ "$EUID" -ne 0 ]; then
         log_error "Run this installer as root"
         exit 1
@@ -1054,14 +1096,9 @@ fi
 # Remote command execution and terminal access run with the Agent process
 # identity and therefore require root/administrator privileges. Persist the canonical
 # all-remote-control switch for every unprivileged installation.
-if [ "$runtime_identity" = "service-account" ]; then
-    case " $komari_args " in
-        *" --disable-remote-control "*) ;;
-        *)
-            komari_args="$komari_args --disable-remote-control"
-            komari_argv+=("--disable-remote-control")
-            ;;
-    esac
+if [ "$uninstall_only" != true ]; then
+    # Keep the local deny authoritative even when an earlier flag or config sets false.
+    komari_argv+=("--disable-remote-control=true")
 fi
 
 if [ "$EUID" -ne 0 ] && [ "$runtime_identity" = "root-or-administrator" ]; then
@@ -1123,7 +1160,6 @@ log_config "  Runtime identity: ${GREEN}$runtime_identity${NC}"
 log_config "  Rescue helper: ${GREEN}$rescue_enabled${NC}"
 log_config "  Install directory: ${GREEN}$target_dir${NC}"
 log_config "  GitHub proxy: ${GREEN}${github_proxy:-"(direct)"}${NC}"
-log_config "  Binary arguments: ${GREEN}$komari_args${NC}"
 if [ -n "$install_version" ]; then
     log_config "  Specified agent version: ${GREEN}$install_version${NC}"
 else
@@ -1146,7 +1182,7 @@ uninstall_previous() {
         log_info "Stopping and disabling existing OpenRC service..."
         rc-service ${service_name} stop
         rc-update del ${service_name} default
-        rm -f "/etc/init.d/${service_name}"
+        rm -f "/etc/init.d/${service_name}" "/etc/komari/openrc/${service_name}"
     elif command -v uci >/dev/null 2>&1 && [ -f "/etc/init.d/${service_name}" ]; then
         log_info "Stopping and disabling existing procd service..."
         /etc/init.d/${service_name} stop
@@ -1338,6 +1374,10 @@ curl -fsSL -o "$stage/agent.release.json" "$download_url.release.json" || {
     exit 1
 }
 verify_release_asset "$stage/agent" "$stage/agent.release.json" komari-agent "$version_to_install" "$os_name" "$arch" >/dev/null || exit 1
+case "$init_system" in
+    openrc) create_linux_service_account ;;
+    launchd) create_darwin_service_account ;;
+esac
 
 # Protect executables in the installation directory, including upgrades
 # from the old service-owned layout. Only the state child is writable.
@@ -1463,96 +1503,6 @@ json_string() {
 # Detect init system and configure service
 log_step "Configuring system service..."
 
-# Function to detect actual init system
-detect_init_system() {
-    # Check if running on NixOS (special case)
-    if [ -f /etc/NIXOS ]; then
-        echo "nixos"
-        return
-    fi
-    
-    # Alpine Linux MUST be checked first
-    # Alpine always uses OpenRC, even in containers where PID 1 might be different
-    if [ -f /etc/alpine-release ]; then
-        if command -v rc-service >/dev/null 2>&1 || [ -f /sbin/openrc-run ]; then
-            echo "openrc"
-            return
-        fi
-    fi
-    
-    # Get PID 1 process for other detection
-    local pid1_process=$(ps -p 1 -o comm= 2>/dev/null | tr -d ' ')
-    
-    # If PID 1 is systemd, use systemd
-    if [ "$pid1_process" = "systemd" ] || [ -d /run/systemd/system ]; then
-        if command -v systemctl >/dev/null 2>&1; then
-            # Additional verification that systemd is actually functioning
-            if systemctl list-units >/dev/null 2>&1; then
-                echo "systemd"
-                return
-            fi
-        fi
-    fi
-    
-    # Check for Gentoo OpenRC (PID 1 is openrc-init)
-    if [ "$pid1_process" = "openrc-init" ]; then
-        if command -v rc-service >/dev/null 2>&1; then
-            echo "openrc"
-            return
-        fi
-    fi
-    
-    # Check for other OpenRC systems (not Alpine, already handled)
-    # Some systems use traditional init with OpenRC
-    if [ "$pid1_process" = "init" ] && [ ! -f /etc/alpine-release ]; then
-        # Check if OpenRC is actually managing services
-        if [ -d /run/openrc ] && command -v rc-service >/dev/null 2>&1; then
-            echo "openrc"
-            return
-        fi
-        # Check for OpenRC files
-        if [ -f /sbin/openrc ] && command -v rc-service >/dev/null 2>&1; then
-            echo "openrc"
-            return
-        fi
-    fi
-    
-    # Check for OpenWrt's procd
-    if command -v uci >/dev/null 2>&1 && [ -f /etc/rc.common ]; then
-        echo "procd"
-        return
-    fi
-    
-    # Check for macOS launchd
-    if [ "$os_name" = "darwin" ] && command -v launchctl >/dev/null 2>&1; then
-        echo "launchd"
-        return
-    fi
-    
-    # Fallback: if systemctl exists and appears functional, assume systemd
-    if command -v systemctl >/dev/null 2>&1; then
-        if systemctl list-units >/dev/null 2>&1; then
-            echo "systemd"
-            return
-        fi
-    fi
-    
-    # Last resort: check for OpenRC without other indicators
-    if command -v rc-service >/dev/null 2>&1 && [ -d /etc/init.d ]; then
-        echo "openrc"
-        return
-    fi
-
-    # check for Upstart (CentOS 6)
-    if command -v initctl >/dev/null 2>&1 && [ -d /etc/init ]; then
-        echo "upstart"
-        return
-    fi
-    
-    echo "unknown"
-}
-
-init_system=$(detect_init_system)
 log_info "Detected init system: ${GREEN}$init_system${NC}"
 if [ "$rescue_enabled" = true ] && [ "$init_system" != "systemd" ]; then
     log_error "The rescue helper requires Linux systemd to keep its privileged guardian separate from the ordinary Agent service"
@@ -1621,30 +1571,63 @@ elif [ "$init_system" = "openrc" ]; then
     # OpenRC service configuration
     log_info "Using OpenRC for service management"
     service_file="/etc/init.d/${service_name}"
-    cat > "$service_file" << EOF
+    if [ -L "$service_file" ] || { [ -e "$service_file" ] && [ ! -f "$service_file" ]; }; then
+        log_error "Invalid existing OpenRC service definition"; exit 1
+    fi
+    # OpenRC's supervisor can split a command path containing spaces. Keep
+    # the supervisor entry point fixed and quote the actual path and argv there.
+    launcher_dir=/etc/komari/openrc
+    for launcher_parent in /etc/komari "$launcher_dir"; do
+        if [ -L "$launcher_parent" ]; then
+            log_error "Invalid OpenRC launcher directory"; exit 1
+        fi
+        if [ ! -e "$launcher_parent" ]; then
+            install -d -o root -g root -m 0755 "$launcher_parent" || exit 1
+        fi
+        directory_mode=$(stat -c '%a' "$launcher_parent") || exit 1
+        if [ ! -d "$launcher_parent" ] || [ "$(stat -c '%u' "$launcher_parent")" != 0 ] ||
+            (( (8#$directory_mode & 0022) != 0 )); then
+            log_error "OpenRC launcher directory must be owned by root"; exit 1
+        fi
+    done
+    launcher="$launcher_dir/$service_name"
+    if [ -L "$launcher" ] || { [ -e "$launcher" ] && [ ! -f "$launcher" ]; }; then
+        log_error "Invalid existing OpenRC launcher"; exit 1
+    fi
+    launcher_stage=$(mktemp "$launcher_dir/.komari.XXXXXXXX") || exit 1
+    service_group=$(id -gn "$service_user") || exit 1
+    printf '#!/bin/sh\ncd %s || exit 1\nexec %s %s\n' \
+        "$(shell_quote "$target_dir")" "$(shell_quote "$komari_agent_path")" "$komari_args" > "$launcher_stage" || exit 1
+    chown "root:$service_group" "$launcher_stage" && chmod 0750 "$launcher_stage" &&
+        mv -f "$launcher_stage" "$launcher" || exit 1
+    openrc_stage=$(mktemp "/etc/init.d/.komari.XXXXXXXX") || exit 1
+    cat > "$openrc_stage" << EOF
 #!/sbin/openrc-run
 
 name="Komari Agent Service"
 description="Komari monitoring agent"
-command=$(shell_quote "$komari_agent_path")
-command_args=${shell_args_literal}
+command="$launcher"
 command_user="${service_user}"
-directory=$(shell_quote "$target_dir")
 pidfile="/run/${service_name}.pid"
 retry="SIGTERM/30"
 supervisor=supervise-daemon
 
 depend() {
-    need net
-    after network
+    after networking
 }
 EOF
 
     # Set permissions and enable service
-    chmod +x "$service_file"
-    rc-update add ${service_name} default
+    chmod 0755 "$openrc_stage" && mv -f "$openrc_stage" "$service_file" || exit 1
     if [ "$agent_ready" = true ]; then
-        rc-service "${service_name}" start || exit 1
+        rc-update add "${service_name}" default || exit 1
+    fi
+    if [ "$agent_ready" = true ]; then
+        if rc-service "${service_name}" status >/dev/null 2>&1; then
+            rc-service "${service_name}" restart || exit 1
+        else
+            rc-service "${service_name}" start || exit 1
+        fi
     fi
     log_success "OpenRC service configured"
 elif [ "$init_system" = "systemd" ]; then
@@ -1740,9 +1723,13 @@ elif [ "$init_system" = "launchd" ]; then
     plist_file="$plist_dir/com.komari.${service_name}.plist"
     log_info "Installing as system-level service (LaunchDaemon)"
     log_dir="/var/log"
+    if [ -L "$plist_file" ] || { [ -e "$plist_file" ] && [ ! -f "$plist_file" ]; }; then
+        log_error "Invalid existing launchd service definition"; exit 1
+    fi
+    plist_stage=$(mktemp "$plist_dir/.komari.XXXXXXXX") || exit 1
     
     # Create the launchd plist file
-    cat > "$plist_file" << EOF
+    cat > "$plist_stage" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -1755,10 +1742,10 @@ elif [ "$init_system" = "launchd" ]; then
 EOF
     
     for argument in "${komari_argv[@]}"; do
-        printf '        <string>%s</string>\n' "$(xml_escape "$argument")" >> "$plist_file"
+        printf '        <string>%s</string>\n' "$(xml_escape "$argument")" >> "$plist_stage"
     done
     
-    cat >> "$plist_file" << EOF
+    cat >> "$plist_stage" << EOF
     </array>
     <key>WorkingDirectory</key>
     <string>$(xml_escape "$target_dir")</string>
@@ -1778,13 +1765,19 @@ EOF
     
     # launchd requires a root-owned, non-writable plist. Loading a job does not
     # by itself prove that its child process has stayed alive.
-    chown root:wheel "$plist_file"
-    chmod 644 "$plist_file"
-    if ! plutil -lint "$plist_file" || ! launchctl bootstrap system "$plist_file"; then
-        log_error "Failed to load system-level launchd service"
+    if ! chown root:wheel "$plist_stage" || ! chmod 600 "$plist_stage" || ! plutil -lint "$plist_stage"; then
+        rm -f "$plist_stage"
+        log_error "Invalid system-level launchd service definition"
         exit 1
     fi
+    # Repeated installation replaces the loaded definition. A fresh identity
+    # is left unloaded so KeepAlive cannot repeatedly run an unenrolled Agent.
+    if launchctl print "system/com.komari.${service_name}" >/dev/null 2>&1; then
+        launchctl bootout "system/com.komari.${service_name}" || exit 1
+    fi
+    mv -f "$plist_stage" "$plist_file" || exit 1
     if [ "$agent_ready" = true ]; then
+        launchctl bootstrap system "$plist_file" || exit 1
         sleep 2
         if ! launchctl print "system/com.komari.${service_name}" | grep -q 'state = running'; then
             log_error "Agent service failed to stay running; see ${log_dir}/${service_name}.log"
@@ -1793,7 +1786,7 @@ EOF
         fi
         log_success "System launchd service started as ${service_user}"
     else
-        log_info "System launchd service loaded; waiting for enrollment"
+        log_info "System launchd service configured; waiting for enrollment"
     fi
 elif [ "$init_system" = "upstart" ]; then
     # Upstart service configuration
@@ -1836,100 +1829,7 @@ else
     exit 1
 fi
 
-install_rescue_helper() {
-    [ "$rescue_enabled" = true ] || return 0
-    rescue_dir="/usr/local/lib/komari-agent"
-    rescue_path="${rescue_dir}/komari-agent-rescue"
-    rescue_service_name="${service_name}-rescue"
-    rescue_env_dir="/etc/komari-agent"
-    rescue_env_file="${rescue_env_dir}/${rescue_service_name}.env"
-    rescue_marker="${rescue_env_dir}/${rescue_service_name}.firewall-managed"
-	if [ "$EUID" -eq 0 ] && command -v nft >/dev/null 2>&1 && nft list table inet komari_rescue >/dev/null 2>&1; then
-		if ! nft delete table inet komari_rescue; then
-			log_error "Failed to remove active Komari network isolation; restore it before reinstalling or uninstalling"
-			exit 1
-		fi
-	fi
-    rescue_file="komari-agent-rescue-linux-${arch}"
-    if [ "$version_to_install" = "latest" ]; then
-        rescue_download_path="latest/download"
-    else
-        rescue_download_path="download/${version_to_install}"
-    fi
-    if [ -n "$github_proxy" ]; then
-        rescue_download_url="${github_proxy}/https://github.com/${release_repository}/releases/${rescue_download_path}/${rescue_file}"
-    else
-        rescue_download_url="https://github.com/${release_repository}/releases/${rescue_download_path}/${rescue_file}"
-    fi
-    case "${rescue_endpoint}${rescue_token}${cf_access_client_id}${cf_access_client_secret}" in
-    *$'\n'*|*$'\r'*)
-        log_error "Rescue endpoint or credentials contain unsupported control characters"
-        exit 1
-        ;;
-    esac
-    mkdir -p "$rescue_dir" "$rescue_env_dir"
-    chmod 700 "$rescue_dir" "$rescue_env_dir"
-    log_step "Downloading separately privileged rescue helper..."
-    if ! curl -L -o "$rescue_path" "$rescue_download_url"; then
-        log_error "Failed to download rescue helper"
-        exit 1
-    fi
-    chmod 700 "$rescue_path"
-    systemd_env_value() {
-        local value="$1"
-        value="${value//\\/\\\\}"
-        value="${value//\"/\\\"}"
-        printf '"%s"' "$value"
-    }
-    {
-		printf 'KOMARI_RESCUE_ENDPOINT=%s\n' "$(systemd_env_value "$rescue_endpoint")"
-		printf 'KOMARI_RESCUE_TOKEN=%s\n' "$(systemd_env_value "$rescue_token")"
-		if [ -n "$cf_access_client_id" ]; then
-			printf 'KOMARI_RESCUE_CF_ACCESS_CLIENT_ID=%s\n' "$(systemd_env_value "$cf_access_client_id")"
-			printf 'KOMARI_RESCUE_CF_ACCESS_CLIENT_SECRET=%s\n' "$(systemd_env_value "$cf_access_client_secret")"
-		fi
-		printf 'KOMARI_RESCUE_AGENT_PATH=%s\n' "$(systemd_env_value "$komari_agent_path")"
-		printf 'KOMARI_RESCUE_RUNTIME_STATE_FILE=%s\n' "$(systemd_env_value "$runtime_state_path")"
-		printf 'KOMARI_RESCUE_AGENT_SERVICE_NAME=%s\n' "$(systemd_env_value "$service_name")"
-		printf 'KOMARI_RESCUE_AGENT_RUNTIME_IDENTITY=%s\n' "$(systemd_env_value "$runtime_identity")"
-		printf 'KOMARI_RESCUE_AGENT_RUNTIME_USER=%s\n' "$(systemd_env_value "$service_user")"
-		printf 'KOMARI_RESCUE_INSTANCE_ID_FILE=%s\n' "$(systemd_env_value "${rescue_env_dir}/${rescue_service_name}.instance")"
-		printf 'KOMARI_RESCUE_CONTROL_PLANE_URL=%s\n' "$(systemd_env_value "$rescue_endpoint")"
-		printf 'KOMARI_RESCUE_ISOLATION_STATE_FILE=%s\n' "$(systemd_env_value "${rescue_env_dir}/${rescue_service_name}.network-isolation.json")"
-		printf 'KOMARI_RESCUE_PRIVILEGED_STATE_FILE=%s\n' "$(systemd_env_value "$privileged_state_path")"
-        if [ "$ignore_unsafe_cert" = true ]; then
-            printf 'KOMARI_RESCUE_IGNORE_UNSAFE_CERT=true\n'
-        fi
-    } > "$rescue_env_file"
-    chmod 600 "$rescue_env_file"
-    cat > "/etc/systemd/system/${rescue_service_name}.service" << EOF
-[Unit]
-Description=Komari Rescue Helper
-After=network-online.target
-Wants=network-online.target
 
-[Service]
-Type=simple
-User=root
-EnvironmentFile=${rescue_env_file}
-ExecStart=${rescue_path}
-Restart=always
-RestartSec=5
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectHome=true
-ProtectSystem=strict
-ReadWritePaths=${target_dir} ${rescue_env_dir}
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload
-    systemctl enable --now "${rescue_service_name}.service"
-    log_success "Privileged rescue helper installed separately as ${rescue_service_name}.service"
-}
-
-install_rescue_helper
 
 echo ""
 echo -e "${WHITE}===========================================${NC}"
@@ -1941,7 +1841,6 @@ else
     log_success "Komari-agent installation completed!"
 fi
 log_config "Service: ${GREEN}$service_name${NC}"
-log_config "Arguments: ${GREEN}$komari_args${NC}"
 echo -e "${WHITE}===========================================${NC}"
 
 # An Agent installed without a token is not yet enrolled. Enrolment is a
@@ -1963,8 +1862,8 @@ if [ "$agent_ready" != true ]; then
         echo ""
         log_info "That prints a link. Open it, sign in to the panel, and approve this machine."
         case "$init_system" in
-            launchd) restart_command="sudo launchctl kickstart -k system/com.komari.${service_name}" ;;
-            openrc) restart_command="sudo rc-service ${service_name} restart" ;;
+            launchd) restart_command="sudo launchctl bootstrap system /Library/LaunchDaemons/com.komari.${service_name}.plist" ;;
+            openrc) restart_command="sudo rc-update add ${service_name} default && sudo rc-service ${service_name} start" ;;
             procd) restart_command="sudo /etc/init.d/${service_name} restart" ;;
             upstart) restart_command="sudo initctl restart ${service_name}" ;;
             nixos) restart_command="sudo nixos-rebuild switch" ;;
