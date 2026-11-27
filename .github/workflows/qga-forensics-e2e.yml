@@ -38,7 +38,8 @@ jobs:
       - name: Install virtual machine verification dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cloud-image-utils qemu-system-x86 qemu-utils ubuntu-keyring
+          sudo apt-get install -y --no-install-recommends acl cloud-image-utils qemu-system-x86 qemu-utils ubuntu-keyring
+          if [[ -c /dev/kvm ]]; then sudo setfacl -m "u:$(id -u):rw" /dev/kvm; fi
       - name: Verify signed Ubuntu guest image
         run: bash scripts/qga-e2e/fetch-ubuntu.sh
       - name: Verify framing limits and synchronization

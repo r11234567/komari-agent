@@ -23,13 +23,6 @@ var channelBigEndian []byte
 
 const virtioPort = "/dev/virtio-ports/org.qemu.guest_agent.0"
 
-type Direction uint32
-
-const (
-	Request Direction = iota + 1
-	Response
-)
-
 // Capture owns temporary tracing links and the read end of the kernel ring.
 // The embedding service must bind its lifetime to local authorization.
 type Capture struct {
@@ -43,6 +36,9 @@ type Capture struct {
 }
 
 func Attach(pid int) (*Capture, error) {
+	if os.Geteuid() != 0 {
+		return nil, errors.New("QGA evidence requires a root Agent")
+	}
 	if pid <= 0 || uint64(pid) > uint64(^uint32(0)) {
 		return nil, errors.New("invalid QGA process ID")
 	}

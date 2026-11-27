@@ -3,6 +3,7 @@ package qgatest
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -39,6 +40,10 @@ func TestRealGuestTransport(t *testing.T) {
 	}
 	if err := synchronizeGuest(conn, &replies); err != nil {
 		t.Fatalf("QGA stream synchronization failed: %v", err)
+	}
+	var ordinary map[string]json.RawMessage
+	if err := exchange(conn, &replies, []byte("{\"execute\":\"guest-ping\"}\n"), &ordinary, nil); err != nil || ordinary["return"] == nil {
+		t.Fatalf("ordinary QGA operation failed: %v", err)
 	}
 	public, private, err := diagnostics.GenerateKey()
 	if err != nil {
@@ -204,11 +209,21 @@ func verifyGuestRecords(t *testing.T, conn net.Conn, wire *bufio.Reader, request
 			}
 		}
 		header, plaintext, err := diagnostics.Open(private, ciphertext)
-		if err != nil || header.Sequence != i || len(plaintext) < 2 {
+		if err != nil || header.Sequence != i {
 			t.Fatalf("invalid guest observation %d: %v", i, err)
 		}
-		gotRequest = gotRequest || plaintext[0] == byte(qgastream.Request) && bytes.Equal(plaintext[1:], request)
-		gotResponse = gotResponse || plaintext[0] == byte(qgastream.Response) && bytes.Equal(plaintext[1:], response)
+		var record qgastream.Observation
+		if err := json.Unmarshal(plaintext, &record); err != nil || record.Gap || record.ObservedAt.IsZero() || record.Digest != sha256.Sum256(record.Raw) {
+			t.Fatalf("invalid observation digest or metadata: %v", err)
+		}
+		if record.Command != "guest-exec" && record.Command != "guest-exec-status" {
+			t.Fatal("collector retained a command outside the tested evidence scope")
+		}
+		if unread := os.Getenv("KOMARI_TEST_UNREAD_VALUE"); unread == "" || bytes.Contains(record.Raw, []byte(unread)) {
+			t.Fatal("collector retained unrelated local data")
+		}
+		gotRequest = gotRequest || record.Direction == qgastream.Request && bytes.Equal(record.Raw, request)
+		gotResponse = gotResponse || record.Direction == qgastream.Response && bytes.Equal(record.Raw, response)
 		if gotRequest && gotResponse {
 			return
 		}

@@ -6,6 +6,13 @@ import (
 
 const frameLimit = 112 << 10
 
+type Direction uint32
+
+const (
+	Request Direction = iota + 1
+	Response
+)
+
 // Frame is valid during the publish callback. A consumer that retains a record seals it
 // immediately. Reset and loss markers never contain partial payloads.
 type Frame struct {

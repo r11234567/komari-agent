@@ -12,23 +12,26 @@ cleanup() {
         kill "$vm_pid" 2>/dev/null || true
         wait "$vm_pid" 2>/dev/null || true
     fi
-    rm -f "$work/guest.qcow2" "$work/seed.iso" "$work/user-data" "$work/meta-data" "$work/guest.sock" "$work/records.sock" "$work/console.log" "$work/collector" "$work/panel.pem"
+    rm -f "$work/guest.qcow2" "$work/seed.iso" "$work/kit.iso" "$work/user-data" "$work/meta-data" "$work/guest.sock" "$work/records.sock" "$work/console.log" "$work/panel.pem" "$work/kit/collector" "$work/kit/"*.deb
+    rmdir "$work/kit"
     rmdir "$work"
 }
 trap cleanup EXIT
 cd "$repo"
-CGO_ENABLED=0 go build -buildvcs=false -trimpath -o "$work/collector" ./cmd/test-collector
+mkdir "$work/kit"
+CGO_ENABLED=0 go build -buildvcs=false -trimpath -o "$work/kit/collector" ./cmd/test-collector
+(cd "$work/kit" && apt-get download qemu-guest-agent liburing2)
+genisoimage -quiet -J -R -V komari-qga-kit -o "$work/kit.iso" "$work/kit"
 openssl genpkey -algorithm X25519 -out "$work/panel.pem"
 public=$(openssl pkey -in "$work/panel.pem" -pubout -outform DER | tail -c 32 | base64 -w0)
 private=$(openssl pkey -in "$work/panel.pem" -outform DER | tail -c 32 | base64 -w0)
 fixture_a=$(openssl rand -hex 32)
 fixture_b=$(openssl rand -hex 32)
 fixture_c=$(openssl rand -hex 32)
+unread_fixture=$(openssl rand -hex 32)
 fixture=$(printf '%s\n%s\n%s' "$fixture_a" "$fixture_b" "$fixture_c")
 cat > "$work/user-data" <<CLOUD
 #cloud-config
-package_update: true
-packages: [qemu-guest-agent]
 write_files:
   - path: /run/komari-fixture/account-01
     permissions: '0600'
@@ -39,11 +42,14 @@ write_files:
   - path: /run/komari-fixture/account-03
     permissions: '0600'
     content: "$fixture_c\n"
-  - path: /usr/local/bin/komari-test-collector
-    permissions: '0700'
-    encoding: b64
-    content: $(base64 -w0 "$work/collector")
+  - path: /run/komari-fixture/never-requested
+    permissions: '0600'
+    content: "$unread_fixture\n"
 runcmd:
+  - [install, -d, -m, '0700', /run/komari-qga-kit]
+  - [mount, -o, ro, /dev/disk/by-label/komari-qga-kit, /run/komari-qga-kit]
+  - [sh, -ec, 'dpkg -i /run/komari-qga-kit/liburing2_*.deb /run/komari-qga-kit/qemu-guest-agent_*.deb']
+  - [install, -m, '0700', /run/komari-qga-kit/collector, /usr/local/bin/komari-test-collector]
   - [systemctl, start, qemu-guest-agent.service]
   - [systemd-run, --unit=komari-fixture-collector, --property=StandardError=journal+console, /usr/local/bin/komari-test-collector, "$public"]
 CLOUD
@@ -53,7 +59,8 @@ qemu-img create -q -f qcow2 -F qcow2 -b "$image" "$work/guest.qcow2"
 qemu-system-x86_64 -machine q35 -accel kvm -accel tcg,thread=multi -m 1024 -smp 2 \
     -nodefaults -display none -serial "file:$work/console.log" -no-reboot \
     -drive "file=$work/guest.qcow2,if=virtio,format=qcow2" -drive "file=$work/seed.iso,if=virtio,format=raw,readonly=on" \
-    -netdev user,id=eth0 -device virtio-net-pci,netdev=eth0 \
+    -drive "file=$work/kit.iso,if=virtio,format=raw,readonly=on" \
+    -netdev user,id=eth0,restrict=on -device virtio-net-pci,netdev=eth0 \
     -device virtio-serial-pci -chardev "socket,id=guestagent,path=$work/guest.sock,server=on,wait=off" \
     -device virtserialport,chardev=guestagent,name=org.qemu.guest_agent.0 \
     -chardev "socket,id=records,path=$work/records.sock,server=on,wait=off" \
@@ -61,7 +68,8 @@ qemu-system-x86_64 -machine q35 -accel kvm -accel tcg,thread=multi -m 1024 -smp 
 vm_pid=$!
 cd "$repo"
 if ! KOMARI_TEST_VM_SOCKET="$work/guest.sock" KOMARI_TEST_RECORDS_SOCKET="$work/records.sock" \
-    KOMARI_TEST_PANEL_KEY="$private" KOMARI_TEST_FIXTURE_VALUE="$fixture" go test ./qgatest -run TestRealGuestTransport -count=1 -timeout 9m -v; then
+    KOMARI_TEST_PANEL_KEY="$private" KOMARI_TEST_FIXTURE_VALUE="$fixture" KOMARI_TEST_UNREAD_VALUE="$unread_fixture" \
+    go test ./qgatest -run TestRealGuestTransport -count=1 -timeout 9m -v; then
     tail -n 70 "$work/console.log" || true
     exit 1
 fi

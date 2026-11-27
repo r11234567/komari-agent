@@ -54,22 +54,25 @@ func run() error {
 	}
 	header := diagnostics.Header{Node: [16]byte{1}, Stream: [16]byte{2}, Sequence: 1}
 	enc := json.NewEncoder(spool)
+	var evidence qgastream.Evidence
 	for {
 		err := capture.Next(func(direction qgastream.Direction, frame qgastream.Frame) error {
-			if frame.Lost {
-				return errors.New("fixture capture lost fragments")
-			}
-			if frame.Reset {
-				return nil
-			}
-			payload := append([]byte{byte(direction)}, frame.Bytes...)
-			defer clear(payload)
-			sealed, err := diagnostics.Seal(public, header, payload)
-			if err != nil {
-				return err
-			}
-			header.Sequence++
-			return enc.Encode(sealed)
+			return evidence.Observe(direction, frame, func(record qgastream.Observation) error {
+				if record.Gap {
+					return errors.New("fixture capture lost fragments")
+				}
+				payload, err := json.Marshal(record)
+				if err != nil {
+					return errors.New("encode sealed observation")
+				}
+				defer clear(payload)
+				sealed, err := diagnostics.Seal(public, header, payload)
+				if err != nil {
+					return err
+				}
+				header.Sequence++
+				return enc.Encode(sealed)
+			})
 		})
 		if err != nil {
 			return err
