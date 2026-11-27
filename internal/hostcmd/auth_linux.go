@@ -50,9 +50,14 @@ func authenticationReady() error {
 	return nil
 }
 func authenticate(directSSH bool) (string, error) {
-	if err := authenticationReady(); err != nil {
+	account, err := authenticationAccount(directSSH)
+	if err != nil {
 		return "", err
 	}
+	return authenticateAccount(account)
+}
+
+func authenticationAccount(directSSH bool) (string, error) {
 	account := "root"
 	if directSSH {
 		uid, err := hostops.DirectSSHUID()
@@ -70,6 +75,13 @@ func authenticate(directSSH bool) (string, error) {
 		if err != nil || u.Uid != os.Getenv("SUDO_UID") {
 			return "", errors.New("sudo caller identity is inconsistent")
 		}
+	}
+	return account, nil
+}
+
+func authenticateAccount(account string) (string, error) {
+	if err := authenticationReady(); err != nil {
+		return "", err
 	}
 	if !hostops.ValidService(account) {
 		return "", errors.New("invalid local authentication account")
