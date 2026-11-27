@@ -11,7 +11,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -22,10 +21,8 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
-	"github.com/komari-monitor/komari-agent/core/credentials"
 	"github.com/komari-monitor/komari-agent/core/hostops"
 	"github.com/komari-monitor/komari-agent/internal/qgastream"
-	"github.com/komari-monitor/komari-agent/requestheaders"
 	"github.com/r11234567/komari-proto/diagnostics"
 	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/types/known/wrapperspb"
@@ -104,18 +101,11 @@ func runQGAForensics(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	access, err := hostops.ReadAccess(trust)
+	receiver, err := newPanel(m, trust)
 	if err != nil {
 		return err
 	}
-	store, err := credentials.Open(m.CredentialsFile)
-	if err != nil {
-		return err
-	}
-	identity, ok := store.Identity()
-	if !ok || identity.AgentID != trust.AgentID || identity.Endpoint != trust.Endpoint || identity.AccessToken == "" {
-		return errors.New("Agent enrollment does not match the local panel trust")
-	}
+	identity := receiver.identity
 	if !time.Now().Add(*duration).Before(identity.AccessTokenExpiresAt) {
 		return errors.New("allow the running Agent to renew enrollment or select a shorter forensic session")
 	}
@@ -165,8 +155,7 @@ func runQGAForensics(args []string, out io.Writer) error {
 	}()
 	defer func() { cancel(); <-stopped }()
 	const procedure = "/komari.diag.v1.SealedRecordService/Submit"
-	transport := requestheaders.WrapWithStaticDPoP(&http.Client{Timeout: 10 * time.Second}, identity)
-	sender := connect.NewClient[wrapperspb.BytesValue, wrapperspb.BytesValue](transport, strings.TrimRight(identity.Endpoint, "/")+procedure,
+	sender := connect.NewClient[wrapperspb.BytesValue, wrapperspb.BytesValue](receiver.client, strings.TrimRight(identity.Endpoint, "/")+procedure,
 		connect.WithReadMaxBytes(4096), connect.WithSendMaxBytes(diagnostics.MaxEnvelopeSize+128))
 	header := diagnostics.Header{Node: node, Stream: uuid.New(), Sequence: 1}
 	var evidence qgastream.Evidence
@@ -183,12 +172,9 @@ func runQGAForensics(args []string, out io.Writer) error {
 				if err != nil {
 					return err
 				}
-				request := connect.NewRequest(wrapperspb.Bytes(sealed))
-				if access.ClientID != "" {
-					request.Header().Set("CF-Access-Client-Id", access.ClientID)
-					request.Header().Set("CF-Access-Client-Secret", access.ClientSecret)
-				}
-				response, err := sender.CallUnary(ctx, request)
+				upload, cancel := context.WithTimeout(ctx, 10*time.Second)
+				defer cancel()
+				response, err := sender.CallUnary(upload, auth(receiver, wrapperspb.Bytes(sealed)))
 				if err != nil {
 					return fmt.Errorf("forensic upload sequence %d failed (%s)", header.Sequence, connect.CodeOf(err))
 				}

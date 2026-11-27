@@ -21,6 +21,7 @@ type panel struct {
 	trust      *hostops.Trust
 	identity   credentials.Identity
 	access     hostops.AccessConfig
+	client     *http.Client
 	host       hostconnect.HostServiceClient
 	privileged configconnect.PrivilegedDeliveryServiceClient
 }
@@ -48,7 +49,7 @@ func newPanel(m *hostops.Manifest, t *hostops.Trust) (*panel, error) {
 	base := &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("host RPC redirects are forbidden") }}
 	h := requestheaders.WrapWithStaticDPoP(base, id)
 	h.CheckRedirect = base.CheckRedirect
-	return &panel{trust: t, identity: id, access: a, host: hostconnect.NewHostServiceClient(h, t.Endpoint, connect.WithReadMaxBytes(1<<20)), privileged: configconnect.NewPrivilegedDeliveryServiceClient(h, t.Endpoint, connect.WithReadMaxBytes(1<<20))}, nil
+	return &panel{trust: t, identity: id, access: a, client: h, host: hostconnect.NewHostServiceClient(h, t.Endpoint, connect.WithReadMaxBytes(1<<20)), privileged: configconnect.NewPrivilegedDeliveryServiceClient(h, t.Endpoint, connect.WithReadMaxBytes(1<<20))}, nil
 }
 func auth[T any](p *panel, msg *T) *connect.Request[T] {
 	r := connect.NewRequest(msg)
