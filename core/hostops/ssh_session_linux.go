@@ -124,7 +124,9 @@ func trustedExecutables(paths ...string) (trusted []os.FileInfo) {
 func ownsLoginTerminal(current, reported int) bool {
 	sshd := trustedExecutables("/usr/bin/sshd", "/usr/sbin/sshd", "/usr/lib/ssh/sshd-session",
 		"/usr/lib/openssh/sshd-session", "/usr/libexec/openssh/sshd-session")
-	sudo := trustedExecutables("/usr/bin/sudo")
+	// Ubuntu's sudo alternative can point to sudo.ws or the packaged sudo-rs
+	// binary. Match their trusted executable inodes without trusting the link.
+	sudo := trustedExecutables("/usr/bin/sudo", "/usr/bin/sudo.ws", "/usr/lib/cargo/bin/sudo")
 	pid := os.Getppid()
 	for depth := 0; pid > 1 && depth < 32; depth++ {
 		base := fmt.Sprintf("/proc/%d", pid)

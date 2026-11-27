@@ -18,7 +18,7 @@ with pexpect.spawn("/usr/bin/ssh", args, encoding="utf-8", echo=False, timeout=1
     mode, consent = "", ""
     while True:
         result = child.expect([
-            r"HOST_PAM_FIXTURE (accept|deliberately-wrong) ([^\r\n]+)\r?\n",
+            r"HOST_PAM_FIXTURE (accept|deliberately-wrong) ([^\r\n]*)\r?\n",
             r"Legacy remote-control consent:",
             r"(?i)password:",
             pexpect.EOF,
