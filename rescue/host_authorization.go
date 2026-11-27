@@ -86,8 +86,10 @@ var authorizationWatchTransport = func() *http.Transport {
 
 // A response stream has no HTTP total deadline: signed-heartbeat freshness
 // and the watch context bound its lifetime. Unary RPCs retain their timeout.
-func newAuthorizationWatchClient(id credentials.Identity) *http.Client {
-	client := requestheaders.WithNonceBootstrap(requestheaders.WrapWithStaticDPoP(&http.Client{Transport: authorizationWatchTransport}, id))
+func newAuthorizationWatchClient(id credentials.Identity, nonces *requestheaders.NonceStore) *http.Client {
+	client := requestheaders.WithNonceBootstrap(requestheaders.WrapWithDPoPAndNonces(&http.Client{Transport: authorizationWatchTransport}, func() (credentials.Identity, bool) {
+		return id, true
+	}, func() string { return id.AccessToken }, nil, nonces))
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return errors.New("helper redirects forbidden") }
 	return client
 }
@@ -157,6 +159,9 @@ func (h *Helper) watchAuthorization(ctx context.Context) {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	defer os.Remove(hostops.HelperStatusPath(h.manifest))
+	// Reconnects rebuild the client for the same pinned Agent. Preserve the
+	// latest server nonce even when the rejected request could not be retried.
+	nonces := requestheaders.NewNonceStore()
 	changes, watchErr := credentials.WatchChanges(ctx, h.manifest.CredentialsFile)
 	if watchErr != nil {
 		log.Printf("credential file notification unavailable: %v", watchErr)
@@ -287,7 +292,7 @@ func (h *Helper) watchAuthorization(ctx context.Context) {
 				streamCtx, cancel := context.WithTimeout(ctx, 25*time.Minute)
 				cancelStream = cancel
 				connectedToken = id.AccessToken
-				client := newAuthorizationWatchClient(id)
+				client := newAuthorizationWatchClient(id, nonces)
 				rpc := configconnect.NewPrivilegedDeliveryServiceClient(client, h.hostTrust.Endpoint, connect.WithReadMaxBytes(1<<20))
 				req := connect.NewRequest(&configv1.WatchPrivilegedDeliveryRequest{AgentId: id.AgentID, ProtocolVersion: 2})
 				h.authorize(req.Header())

@@ -120,7 +120,7 @@ func TestRescueAuthorizationWatchSurvivesThirtySeconds(t *testing.T) {
 	defer server.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
-	client := newAuthorizationWatchClient(id)
+	client := newAuthorizationWatchClient(id, nil)
 	rpc := configconnect.NewPrivilegedDeliveryServiceClient(client, server.URL)
 	frames := make(chan authorizationFrame, 1)
 	done := make(chan struct{})
@@ -167,7 +167,7 @@ func authorizationWatchTestIdentity(t *testing.T) credentials.Identity {
 }
 
 func TestRescueAuthorizationWatchTransportBoundsAndRedirects(t *testing.T) {
-	client := newAuthorizationWatchClient(authorizationWatchTestIdentity(t))
+	client := newAuthorizationWatchClient(authorizationWatchTestIdentity(t), nil)
 	if client.Timeout != 0 || authorizationWatchTransport.DialContext == nil || authorizationWatchTransport.TLSHandshakeTimeout <= 0 || authorizationWatchTransport.ResponseHeaderTimeout <= 0 {
 		t.Fatal("stream requires no total timeout and bounded connection/header establishment")
 	}
@@ -200,7 +200,7 @@ func TestRescueAuthorizationWatchContextCancelsStalledHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := time.Now()
-	response, err := newAuthorizationWatchClient(authorizationWatchTestIdentity(t)).Do(req)
+	response, err := newAuthorizationWatchClient(authorizationWatchTestIdentity(t), nil).Do(req)
 	if response != nil {
 		response.Body.Close()
 	}
