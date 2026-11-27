@@ -100,8 +100,6 @@ def main(binary, xray, inbox, sampler):
         (root / "test.bin").write_bytes(b"x" * (8 << 20))
         http = start(target, "http", sys.executable, "-u", "-m", "http.server", "10080",
                      "--bind", "198.51.100.2", "--directory", str(root))
-        (root / "xray").symlink_to(xray)
-        env = {**os.environ, "PATH": f"{root}:{os.environ['PATH']}"}
         url = "http://198.51.100.2:10080/test.bin"
         stat_args = ("ip", "netns", "exec", node, xray, "api", "stats", "-server=127.0.0.1:10085",
                      "-name=inbound>>>client>>>traffic>>>downlink", "-reset=false")
@@ -137,7 +135,7 @@ def main(binary, xray, inbox, sampler):
                     cfg["upload_dir"] = str(inbox)
             config = root / f"{name}.json"
             config.write_text(json.dumps(cfg))
-            process = start(node, name, binary, "traffic-anomaly", "--config-file", str(config), env=env)
+            process = start(node, name, binary, "traffic-anomaly", "--config-file", str(config))
 
             def online():
                 assert process.poll() is None, (root / f"{name}.log").read_text()
