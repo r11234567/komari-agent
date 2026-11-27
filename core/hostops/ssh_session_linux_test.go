@@ -12,11 +12,13 @@ func TestDirectSSHProperties(t *testing.T) {
 	if uid, err := verifySSHProperties(valid, local); err != nil || uid != 1001 {
 		t.Fatalf("direct SSH UID = %d, error = %v", uid, err)
 	}
+	if uid, err := verifySSHProperties(strings.Replace(valid, "TTY=pts/4", "TTY=", 1), local); err != nil || uid != 1001 {
+		t.Fatalf("direct SSH UID without a logind TTY name = %d, error = %v", uid, err)
+	}
 	for _, tc := range []struct{ from, to string }{
 		{"Remote=yes", "Remote=no"},
 		{"Service=sshd", "Service=login"},
 		{"Type=tty", "Type=unspecified"},
-		{"TTY=pts/4", "TTY="},
 		{"TTY=pts/4", "TTY=ssh"},
 		{"User=1001", "User=-1"},
 		{"192.0.2.2", "::ffff:127.0.0.1"},
