@@ -24,7 +24,7 @@ func DirectSSHUID() (uint32, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, loginctl, "show-session", "self", "--property=Remote,RemoteHost,Service,Type,TTY,User")
+	cmd := exec.CommandContext(ctx, loginctl, "--no-pager", "show-session", "self", "--property=Remote,RemoteHost,Service,Type,TTY,User")
 	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL=C"}
 	data, err := cmd.Output()
 	if err != nil {
