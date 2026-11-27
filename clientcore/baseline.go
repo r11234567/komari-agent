@@ -44,6 +44,9 @@ func (c *Client) initializeHost(parent context.Context) error {
 	var actions []hostv1.HostAction
 	if c.hostTrust != nil && hostops.HostActionsReady(c.hostManifest) {
 		actions = []hostv1.HostAction{hostv1.HostAction_HOST_ACTION_SET_SERVICE_IDENTITY}
+		if hostops.HostSupportsRootExecutionApproval(c.hostManifest) {
+			actions = append(actions, hostv1.HostAction_HOST_ACTION_ENABLE_ROOT_EXECUTION)
+		}
 		if !c.hostPolicy.ForceDenyRescueHelper && len(c.hostTrust.ReleaseKeys) > 0 {
 			actions = append(actions, hostv1.HostAction_HOST_ACTION_INSTALL_RESCUE_HELPER)
 		}

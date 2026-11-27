@@ -1,0 +1,100 @@
+name: Agent installer platform E2E
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/installer-platform-e2e.yml'
+      - 'install.sh'
+      - 'internal/hostcmd/**'
+      - 'core/hostops/**'
+      - 'scripts/ci/*install*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    name: ${{ matrix.platform }} installer
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Ubuntu 24.04 systemd
+            variant: systemd
+            runner: ubuntu-24.04
+          - platform: Ubuntu 24.04 systemd PAM and rescue
+            variant: host-actions
+            runner: ubuntu-24.04
+          - platform: Alpine 3.22 OpenRC
+            variant: openrc
+            runner: ubuntu-24.04
+          - platform: macOS launchd
+            variant: launchd
+            runner: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      # Both suites create real accounts and mutate system state. The recovery
+      # suite checks that the default komari account is absent on entry.
+      - name: Prepare Linux systemd dependencies
+        if: matrix.variant == 'systemd' || matrix.variant == 'host-actions'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpam0g-dev nftables
+      - name: Ubuntu systemd, real PAM and signed rescue lifecycle
+        if: matrix.variant == 'host-actions'
+        run: bash scripts/ci/run-audit-check.sh installer-host-actions bash scripts/ci/test-host-transactions.sh
+      - name: Build the actual Agent and Host for installer recovery
+        if: matrix.variant == 'systemd'
+        env:
+          GOMAXPROCS: '2'
+        run: |
+          mkdir -p ci-artifacts
+          bash scripts/ci/run-audit-check.sh installer-agent-build go build -p=2 -o ci-artifacts/komari-agent .
+          bash scripts/ci/run-audit-check.sh installer-host-build go build -p=2 -o ci-artifacts/komari-host ./cmd/komari-host
+      - name: Ubuntu systemd signed install and recovery on a clean host
+        if: matrix.variant == 'systemd'
+        run: bash scripts/ci/run-audit-check.sh installer-systemd bash scripts/ci/test-installer-recovery.sh
+      - name: Build the actual portable monitoring Agent
+        if: matrix.variant == 'openrc' || matrix.variant == 'launchd'
+        run: |
+          mkdir -p "$RUNNER_TEMP/komari-installer"
+          CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/komari-installer/komari-agent" .
+      - name: Alpine OpenRC, real service startup and privilege rejection
+        if: matrix.variant == 'openrc'
+        run: |
+          docker build --tag komari-installer-openrc - <<'DOCKER'
+          FROM alpine:3.22
+          RUN apk add --no-cache bash openrc openssl python3 util-linux
+          DOCKER
+          bash scripts/ci/run-audit-check.sh installer-openrc docker run --rm --privileged --network none \
+            -e GITHUB_ACTIONS=true \
+            --mount "type=bind,src=$PWD,dst=/source,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/komari-installer,dst=/tools,readonly" \
+            komari-installer-openrc bash -ec '
+              mkdir -p /run/openrc
+              rc_sys=docker openrc default
+              bash /source/scripts/ci/test-monitoring-install.sh /tools/komari-agent
+            '
+      - name: macOS launchd, real service startup and privilege rejection
+        if: matrix.variant == 'launchd'
+        run: |
+          brew list --versions openssl@3 || brew install openssl@3
+          brew list --versions coreutils || brew install coreutils
+          export PATH="$(brew --prefix openssl@3)/bin:$PATH"
+          command -v gtimeout
+          bash scripts/ci/run-audit-check.sh installer-launchd bash scripts/ci/test-monitoring-install.sh "$RUNNER_TEMP/komari-installer/komari-agent"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: installer-${{ matrix.variant }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/
+          retention-days: 7
