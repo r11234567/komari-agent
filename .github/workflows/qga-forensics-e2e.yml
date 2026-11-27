@@ -1,0 +1,49 @@
+name: QGA forensic capture E2E
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/qga-forensics-e2e.yml'
+      - 'internal/qgastream/**'
+      - 'scripts/qga-e2e/**'
+      - 'scripts/ci/build-qga-capture.sh'
+      - 'go.mod'
+      - 'go.sum'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qga-forensic-source:
+    name: Ubuntu virtual machine / QGA capture and sealed bytes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: r11234567/komari-proto
+          ref: 620595e2ab3c9614522b42bf0f19804fc337ba79
+          path: .qga-proto
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            scripts/qga-e2e/go.sum
+      - name: Install virtual machine verification dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cloud-image-utils qemu-system-x86 qemu-utils ubuntu-keyring
+      - name: Verify signed Ubuntu guest image
+        run: bash scripts/qga-e2e/fetch-ubuntu.sh
+      - name: Verify framing limits and synchronization
+        run: go test -race ./internal/qgastream
+      - name: Verify actual guest QGA traffic and sealed evidence
+        env:
+          GOFLAGS: -mod=readonly
+        run: bash scripts/qga-e2e/run-ubuntu.sh
