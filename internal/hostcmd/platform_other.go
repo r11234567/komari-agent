@@ -31,6 +31,9 @@ func resume([]string, io.Writer, bool) error {
 func fetchHelper([]string, io.Writer) error {
 	return errors.New("helper release staging requires the accepted Linux systemd adapter")
 }
+func setupRescueSSH([]string, io.Writer) error {
+	return errors.New("temporary SSH setup requires Linux nftables and systemd")
+}
 func upgradeInstalledRescue([]string, io.Writer) error {
 	return errors.New("coordinated installed-rescue upgrades require Linux systemd")
 }

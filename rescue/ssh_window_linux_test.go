@@ -71,15 +71,15 @@ func TestTemporarySSHWindowNftables(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkStatus("SSH_NFT_RULES_INVALID", "public_edge_guard/input", 0)
-	firewall := fmt.Sprintf(`table inet public_edge_guard {
-	  set komari_rescue_ssh_v4 { type ipv4_addr; flags timeout; }
-	  set komari_rescue_ssh_v6 { type ipv6_addr; flags timeout; }
+	if err := os.Remove(configPath); err != nil {
+		t.Fatal(err)
+	}
+	firewall := `flush ruleset
+	table inet public_edge_guard {
 	  chain input {
 	    type filter hook input priority -100; policy accept;
 	    ct state established,related accept
 	    iifname "sshhost" ip6 nexthdr ipv6-icmp accept
-	    iifname "sshhost" ip saddr @komari_rescue_ssh_v4 tcp dport %d accept
-	    iifname "sshhost" ip6 saddr @komari_rescue_ssh_v6 tcp dport %d accept
 	    iifname "sshhost" drop
 	  }
 	}
@@ -92,18 +92,14 @@ func TestTemporarySSHWindowNftables(t *testing.T) {
 	table ip6 filter {
 	  chain INPUT { type filter hook input priority 0; policy accept; }
 	}
-	`, port, port)
+	`
+	firewallPath := filepath.Join(dir, "nftables.conf")
+	if err := os.WriteFile(firewallPath, []byte(firewall), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := config.apply(t.Context(), firewall); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(config.statePath, []byte("{"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	checkStatus("SSH_STATE_INVALID", "unexpected EOF", 0)
-	if err := os.Remove(config.statePath); err != nil {
-		t.Fatal(err)
-	}
-	checkStatus("", "", port)
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -120,6 +116,34 @@ func TestTemporarySSHWindowNftables(t *testing.T) {
 			_ = sshConn.Close()
 		}
 	})
+	if _, stderr, err := platformCommand(t.Context(), "ip", "route", "add", "default", "dev", "sshhost"); err != nil {
+		t.Fatalf("configure test default route: %s: %v", stderr, err)
+	}
+	setup, err := PlanSSHWindow(t.Context(), manifest, SSHWindowSetupOptions{NftConfig: firewallPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if setup.config.Port != port || setup.config.Interface != "sshhost" || setup.config.Table != "public_edge_guard" {
+		t.Fatalf("automatic setup selected the wrong SSH entry point: %s", setup.Description())
+	}
+	if err := setup.Apply(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := PlanSSHWindow(t.Context(), manifest, SSHWindowSetupOptions{}); err != nil || !again.Configured() {
+		t.Fatalf("existing settings were not recognized: %+v %v", again, err)
+	}
+	config, err = loadSSHWindowConfig(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.statePath, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checkStatus("SSH_STATE_INVALID", "unexpected EOF", 0)
+	if err := os.Remove(config.statePath); err != nil {
+		t.Fatal(err)
+	}
+	checkStatus("", "", port)
 	binary, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -199,8 +223,8 @@ func TestTemporarySSHWindowNftables(t *testing.T) {
 	probe("fd69:434f:4d41::2", "fd69:434f:4d41::1", false)
 	beforeReload := makeSession("D", "fd69:434f:4d41::2", "")
 	requireGrant(beforeReload, temporarySSHDuration)
-	if err := config.apply(t.Context(), "delete table inet public_edge_guard\n"+firewall[:strings.Index(firewall, "table ip crowdsec")]); err != nil {
-		t.Fatal(err)
+	if _, stderr, err := platformCommand(t.Context(), "nft", "-f", firewallPath); err != nil {
+		t.Fatalf("reload persisted configuration: %s: %v", stderr, err)
 	}
 	config, err = loadSSHWindowConfig(manifest)
 	if err != nil {

@@ -2,6 +2,7 @@ package files
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -167,13 +168,14 @@ func assignmentArgs(assignment *filev1.FileAssignment) (map[string]any, error) {
 			return nil, fmt.Errorf("mismatched payload for %s", op.String())
 		}
 		args := map[string]any{
-			"transfer_id":    p.DownloadStream.GetTransferId(),
-			"transfer_token": p.DownloadStream.GetTransferToken(),
-			"path":           p.DownloadStream.GetPath(),
-			"offset":         p.DownloadStream.GetOffset(),
-			"length":         p.DownloadStream.GetLength(),
-			"chunk_index":    p.DownloadStream.GetChunkIndex(),
-			"file_size":      p.DownloadStream.GetFileSize(),
+			"transfer_id":        p.DownloadStream.GetTransferId(),
+			"transfer_token":     p.DownloadStream.GetTransferToken(),
+			"path":               p.DownloadStream.GetPath(),
+			"offset":             p.DownloadStream.GetOffset(),
+			"length":             p.DownloadStream.GetLength(),
+			"chunk_index":        p.DownloadStream.GetChunkIndex(),
+			"file_size":          p.DownloadStream.GetFileSize(),
+			"follow_instance_id": p.DownloadStream.GetFollowInstanceId(),
 		}
 		if ts := p.DownloadStream.GetModifiedAt(); ts != nil && ts.IsValid() {
 			args["modified_at"] = ts.AsTime().UTC().Format(time.RFC3339Nano)
@@ -219,6 +221,18 @@ func assignmentArgs(assignment *filev1.FileAssignment) (map[string]any, error) {
 			"upload_id": p.UploadCancel.GetUploadId(),
 			"path":      p.UploadCancel.GetPath(),
 		}, nil
+	case *filev1.FileAssignment_Replace:
+		if op != filev1.FileOperation_FILE_OPERATION_REPLACE || p.Replace == nil {
+			return nil, fmt.Errorf("mismatched payload for %s", op.String())
+		}
+		if len(p.Replace.GetContent()) > maxEditableSize || len(p.Replace.GetExpectedSha256()) != 32 {
+			return nil, errors.New("invalid file edit content or version")
+		}
+		return map[string]any{
+			"path":            p.Replace.GetPath(),
+			"content":         base64.StdEncoding.EncodeToString(p.Replace.GetContent()),
+			"expected_digest": base64.StdEncoding.EncodeToString(p.Replace.GetExpectedSha256()),
+		}, nil
 	default:
 		return nil, fmt.Errorf("missing typed payload for %s", op.String())
 	}
@@ -260,6 +274,8 @@ func executeScoped(scope, operation string, args map[string]any) (json.RawMessag
 		return commitFileUploadScoped(scope, args)
 	case "upload_cancel":
 		return cancelFileUploadScoped(scope, args)
+	case "replace":
+		return nil, replaceEditedFile(args)
 	default:
 		return nil, fmt.Errorf("unsupported file operation: %s", operation)
 	}
@@ -297,6 +313,8 @@ func operationName(operation filev1.FileOperation) string {
 		return "upload_commit"
 	case filev1.FileOperation_FILE_OPERATION_UPLOAD_CANCEL:
 		return "upload_cancel"
+	case filev1.FileOperation_FILE_OPERATION_REPLACE:
+		return "replace"
 	default:
 		return ""
 	}
@@ -351,18 +369,19 @@ func decodeEntries(payload json.RawMessage) []*filev1.FileEntry {
 
 func fileEntry(file fileInfo) *filev1.FileEntry {
 	entry := &filev1.FileEntry{
-		Name:      file.Name,
-		Path:      file.Path,
-		Directory: file.IsDir,
-		Symlink:   file.IsSymlink,
-		Size:      uint64(max(file.Size, 0)),
-		Mode:      file.Mode,
-		ModeOctal: file.ModeOctal,
-		Uid:       int32(file.UID),
-		Gid:       int32(file.GID),
-		Owner:     file.Owner,
-		Group:     file.Group,
-		Target:    file.Target,
+		Name:       file.Name,
+		Path:       file.Path,
+		Directory:  file.IsDir,
+		Symlink:    file.IsSymlink,
+		Size:       uint64(max(file.Size, 0)),
+		Mode:       file.Mode,
+		ModeOctal:  file.ModeOctal,
+		Uid:        int32(file.UID),
+		Gid:        int32(file.GID),
+		Owner:      file.Owner,
+		Group:      file.Group,
+		Target:     file.Target,
+		InstanceId: file.InstanceID,
 	}
 	if !file.ModifiedAt.IsZero() {
 		entry.ModifiedAt = timestamppb.New(file.ModifiedAt)
