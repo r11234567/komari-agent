@@ -10,27 +10,29 @@
 
 # Komari Agent
 
+[本库文档](docs/README.md) · [运行权限](docs/guides/privileges.md) · [Host 更新](docs/guides/host-updates.md)
+
 Komari Agent 是面向现代跨平台基础设施的监控与远程运维探针，支持 Linux、macOS、Windows 与 Docker。探针基于 **Connect-RPC / Protobuf / HTTP/2** 构建主干通信，具备零信任安全注册、双向流式指标上报、三级分级配置治理与严格的内核级特权控制体系。
 
 ---
 
 ## 一、 快速安装与部署
 
-按流量计费的 Linux 节点可选用[流量异常取证试点](docs/traffic-anomaly-pilot.md)查看本机对端 IP 和异常用量。
+按流量计费的 Linux 节点可选用[流量监测](docs/guides/traffic-monitoring.md)查看本机对端 IP 和异常用量。
 
 探针默认遵循**最小权限原则（Zero-Trust Default-Deny）**：Linux 下以系统专用非登录账号 `komari` 运行，macOS 下以隐藏服务账号 `_komari` 运行，Windows 下以受限 `LocalService` 服务运行。首次部署时远程控制（WebSSH / 远程执行）默认完全关闭。
 
 ### 1. Linux 一键安装
 
-从面板复制 Linux 安装命令，或按[安装器下载与校验](docs/service-startup.md#安装器下载与校验)操作。安装后按提示执行 `login` 完成注册。
+从面板复制 Linux 安装命令，或按[安装器下载与校验](docs/guides/service-startup.md#安装器下载与校验)操作。安装后按提示执行 `login` 完成注册。
 
 ### 2. Windows 管理员 PowerShell 安装
 
-以管理员身份打开 PowerShell，运行[安装器下载与校验](docs/service-startup.md#安装器下载与校验)中的 Windows 命令。
+以管理员身份打开 PowerShell，运行[安装器下载与校验](docs/guides/service-startup.md#安装器下载与校验)中的 Windows 命令。
 
 ### 3. macOS 安装
 
-按[安装器下载与校验](docs/service-startup.md#安装器下载与校验)完成安装后注册并启动服务。
+按[安装器下载与校验](docs/guides/service-startup.md#安装器下载与校验)完成安装后注册并启动服务。
 
 ```bash
 sudo -u _komari /usr/local/komari/agent login --endpoint "https://panel.example.com"
@@ -82,7 +84,7 @@ docker run -d \
 
 Linux/macOS 使用安装器创建的服务账号写入凭据，避免 root 登录后生成服务账号无法读取的 0600 文件。Windows 凭据目录通过 ACL 向 SYSTEM、Administrators 和 LocalService 授权。Windows 的特权状态默认放在安装目录的 `privileged.json`，与提权脚本保持一致；其余状态放在 ProgramData。
 
-未注册时，systemd 和 Windows 安装器仅启用自动启动，等待登录后再启动；launchd 加载任务后等待注册。安装器不会把尚未注册视为成功在线。详细诊断和旧版本迁移见 [守护进程启动排查](docs/service-startup.md)。
+未注册时，systemd 和 Windows 安装器仅启用自动启动，等待登录后再启动；launchd 加载任务后等待注册。安装器不会把尚未注册视为成功在线。详细诊断和旧版本迁移见 [守护进程启动排查](docs/guides/service-startup.md)。
 
 ---
 
@@ -97,7 +99,7 @@ Linux/macOS 使用安装器创建的服务账号写入凭据，避免 root 登�
 | `--endpoint`, `-e` | `AGENT_ENDPOINT` | `endpoint` | 面板地址 |
 | `--token`, `-t` | `AGENT_TOKEN` | `token` | 探针接入 Token（零信任模式下由 login 命令管理） |
 | `--disable-remote-control` | `AGENT_DISABLE_REMOTE_CONTROL` | `disable_remote_control` | 禁用远程终端（WebSSH）与远程命令执行 |
-| `--disable-auto-update` | `AGENT_DISABLE_AUTO_UPDATE` | `disable_auto_update` | 禁用自动更新 |
+| `--disable-auto-update` | `AGENT_DISABLE_AUTO_UPDATE` | `disable_auto_update` | 仅兼容旧配置；daemon 不自更新，见 Host 更新 |
 | `--ignore-unsafe-cert`, `-u` | `AGENT_IGNORE_UNSAFE_CERT` | `ignore_unsafe_cert` | 忽略 TLS 证书校验错误（测试/自签名环境） |
 | `--custom-dns` | `AGENT_CUSTOM_DNS` | `custom_dns` | 自定义 DNS 服务器（如 `8.8.8.8`） |
 | `--prefer-ip-version` | `AGENT_PREFER_IP_VERSION` | `prefer_ip_version` | 面板连接优先使用的 IP 版本（`4` 或 `6`） |
@@ -114,7 +116,7 @@ komari-agent config show --json
 komari-agent --service-manifest /etc/komari/services/SERVICE.json config show
 ```
 
-查询输出标明磁盘来源和时间，不等同于实时 daemon 认证或服务端 desired。`upgrade`、`update-conf`、`rollback`、`status privileged`、`recover show-config` 和 `recover rollback-config` 已删除。旧 unit 的在线参数需先通过管理员迁移工具转换；新安装直接报错。完整清单见 [CLI 迁移说明](docs/privileged-cli-migration-inventory.md)。
+查询输出标明磁盘来源和时间，不等同于实时 daemon 认证或服务端 desired。`upgrade`、`update-conf`、`rollback`、`status privileged`、`recover show-config` 和 `recover rollback-config` 已删除。旧 unit 的在线参数需先通过管理员迁移工具转换；新安装直接报错。完整清单见 [CLI 迁移说明](docs/guides/cli-migration.md)。
 
 ---
 
@@ -160,7 +162,7 @@ sudo komari-host restore --manifest /etc/komari/services/SERVICE.json
 
 救援 helper 默认不安装，按需验证发布签名和固定版本 artifact，再执行批准后的独立安装事务。普通 daemon 可继续以普通账号运行。恢复日志保留原文件 UID/GID/mode，异常恢复可在断网时执行，回执恢复联网后重发。
 
-配置步骤、缓存/离线 artifact、支持边界和发布签名要求见 [阶段 6 本机事务说明](docs/privileged-host-stage6.md)。Windows、macOS、FreeBSD 的 host actions 当前明确不支持；不能使用旧 elevation 脚本。
+配置步骤、缓存/离线 artifact、支持边界和发布签名要求见 [阶段 6 本机事务说明](docs/guides/host-updates.md)。Windows、macOS、FreeBSD 的 host actions 当前明确不支持；不能使用旧 elevation 脚本。
 
 ---
 
@@ -168,7 +170,7 @@ sudo komari-host restore --manifest /etc/komari/services/SERVICE.json
 
 ### 1. Linux / macOS 卸载
 
-先按[安装器下载与校验](docs/service-startup.md#安装器下载与校验)下载并校验 `install.sh`，然后执行：
+先按[安装器下载与校验](docs/guides/service-startup.md#安装器下载与校验)下载并校验 `install.sh`，然后执行：
 
 ```bash
 sudo bash ./install.sh --uninstall

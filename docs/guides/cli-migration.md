@@ -1,4 +1,4 @@
-# CLI 与配置所有权（阶段 6 验收后的清理）
+# CLI 与配置所有权
 
 配置查询统一使用 `komari-agent config show [--json]`。输出脱敏磁盘快照、文件时间、有效值来源、本机保护策略、host applied 摘要、helper 的受验证观察和回执数量；不启动 daemon，不写状态，不读取或输出私钥，不把查询进程身份当成 daemon 身份，也不将离线 pending 当成服务端当前 desired。
 
