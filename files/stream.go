@@ -108,13 +108,8 @@ func sendDownloadStream(args map[string]interface{}) (json.RawMessage, error) {
 	if offset > info.Size() || length > info.Size()-offset {
 		return nil, fmt.Errorf("download_stream: range offset=%d length=%d exceeds file size=%d", offset, length, info.Size())
 	}
-	if expectedSize := argInt64(args, "file_size"); expectedSize > 0 && info.Size() != expectedSize {
+	if !matchesDownloadSnapshot(info, args) {
 		return nil, errors.New("download_stream: file changed while opening stream")
-	}
-	if modified := strings.TrimSpace(argString(args, "modified_at")); modified != "" {
-		if expectedTime, parseErr := time.Parse(time.RFC3339Nano, modified); parseErr == nil && !info.ModTime().UTC().Equal(expectedTime.UTC()) {
-			return nil, errors.New("download_stream: file changed while opening stream")
-		}
 	}
 	streamContext, cancel := context.WithTimeout(context.Background(), fileStreamHTTPTimeout)
 	defer cancel()
@@ -152,6 +147,23 @@ func sendDownloadStream(args map[string]interface{}) (json.RawMessage, error) {
 	}
 	_, _ = io.Copy(io.Discard, response.Body)
 	return json.Marshal(map[string]any{"sent": length})
+}
+
+func matchesDownloadSnapshot(info os.FileInfo, args map[string]any) bool {
+	size := argInt64(args, "file_size")
+	if instance := argString(args, "follow_instance_id"); instance != "" {
+		if fileInstanceID(info) != instance || info.Size() < size {
+			return false
+		}
+		if info.Size() > size {
+			return true
+		}
+	}
+	if size > 0 && info.Size() != size {
+		return false
+	}
+	modified, err := time.Parse(time.RFC3339Nano, argString(args, "modified_at"))
+	return err != nil || info.ModTime().Equal(modified)
 }
 
 func receiveUploadStream(args map[string]interface{}) (json.RawMessage, error) {

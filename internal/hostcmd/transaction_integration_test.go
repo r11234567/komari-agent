@@ -552,6 +552,9 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	if err = run(password, "apply", "--manifest", m.ManifestPath, "--revision", "4"); err == nil {
 		t.Fatal("corrupt helper cache accepted")
 	}
+	if strings.Contains(lastRunOutput, "Temporary SSH: TCP") || strings.Contains(lastRunOutput, "Temporary SSH setup skipped:") {
+		t.Fatal("temporary SSH setup ran before the rescue installation committed")
+	}
 	if err = verifyService(service, uid, 2); err != nil {
 		t.Fatal("preparation failure stopped Agent:", err)
 	}
@@ -593,6 +596,9 @@ func TestHostSystemdTransactionAcceptance(t *testing.T) {
 	// No --allow-rescue-helper, fetch-helper or offline artifact flags are needed.
 	if err = run(password, "apply", "--manifest", m.ManifestPath, "--revision", "4"); err != nil {
 		t.Fatal(err)
+	}
+	if !strings.Contains(lastRunOutput, "Temporary SSH: TCP") && !strings.Contains(lastRunOutput, "Temporary SSH setup skipped:") {
+		t.Fatal("the committed rescue installation did not attempt automatic temporary SSH setup")
 	}
 	policy, err = hostops.ReadPolicy(m)
 	if err != nil || !policy.AllowRescueHelper || !policy.HelperInstalled || policy.PrivilegeMode != 2 {

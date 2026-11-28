@@ -509,6 +509,7 @@ func apply(args []string, out io.Writer) error {
 	fmt.Fprintf(out, "service=%s actual_user=%s main_pid=%s policy_mode=%d target_mode=%d actions=%v\n", m.ServiceName, o.User, o.MainPID, p.PrivilegeMode, r.Authorization.TargetPrivilegeMode, r.Authorization.Actions)
 	if installRescue {
 		fmt.Fprintln(out, "This task will install and authorize a separate root rescue service. Local PAM authentication authorizes this installation; the Agent identity follows the approved target.")
+		fmt.Fprintln(out, "On a compatible nftables host, this approval also prepares the empty entry point for temporary SSH.")
 		if *artifact == "" {
 			fmt.Fprintf(out, "After authentication, Host will fetch and verify publisher-signed rescue release %s if it is not already cached.\n", ReleaseVersion)
 		}
@@ -610,7 +611,15 @@ func apply(args []string, out io.Writer) error {
 		fmt.Fprintf(out, "Local OS changes verified; control-plane acknowledgement pending. Retry %s before the execution lease expires.\n", hostRecoveryCommand(m, "resume"))
 		return err
 	}
-	return finishHost(ctx, m, panel, j, out)
+	if err := finishHost(ctx, m, panel, j, out); err != nil {
+		return err
+	}
+	if installRescue {
+		if err := configureInstalledRescueSSH(m, operator, out); err != nil {
+			fmt.Fprintf(out, "Temporary SSH setup skipped: %v\n", err)
+		}
+	}
+	return nil
 }
 
 func executeTransaction(ctx context.Context, m *hostops.Manifest, p *hostops.Policy, t *hostops.Trust, r *configv1.PrivilegedRevision, j *hostJournal, dirs []string, bootstrap *flags.Config, helper []byte, helperVersion, workingDir string) error {

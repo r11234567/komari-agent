@@ -38,6 +38,7 @@ type fileInfo struct {
 	Group      string    `json:"group"`
 	ModifiedAt time.Time `json:"modified_at"`
 	Target     string    `json:"target,omitempty"`
+	InstanceID string    `json:"instance_id,omitempty"`
 }
 
 type uploadChunkState struct {
@@ -708,6 +709,9 @@ func describeFile(path string, symlink bool) (fileInfo, error) {
 		Owner:      owner,
 		Group:      group,
 		ModifiedAt: info.ModTime().UTC(),
+	}
+	if !symlink && info.Mode().IsRegular() {
+		item.InstanceID = fileInstanceID(info)
 	}
 	if symlink {
 		if target, linkErr := os.Readlink(path); linkErr == nil {

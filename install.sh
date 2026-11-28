@@ -136,6 +136,7 @@ install_version="" # New parameter for specifying version
 runtime_identity="service-account"
 uninstall_only=false
 rescue_enabled=false
+setup_rescue_ssh=false
 rescue_endpoint=""
 rescue_token=""
 cf_access_client_id=""
@@ -236,6 +237,10 @@ while [[ $# -gt 0 ]]; do
             rescue_enabled=true
             shift
             ;;
+        --install-setup-rescue-ssh)
+            setup_rescue_ssh=true
+            shift
+            ;;
         --endpoint=*)
             rescue_endpoint="${1#*=}"
             komari_argv+=(--endpoint "$rescue_endpoint")
@@ -316,6 +321,9 @@ fi
 
 # Decide the installation path before creating accounts or touching services.
 init_system=""
+if [ "$setup_rescue_ssh" = true ] && { [ "$rescue_enabled" != true ] || [ "$uninstall_only" = true ]; }; then
+    log_error "--install-setup-rescue-ssh requires --install-rescue"; exit 64
+fi
 if [ "$uninstall_only" != true ]; then
     if [[ ! "$service_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || [[ "$service_name" = *.service ]]; then
         log_error "Invalid service name"; exit 64
@@ -1066,6 +1074,11 @@ ALLOW_HELPER
             "$host_path" diagnose --manifest "$installed_manifest" | tee "$log_directory/host-readiness.log"
             if ! grep -qx 'host_actions_ready=true' "$log_directory/host-readiness.log"; then
                 log_error "Host preparation is incomplete; inspect $log_directory/host-readiness.log"; exit 1
+            fi
+            if [ "$setup_rescue_ssh" = true ]; then
+                if ! "$host_path" setup-rescue-ssh --manifest "$installed_manifest"; then
+                    log_warning "Temporary SSH setup was not completed. Run komari-host setup-rescue-ssh locally after addressing the reported cause."
+                fi
             fi
         else
             log_warning "Metrics-only mode: privileged host action preparation was explicitly skipped."

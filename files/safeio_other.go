@@ -9,7 +9,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 )
+
+func fileInstanceID(os.FileInfo) string { return "" }
 
 func openRegularNoSymlinks(path string, flags int, mode uint32) (*os.File, os.FileInfo, error) {
 	if linfo, lerr := os.Lstat(path); lerr == nil && linfo.Mode()&os.ModeSymlink != 0 {
@@ -255,4 +258,24 @@ func moveSameDeviceSafe(source, destination string, overwrite bool) error {
 		rename = renameWithoutOverwrite
 	}
 	return rename(source, destination)
+}
+
+var editPublicationMu sync.Mutex
+
+func replaceEditedFileSafe(path string, data, expected []byte) error {
+	editPublicationMu.Lock()
+	defer editPublicationMu.Unlock()
+	target, _, err := openRegularNoSymlinks(path, os.O_RDONLY, 0)
+	if os.IsNotExist(err) {
+		return errFileEditConflict
+	}
+	if err != nil {
+		return err
+	}
+	info, err := verifyEditedFile(target, expected)
+	_ = target.Close()
+	if err != nil {
+		return err
+	}
+	return writeAtomicFileSafe(path, data, info.Mode().Perm(), "")
 }

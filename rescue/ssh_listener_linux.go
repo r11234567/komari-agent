@@ -19,6 +19,7 @@ import (
 type sshListenSocket struct {
 	address netip.Addr
 	port    uint32
+	root    bool
 }
 
 func inspectSSHDaemon(ctx context.Context, port uint32) *rescuev1.SSHDaemonState {
@@ -110,7 +111,10 @@ func parseSSHListenSockets(data string) []sshListenSocket {
 			continue
 		}
 		if address, ok := netip.AddrFromSlice(raw); ok {
-			sockets = append(sockets, sshListenSocket{address: address.Unmap(), port: uint32(port)})
+			sockets = append(sockets, sshListenSocket{
+				address: address.Unmap(), port: uint32(port),
+				root: len(fields) > 7 && fields[7] == "0",
+			})
 		}
 	}
 	return sockets
