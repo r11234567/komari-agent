@@ -278,7 +278,7 @@ func (config sshWindowConfig) setupCommands() string {
 		{sshWindowV4Set, "ipv4_addr", "ip"},
 		{sshWindowV6Set, "ipv6_addr", "ip6"},
 	} {
-		fmt.Fprintf(&output, "add set inet %s %s { type %s; flags timeout; }\n", config.Table, entry.set, entry.kind)
+		fmt.Fprintf(&output, "create set inet %s %s { type %s; flags timeout; }\n", config.Table, entry.set, entry.kind)
 		fmt.Fprintf(&output, "insert rule inet %s %s iifname %q %s saddr @%s tcp dport %d accept\n",
 			config.Table, config.Chain, config.Interface, entry.protocol, entry.set, config.Port)
 	}

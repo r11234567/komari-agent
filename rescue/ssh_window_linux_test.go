@@ -129,6 +129,9 @@ func TestTemporarySSHWindowNftables(t *testing.T) {
 	if err := setup.Apply(t.Context()); err != nil {
 		t.Fatal(err)
 	}
+	if err := setup.config.apply(t.Context(), setup.config.setupCommands()); err == nil {
+		t.Fatal("running the setup transaction twice accepted duplicate firewall rules")
+	}
 	if again, err := PlanSSHWindow(t.Context(), manifest, SSHWindowSetupOptions{}); err != nil || !again.Configured() {
 		t.Fatalf("existing settings were not recognized: %+v %v", again, err)
 	}
