@@ -2,6 +2,7 @@ package clientcore
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -13,6 +14,10 @@ import (
 	"github.com/komari-monitor/komari-agent/internal/trafficwatch"
 	reportv1 "github.com/r11234567/komari-proto/gen/go/komari/report/v1"
 )
+
+// Keep snapshots outside the Agent state trees that Host may transfer to an
+// unprivileged service account during a local identity change.
+const managedTrafficRoot = "/var/lib/komari-traffic-monitoring"
 
 func (c *Client) trafficMonitoringStatus() *reportv1.TrafficMonitoringStatus {
 	if status := c.trafficMonitoring.Load(); status != nil {
@@ -44,7 +49,7 @@ func (c *Client) runManagedTrafficMonitoring(ctx context.Context, identity crede
 	if os.Geteuid() != 0 || c.hostManifest == nil || c.hostTrust == nil || c.privilegedStore == nil || identity.EnrolledAt.IsZero() {
 		return
 	}
-	stateDir := filepath.Join(filepath.Dir(c.hostManifest.PrivilegedStateFile), "traffic-monitoring")
+	stateDir := filepath.Join(managedTrafficRoot, c.hostManifest.ServiceName)
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	var config trafficwatch.Config
@@ -103,7 +108,15 @@ func (c *Client) runManagedTrafficMonitoring(ctx context.Context, identity crede
 }
 
 func (c *Client) collectManagedTraffic(ctx context.Context, identity credentials.Identity, config trafficwatch.Config, stopped chan<- error, setState func(reportv1.TrafficMonitoringState, string)) {
-	if err := hostops.TrustedPath(filepath.Dir(config.StateDir)); err != nil {
+	if err := hostops.TrustedPath(filepath.Dir(managedTrafficRoot)); err != nil {
+		stopped <- err
+		return
+	}
+	if err := os.Mkdir(managedTrafficRoot, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		stopped <- err
+		return
+	}
+	if err := hostops.TrustedPath(managedTrafficRoot); err != nil {
 		stopped <- err
 		return
 	}
