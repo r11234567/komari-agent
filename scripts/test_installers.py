@@ -264,6 +264,54 @@ catch {
 """
         self.assertIn("rejected failed child", self.run_ps(script))
 
+    def test_nssm_download_retries_then_verifies_archive(self):
+        function = "function Get-VerifiedNssm" + between(PS, "function Get-VerifiedNssm", "\n$Version = Get-ReleaseVersion")
+        script = function + r"""
+$ErrorActionPreference = 'Stop'
+$Arch = 'amd64'
+$script:attempts = 0
+$script:sleeps = @()
+$script:expanded = 0
+$script:invalid = $false
+function Invoke-WebRequest {
+    [CmdletBinding()] param($Uri, $OutFile, [switch]$UseBasicParsing, $TimeoutSec)
+    if ($TimeoutSec -ne 45 -or $Uri -notlike 'https://nssm.cc/ci/nssm-*') { throw 'unexpected download request' }
+    $script:attempts++
+    if ($script:attempts -lt 3) {
+        $failure = [System.Exception]::new('upstream gateway timeout')
+        $failure | Add-Member -NotePropertyName Response -NotePropertyValue @{StatusCode = 504}
+        throw $failure
+    }
+    [IO.File]::WriteAllText($OutFile, 'fixture archive')
+}
+function Start-Sleep { param($Seconds); $script:sleeps += $Seconds }
+function Get-FileHash {
+    param($LiteralPath, $Algorithm)
+    if (-not (Test-Path $LiteralPath) -or $Algorithm -ne 'SHA256') { throw 'missing archive hash check' }
+    $hash = if ($script:invalid) { 'incorrect digest' } else { '99F5045FFFBFFB745D67FE3A065A953C4A3D9C253B868892D9B685B0EE7D07B8' }
+    @{Hash = $hash}
+}
+function Expand-Archive {
+    param($LiteralPath, $DestinationPath)
+    $script:expanded++
+    $dir = Join-Path $DestinationPath 'nssm-2.24-101-g897c7ad/win64'
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $dir 'nssm.exe'), 'fixture binary')
+}
+$stage = Join-Path $PSScriptRoot 'staging'
+New-Item -ItemType Directory -Path $stage | Out-Null
+$binary = Get-VerifiedNssm $stage
+if ((Get-Content $binary) -ne 'fixture binary' -or $script:attempts -ne 3 -or ($script:sleeps -join ',') -ne '2,4') {
+    throw 'NSSM download did not recover after two transient errors'
+}
+$script:invalid = $true
+try { Get-VerifiedNssm $stage; throw 'accepted invalid archive' }
+catch { if ($_.Exception.Message -notlike '*SHA-256*') { throw } }
+if ($script:expanded -ne 1 -or $script:attempts -ne 4) { throw 'retried or extracted an invalid archive' }
+Write-Output 'retried NSSM download and verified archive'
+"""
+        self.assertIn("retried NSSM download and verified archive", self.run_ps(script))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

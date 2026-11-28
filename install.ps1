@@ -355,7 +355,19 @@ function Get-VerifiedNssm([string]$Stage) {
     $NssmVersion = '2.24-101-g897c7ad'
     $ZipPath = Join-Path $Stage 'nssm.zip'
     $ExtractPath = Join-Path $Stage 'nssm'
-    Invoke-WebRequest -Uri "https://nssm.cc/ci/nssm-$NssmVersion.zip" -OutFile $ZipPath -UseBasicParsing
+    for ($Attempt = 1; $Attempt -le 3; $Attempt++) {
+        try {
+            Invoke-WebRequest -Uri "https://nssm.cc/ci/nssm-$NssmVersion.zip" -OutFile $ZipPath -UseBasicParsing -TimeoutSec 45 -ErrorAction Stop
+            break
+        } catch {
+            $Response = $_.Exception.Response
+            $StatusCode = if ($null -ne $Response) { [int]$Response.StatusCode } else { 0 }
+            $Transient = $StatusCode -eq 0 -or $StatusCode -in @(408, 429) -or $StatusCode -ge 500
+            if (-not $Transient -or $Attempt -eq 3) { throw }
+            Write-Warning "NSSM download attempt $Attempt failed. Retrying."
+            Start-Sleep -Seconds (2 * $Attempt)
+        }
+    }
     $Digest = (Get-FileHash -LiteralPath $ZipPath -Algorithm SHA256).Hash
     # Exact archive SHA-256 of the publisher ZIP, also pinned by WinGet.
     if ($Digest -ne '99F5045FFFBFFB745D67FE3A065A953C4A3D9C253B868892D9B685B0EE7D07B8') {
