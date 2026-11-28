@@ -4,9 +4,13 @@ package rescue
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -55,7 +59,7 @@ func (p *jitterHeartbeatPanel) WatchPrivilegedDelivery(ctx context.Context, _ *c
 	}
 }
 
-func jitterHelperFixture(t *testing.T) (*Helper, *jitterHeartbeatPanel, func(time.Time, uint64) *configv1.PrivilegedRevision) {
+func jitterHelperFixture(t *testing.T, middleware ...func(http.Handler) http.Handler) (*Helper, *jitterHeartbeatPanel, func(time.Time, uint64) *configv1.PrivilegedRevision) {
 	t.Helper()
 	if os.Getenv("KOMARI_CREDENTIAL_ROOT_TEST") != "1" {
 		t.Skip("requires disposable root CI checkpoint")
@@ -72,6 +76,9 @@ func jitterHelperFixture(t *testing.T) (*Helper, *jitterHeartbeatPanel, func(tim
 	panel := &jitterHeartbeatPanel{frames: make(chan *configv1.PrivilegedRevision, 8),
 		control: make(chan *configv1.WatchPrivilegedDeliveryResponse, 8), seal: seal}
 	_, handler := configconnect.NewPrivilegedDeliveryServiceHandler(panel)
+	for _, wrap := range middleware {
+		handler = wrap(handler)
+	}
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 	trust.Endpoint = server.URL
@@ -165,4 +172,56 @@ func TestRescueAuthorizationDisconnectStillDeniesImmediately(t *testing.T) {
 	close(panel.frames)
 	waitJitterCondition(t, func() bool { return !helper.authorized.Load() && !helper.leaseReady.Load() }, time.Second)
 	t.Logf("explicit EOF denied after %s instead of waiting for silence window", time.Since(started))
+}
+
+func TestRescueAuthorizationRecoversFromGatewayAndNonceChallenge(t *testing.T) {
+	const staleNonce = "stale-fixture-nonce"
+	const currentNonce = "current-fixture-nonce"
+	var watches, challenges atomic.Int32
+	helper, panel, sign := jitterHelperFixture(t, func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/ping" {
+				w.Header().Set("DPoP-Nonce", staleNonce)
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			if watches.Add(1) == 1 {
+				http.Error(w, "temporary upstream outage", http.StatusBadGateway)
+				return
+			}
+			parts := strings.Split(r.Header.Get("DPoP"), ".")
+			if len(parts) != 3 {
+				http.Error(w, "missing proof", http.StatusBadRequest)
+				return
+			}
+			claims, err := base64.RawURLEncoding.DecodeString(parts[1])
+			var proof struct {
+				Nonce string `json:"nonce"`
+			}
+			if err != nil || json.Unmarshal(claims, &proof) != nil {
+				http.Error(w, "invalid proof", http.StatusBadRequest)
+				return
+			}
+			if proof.Nonce != currentNonce {
+				challenges.Add(1)
+				w.Header().Set("DPoP-Nonce", currentNonce)
+				// Model an intermediary preserving the nonce while omitting
+				// the challenge header that enables an in-request retry.
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"code":"unauthenticated","message":"dpop: missing, invalid or expired server nonce"}`))
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+	waitJitterCondition(t, func() bool { return panel.requests.Load() == 1 }, 5*time.Second)
+	if helper.authorized.Load() || helper.leaseReady.Load() {
+		t.Fatal("Helper authorized before receiving a signed heartbeat")
+	}
+	panel.frames <- sign(time.Now(), 1)
+	waitJitterCondition(t, func() bool { return helper.authorized.Load() && helper.leaseReady.Load() }, 3*time.Second)
+	if watches.Load() != 3 || challenges.Load() != 1 {
+		t.Fatalf("expected one gateway failure, one nonce challenge and one authorized watch, got %d watches and %d challenges", watches.Load(), challenges.Load())
+	}
 }
