@@ -44,7 +44,7 @@ jobs:
           submodules: recursive
       - uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version-file: .go-version
       - name: Verify the pinned Xray fixture
         run: |
           bash scripts/ci/fetch-traffic-test-xray.sh "$RUNNER_TEMP/traffic-e2e"

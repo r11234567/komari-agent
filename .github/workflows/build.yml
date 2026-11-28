@@ -19,7 +19,7 @@ jobs:
           submodules: recursive
       - uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version-file: .go-version
       - name: Verify protocol pin and release gates
         shell: bash
         run: |
@@ -80,7 +80,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version-file: .go-version
       - name: Run transport and runtime contract tests
         if: matrix.goos == 'linux'
         run: bash scripts/ci/run-go-tests.sh ./core/... ./clientcore ./server ./monitoring/unit ./terminal ./cmd

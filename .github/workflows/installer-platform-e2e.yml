@@ -41,7 +41,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version-file: .go-version
       # Both suites create real accounts and mutate system state. The recovery
       # suite checks that the default komari account is absent on entry.
       - name: Prepare Linux systemd dependencies
