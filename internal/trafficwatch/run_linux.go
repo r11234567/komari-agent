@@ -140,19 +140,21 @@ func runSampler(ctx context.Context, cfg Config, source sampler, done <-chan err
 }
 
 type processor struct {
-	cfg          Config
-	source       sampler
-	engine       *engine
-	counters     localCounters
-	attribution  bool
-	evidence     map[time.Time]evidence
-	boundary     time.Time
-	startedAt    time.Time
-	hour         hourSummary
-	eventID      string
-	eventShift   time.Duration
-	prunedAt     time.Time
-	retryHandoff bool
+	cfg              Config
+	source           sampler
+	engine           *engine
+	counters         localCounters
+	attribution      bool
+	evidence         map[time.Time]evidence
+	boundary         time.Time
+	startedAt        time.Time
+	hour             hourSummary
+	eventID          string
+	eventShift       time.Duration
+	prunedAt         time.Time
+	retryHandoff     bool
+	publishedThrough time.Time
+	readFailed       bool
 }
 
 func newProcessor(src sampler, cfg Config) *processor {
@@ -199,6 +201,9 @@ func (p *processor) tick(ctx context.Context, now time.Time) error {
 	slices, err := p.source.Next()
 	if err != nil {
 		log.Printf("Traffic flow slice incomplete: %v", err)
+		if len(slices) == 0 {
+			p.readFailed = true
+		}
 	}
 	for _, frame := range slices {
 		stats, available := p.evidence[frame.Start]
@@ -254,6 +259,22 @@ type hourSummary struct {
 	Services    map[string]Traffic `json:"services"`
 	Unexplained Traffic            `json:"unexplained"`
 	Partial     bool               `json:"partial"`
+	Coverage    *hourCoverage      `json:"coverage,omitempty"`
+	Attributed  map[string]Traffic `json:"attributed_services,omitempty"`
+}
+
+type hourCoverage struct {
+	Sampler        string    `json:"sampler"`
+	Interface      string    `json:"interface"`
+	ObservedSince  time.Time `json:"observed_since"`
+	CoveredSeconds uint32    `json:"covered_seconds"`
+	Sources        []string  `json:"sources,omitempty"`
+	Issues         []string  `json:"issues,omitempty"`
+	LatestIssues   []string  `json:"latest_issues,omitempty"`
+	Unmatched      uint64    `json:"unmatched_ip_bytes,omitempty"`
+	InvalidIP      uint64    `json:"invalid_ip_bytes,omitempty"`
+	Scope          string    `json:"observation_scope"`
+	LastScope      string    `json:"last_scope"`
 }
 
 func (p *processor) addHour(o observation, startedAt time.Time) error {
@@ -263,6 +284,7 @@ func (p *processor) addHour(o observation, startedAt time.Time) error {
 			return err
 		}
 		p.hour = hourSummary{Hour: hour, StartedAt: maxTime(o.Start, startedAt), Through: hour, Services: make(map[string]Traffic)}
+		p.publishedThrough = time.Time{}
 		body, err := readBoundedFile(p.hourPath(), maxSnapshotBytes)
 		if err == nil {
 			if err := json.Unmarshal(body, &p.hour); err != nil || !p.hour.Hour.Equal(hour) || p.hour.Services == nil {
@@ -272,11 +294,73 @@ func (p *processor) addHour(o observation, startedAt time.Time) error {
 			return err
 		}
 	}
-	if !o.End.After(p.hour.Through) {
-		p.hour.Partial = true // UTC moved into an already published interval.
+	if o.Start.Before(p.hour.Through) {
+		// A rollback can move a slice into a previously sealed interval.
+		// Its bytes cannot be split safely across the overlap.
+		if p.hour.Coverage != nil {
+			p.hour.Coverage.Issues = appendIssue(p.hour.Coverage.Issues, "clock_overlap")
+		}
 		return nil
 	}
-	p.hour.Partial = p.hour.Partial || !p.hour.Through.Equal(o.Start) || o.Partial || o.partial || o.servicePartial || o.Unknown != 0
+	scope := "host_addresses"
+	if s, ok := p.source.(interface{ observationScope() string }); ok {
+		scope = s.observationScope()
+	}
+	if p.hour.Coverage == nil {
+		p.hour.Coverage = &hourCoverage{Sampler: p.source.Name(), Interface: p.cfg.Interface, ObservedSince: o.Start, Scope: scope, LastScope: scope}
+		if p.hour.Through.After(hour) {
+			p.hour.Coverage.Issues = []string{"legacy_prefix"}
+			p.hour.Coverage.Scope = "mixed"
+		}
+	}
+	coverage := p.hour.Coverage
+	coverage.LatestIssues = nil
+	if p.readFailed {
+		coverage.LatestIssues = append(coverage.LatestIssues, "read_error")
+		p.readFailed = false
+	}
+	if coverage.Sampler != p.source.Name() || coverage.Interface != p.cfg.Interface || coverage.LastScope != scope {
+		coverage.Sampler, coverage.Interface = p.source.Name(), p.cfg.Interface
+		coverage.Scope, coverage.LastScope = "mixed", scope
+		coverage.LatestIssues = append(coverage.LatestIssues, "collector_changed")
+	}
+	if !p.hour.Through.Equal(o.Start) {
+		issue := "sample_gap"
+		if p.hour.Through.Equal(hour) {
+			issue = "started_mid_hour"
+		}
+		coverage.LatestIssues = append(coverage.LatestIssues, issue)
+	}
+	if o.Partial {
+		coverage.LatestIssues = append(coverage.LatestIssues, "incomplete_slice")
+	} else {
+		coverage.CoveredSeconds += uint32(o.End.Sub(o.Start) / time.Second)
+	}
+	if o.partial || o.servicePartial {
+		coverage.LatestIssues = append(coverage.LatestIssues, "attribution_unavailable")
+	}
+	if o.Unknown != 0 {
+		coverage.Unmatched += o.Unknown
+		issue := "unmatched_ip"
+		if !o.UnknownIncluded {
+			issue = "unmatched_excluded"
+		}
+		coverage.LatestIssues = append(coverage.LatestIssues, issue)
+	}
+	if o.InvalidIP != 0 {
+		coverage.InvalidIP += o.InvalidIP
+		coverage.LatestIssues = append(coverage.LatestIssues, "invalid_ip")
+	}
+	if o.PeerPartial {
+		coverage.LatestIssues = append(coverage.LatestIssues, "peer_detail_limited")
+	}
+	for _, issue := range coverage.LatestIssues {
+		coverage.Issues = appendIssue(coverage.Issues, issue)
+		// Outside-address packets describe the capture scope. A multicast,
+		// transit or other address is not by itself a missing host sample.
+		p.hour.Partial = p.hour.Partial || issue == "sample_gap" || issue == "started_mid_hour" || issue == "incomplete_slice" || issue == "invalid_ip" || issue == "collector_changed"
+	}
+	coverage.Sources = p.attributionSources()
 	p.hour.Through = o.End
 	p.hour.Observed = p.hour.Observed.add(o.totals())
 	w := observationWindow{Services: make(map[string]Traffic)}
@@ -288,10 +372,25 @@ func (p *processor) addHour(o observation, startedAt time.Time) error {
 	for name, count := range o.serviceTotals {
 		p.hour.Services[name] = p.hour.Services[name].add(count)
 	}
-	if o.End.Equal(hour.Add(time.Hour)) {
-		return p.flush()
+	return p.flush()
+}
+
+func appendIssue(issues []string, issue string) []string {
+	if !slices.Contains(issues, issue) {
+		return append(issues, issue)
 	}
-	return nil
+	return issues
+}
+
+func (p *processor) attributionSources() []string {
+	var sources []string
+	if p.cfg.Xray != nil {
+		sources = append(sources, "xray")
+	}
+	for _, service := range p.cfg.Services {
+		sources = appendIssue(sources, service.Group)
+	}
+	return sources
 }
 
 func (p *processor) hourPath() string {
@@ -299,14 +398,18 @@ func (p *processor) hourPath() string {
 }
 
 func (p *processor) flush() error {
-	if !p.hour.Through.After(maxTime(p.hour.Hour, p.hour.StartedAt)) {
+	if !p.hour.Through.After(maxTime(p.hour.Hour, p.hour.StartedAt)) || p.hour.Through.Equal(p.publishedThrough) {
 		return nil
 	}
 	data, err := json.Marshal(p.hour)
 	if err != nil {
 		return err
 	}
-	return p.saveRecord(filepath.Base(p.hourPath()), append(data, '\n'))
+	if err := p.saveRecord(filepath.Base(p.hourPath()), append(data, '\n')); err != nil {
+		return err
+	}
+	p.publishedThrough = p.hour.Through
+	return nil
 }
 
 func (p *processor) saveRecord(name string, body []byte) error {

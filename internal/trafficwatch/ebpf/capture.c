@@ -32,6 +32,7 @@ struct totals {
     __u64 unknown;
     __u64 first_ns;
     __u64 last_ns;
+    __u64 invalid_ip;
 };
 
 struct {
@@ -114,7 +115,7 @@ INLINE int account(struct __sk_buff *skb, __u8 ingress) {
     if (protocol == 0x0800) {
         __u8 ip[20];
         if (load(skb, header, ip, sizeof(ip)) || ip[0] >> 4 != 4) {
-            totals->unknown += size;
+            totals->invalid_ip += size;
             return -1;
         }
         mapped_v4(&source, ip + 12);
@@ -122,7 +123,7 @@ INLINE int account(struct __sk_buff *skb, __u8 ingress) {
     } else {
         __u8 ip[40];
         if (load(skb, header, ip, sizeof(ip)) || ip[0] >> 4 != 6) {
-            totals->unknown += size;
+            totals->invalid_ip += size;
             return -1;
         }
         __builtin_memcpy(&source, ip + 8, 16);
@@ -132,17 +133,20 @@ INLINE int account(struct __sk_buff *skb, __u8 ingress) {
     int source_local = lookup(&local_addrs, &source) != 0;
     int dest_local = lookup(&local_addrs, &dest) != 0;
     struct peer_key key = {.bucket = totals->bucket};
-    if (ingress && !source_local && dest_local) {
+    // The hook supplies direction even when neither address belongs to the
+    // host (forwarding, multicast, new addresses, etc.). The local map is
+    // diagnostic only; do not silently remove valid IP from interface totals.
+    if ((ingress && (source_local || !dest_local)) ||
+        (!ingress && (!source_local || dest_local)))
+        totals->unknown += size;
+    if (ingress) {
         key.addr = source;
         key.direction = 1;
         totals->received += size;
-    } else if (!ingress && source_local && !dest_local) {
+    } else {
         key.addr = dest;
         key.direction = 2;
         totals->sent += size;
-    } else {
-        totals->unknown += size;
-        return -1;
     }
 
     __u64 *count = lookup(&peer_bytes, &key);

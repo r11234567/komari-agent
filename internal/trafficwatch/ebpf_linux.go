@@ -36,6 +36,7 @@ type ebpfPeer struct {
 
 type ebpfTotals struct {
 	Bucket, RX, TX, Unknown, First, Last uint64
+	InvalidIP                            uint64
 }
 
 type ebpfSampler struct {
@@ -119,6 +120,8 @@ func bootNanos() (int64, error) {
 
 func (s *ebpfSampler) Name() string { return "ebpf" }
 
+func (s *ebpfSampler) observationScope() string { return "interface_ip" }
+
 func (s *ebpfSampler) captureTime() (time.Time, error) {
 	ns, err := bootNanos()
 	if err != nil {
@@ -153,7 +156,7 @@ func (s *ebpfSampler) Next() ([]sample, error) {
 	for i := range frames {
 		bucket := start + uint64(i)
 		stamp := ebpfTimestamp(bucket * uint64(captureSlice))
-		frames[i] = sample{Start: stamp, End: stamp.Add(captureSlice), RX: make(map[netip.Addr]uint64), TX: make(map[netip.Addr]uint64), Partial: bucket == s.first || (i == 0 && start != s.next)}
+		frames[i] = sample{Start: stamp, End: stamp.Add(captureSlice), RX: make(map[netip.Addr]uint64), TX: make(map[netip.Addr]uint64), Partial: bucket == s.first || (i == 0 && start != s.next), UnknownIncluded: true}
 	}
 	var key ebpfPeer
 	var count uint64
@@ -209,6 +212,7 @@ func applyEBPFTotals(frame *sample, bucket uint64, values []ebpfTotals) {
 		rx += value.RX
 		tx += value.TX
 		frame.Unknown += value.Unknown
+		frame.InvalidIP += value.InvalidIP
 		if first == 0 || value.First < first {
 			first = value.First
 		}
@@ -223,13 +227,19 @@ func applyEBPFTotals(frame *sample, bucket uint64, values []ebpfTotals) {
 	frame.TXOverflow, txMismatch = capEBPFPeers(frame.TX, tx)
 	// Missing peer detail is kept in overflow. Accurate direction totals
 	// must still be eligible to trigger a snapshot when the peer map fills.
-	frame.Partial = frame.Partial || rxMismatch || txMismatch
+	frame.PeerPartial = frame.PeerPartial || rxMismatch || txMismatch || frame.RXOverflow != 0 || frame.TXOverflow != 0
 }
 
 func capEBPFPeers(peers map[netip.Addr]uint64, observed uint64) (overflow uint64, partial bool) {
 	before := total(peers)
+	if before > observed {
+		// A raced peer-map iteration cannot overrule the independent bucket
+		// totals. Do not keep a misleading subset of peer counts.
+		clear(peers)
+		return observed, true
+	}
 	trimmed := trimPeers(peers, maxPeers)
-	return max(observed, before) - before + trimmed, before > observed
+	return observed - before + trimmed, false
 }
 
 func ebpfTimestamp(ns uint64) time.Time { return time.Unix(0, int64(ns)).UTC() }
