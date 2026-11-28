@@ -47,7 +47,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version-file: .go-version
       - name: Validate the pinned rescue publisher signing key
         env:
           KOMARI_RELEASE_SIGNING_KEY: ${{ secrets.KOMARI_RELEASE_SIGNING_KEY }}
@@ -97,7 +97,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version-file: .go-version
       - name: Build all architectures for this OS
         env:
           GOOS: ${{ matrix.goos }}
@@ -288,7 +288,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version-file: .go-version
 
       - name: Build static binaries for multi-arch
         env:

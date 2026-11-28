@@ -139,6 +139,7 @@ rescue_enabled=false
 setup_rescue_ssh=false
 rescue_endpoint=""
 rescue_token=""
+legacy_discovery_requested=false
 cf_access_client_id=""
 cf_access_client_secret=""
 ignore_unsafe_cert=false
@@ -260,10 +261,16 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --auto-discovery)
-            auto_discovery_key="$2"
+            legacy_discovery_requested=true
             komari_argv+=("$1" "$2")
             komari_args="$komari_args $1 $2"
             shift 2
+            ;;
+        --auto-discovery=?*)
+            legacy_discovery_requested=true
+            komari_argv+=("$1")
+            komari_args="$komari_args $1"
+            shift
             ;;
         --cf-access-client-id)
             cf_access_client_id="$2"
@@ -313,6 +320,20 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# A discovery key cannot register a node. Do this before any platform install
+# path can create an account, install packages or touch the registered service.
+if [ "$uninstall_only" != true ] && [ "$legacy_discovery_requested" = true ]; then
+    legacy_discovery_dir="$target_dir"
+    if [ "$os_name" = linux ] && [ "$install_dir_explicit" = false ]; then
+        legacy_discovery_dir="/usr/lib/komari/$service_name"
+    fi
+    legacy_discovery_file="${AGENT_AUTO_DISCOVERY_FILE:-$legacy_discovery_dir/auto-discovery.json}"
+    if [ ! -f "$legacy_discovery_file" ] || [ ! -s "$legacy_discovery_file" ]; then
+        log_error "Legacy auto-discovery cannot register a node. Remove --auto-discovery and enroll using komari-agent login."
+        exit 1
+    fi
+fi
 
 if { [ -n "$cf_access_client_id" ] && [ -z "$cf_access_client_secret" ]; } || { [ -z "$cf_access_client_id" ] && [ -n "$cf_access_client_secret" ]; }; then
     log_error "--cf-access-client-id and --cf-access-client-secret must be provided together"
@@ -1549,12 +1570,12 @@ fi
 mv -f "$staged_config" "$service_config_path" || exit 1
 
 agent_ready=false
-if [ -s "$credentials_path" ] || [ -n "$rescue_token" ] || [ -n "$auto_discovery_key" ]; then
+if [ -s "$credentials_path" ] || [ -n "$rescue_token" ] || [ "$legacy_discovery_requested" = true ]; then
     agent_ready=true
 fi
 for argument in "${komari_argv[@]}"; do
     case "$argument" in
-        --token=?*|-t=?*|--auto-discovery=?*|--config|--config=?*) agent_ready=true ;;
+        --token=?*|-t=?*|--config|--config=?*) agent_ready=true ;;
     esac
 done
 

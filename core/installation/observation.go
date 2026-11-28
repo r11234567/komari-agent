@@ -38,7 +38,7 @@ func Observe(config *flags_pkg.Config, startupID string, mode reportv1.Privilege
 	observation.DisableAutoUpdate = boolPointer(config.DisableAutoUpdate)
 	observation.IgnoreUnsafeCertificate = boolPointer(config.IgnoreUnsafeCert)
 	observation.DisableRemoteControl = boolPointer(config.DisableRemoteControl)
-	// update.CheckAndUpdate refuses daemon self-modification on every platform.
+	// The daemon never updates itself; installed releases are managed by Host.
 	observation.DaemonSelfUpdateSupported = boolPointer(false)
 	observation.ConfigFile = config.ConfigFile
 	observation.ServiceManifest = config.ServiceManifestFile

@@ -178,13 +178,6 @@ var RootCmd = &cobra.Command{
 		}
 		log.Println("Monitoring Interfaces:", interfaceList)
 
-		// Keep the startup diagnostic for legacy auto-update configurations.
-		if !flags.DisableAutoUpdate {
-			err := update.CheckAndUpdate()
-			if err != nil {
-				log.Println("[ERROR]", err)
-			}
-		}
 		// restarts counts consecutive session rebuilds. Rebuilding replays the
 		// whole handshake, so a panel that keeps ending sessions must be backed
 		// off rather than re-dialled on a fixed period: the latter is what makes
