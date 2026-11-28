@@ -3,6 +3,7 @@
 package files
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -10,6 +11,74 @@ import (
 
 	"golang.org/x/sys/unix"
 )
+
+var editAccessNames = [...]string{"system.posix_acl_access", "security.selinux"}
+
+func editAccessAttributes(file *os.File) ([][]byte, error) {
+	capabilities, err := readEditAttribute(file, "security.capability")
+	if err != nil {
+		return nil, err
+	}
+	if len(capabilities) != 0 {
+		return nil, errors.New("cannot edit a file with Linux capabilities")
+	}
+	attributes := make([][]byte, len(editAccessNames))
+	for i, name := range editAccessNames {
+		attributes[i], err = readEditAttribute(file, name)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return attributes, nil
+}
+
+func preserveEditAccessAttributes(file *os.File, attributes [][]byte) error {
+	for i, name := range editAccessNames {
+		existing, err := readEditAttribute(file, name)
+		if err != nil {
+			return err
+		}
+		if bytes.Equal(existing, attributes[i]) {
+			continue
+		}
+		if attributes[i] == nil {
+			err = tempFailureRetry(func() error { return unix.Fremovexattr(int(file.Fd()), name) })
+		} else {
+			err = tempFailureRetry(func() error { return unix.Fsetxattr(int(file.Fd()), name, attributes[i], 0) })
+		}
+		if err != nil {
+			return fmt.Errorf("preserve file attribute %s: %w", name, err)
+		}
+		if stored, err := readEditAttribute(file, name); err != nil || !bytes.Equal(stored, attributes[i]) {
+			return fmt.Errorf("could not verify preservation of file attribute %s", name)
+		}
+	}
+	return nil
+}
+
+func readEditAttribute(file *os.File, name string) ([]byte, error) {
+	fd := int(file.Fd())
+	var size int
+	err := tempFailureRetry(func() (err error) {
+		size, err = unix.Fgetxattr(fd, name, nil)
+		return err
+	})
+	switch {
+	case errors.Is(err, unix.ENODATA), errors.Is(err, unix.EOPNOTSUPP):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("read file attribute %s: %w", name, err)
+	}
+	value := make([]byte, size)
+	err = tempFailureRetry(func() (err error) {
+		size, err = unix.Fgetxattr(fd, name, value)
+		return err
+	})
+	if err != nil || size > len(value) {
+		return nil, fmt.Errorf("file attribute %s changed while reading", name)
+	}
+	return value[:size], nil
+}
 
 func openat2NoSymlinks(path string, flags int, mode uint32) (int, error) {
 	how := &unix.OpenHow{

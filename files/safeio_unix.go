@@ -3,6 +3,7 @@
 package files
 
 import (
+	"bytes"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -681,6 +683,17 @@ func replaceEditedFileSafe(path string, data, expected []byte) error {
 	if err != nil {
 		return err
 	}
+	if info.Mode()&(os.ModeSetuid|os.ModeSetgid) != 0 {
+		return errors.New("cannot edit a file with setuid or setgid permissions")
+	}
+	owner, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return errors.New("could not determine the existing file owner")
+	}
+	access, err := editAccessAttributes(target)
+	if err != nil {
+		return err
+	}
 	publication, name, err := createTempInDir(parent, ".komari-edit-")
 	if err != nil {
 		return err
@@ -692,18 +705,22 @@ func replaceEditedFileSafe(path string, data, expected []byte) error {
 	if _, err := publication.Write(data); err != nil {
 		return err
 	}
-	owner, err := statNoFollowInDir(parent, base)
-	if err != nil {
-		return err
-	}
-	if owner == nil {
-		return errFileEditConflict
-	}
 	if err := unix.Fchown(int(publication.Fd()), int(owner.Uid), int(owner.Gid)); err != nil {
 		return err
 	}
-	if err := unix.Fchmod(int(publication.Fd()), uint32(info.Mode().Perm())); err != nil {
+	if err := unix.Fchmod(int(publication.Fd()), syscallMode(info.Mode())); err != nil {
 		return err
+	}
+	if err := preserveEditAccessAttributes(publication, access); err != nil {
+		return err
+	}
+	replacement, err := publication.Stat()
+	if err != nil {
+		return err
+	}
+	if stat, ok := replacement.Sys().(*syscall.Stat_t); !ok || replacement.Mode() != info.Mode() ||
+		stat.Uid != owner.Uid || stat.Gid != owner.Gid {
+		return errors.New("cannot preserve the existing file mode and owner")
 	}
 	if err := publication.Sync(); err != nil {
 		return err
@@ -720,7 +737,15 @@ func replaceEditedFileSafe(path string, data, expected []byte) error {
 	if err != nil {
 		return err
 	}
-	if !unchangedEditTarget(info, latest) {
+	if stat, ok := latest.Sys().(*syscall.Stat_t); !ok || !unchangedEditTarget(info, latest) ||
+		stat.Uid != owner.Uid || stat.Gid != owner.Gid {
+		return errFileEditConflict
+	}
+	latestAccess, err := editAccessAttributes(current)
+	if err != nil {
+		return err
+	}
+	if !slices.EqualFunc(access, latestAccess, bytes.Equal) {
 		return errFileEditConflict
 	}
 	if err := renameInDir(parent, name, parent, base, true); err != nil {

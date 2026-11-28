@@ -41,10 +41,7 @@ func setupRescueSSH(args []string, out io.Writer) error {
 	if _, err := hostops.ReadPolicy(m); err != nil {
 		return err
 	}
-	if err := os.Setenv("PATH", "/usr/sbin:/usr/bin:/sbin:/bin"); err != nil {
-		return err
-	}
-	if err := os.Setenv("LC_ALL", "C"); err != nil {
+	if err := setRescueSSHCommandEnvironment(); err != nil {
 		return err
 	}
 	planCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -73,5 +70,34 @@ func setupRescueSSH(args []string, out io.Writer) error {
 		return err
 	}
 	fmt.Fprintln(out, "Temporary SSH is configured. The rescue panel will show it on the next helper status update.")
+	return nil
+}
+
+func setRescueSSHCommandEnvironment() error {
+	if err := os.Setenv("PATH", "/usr/sbin:/usr/bin:/sbin:/bin"); err != nil {
+		return err
+	}
+	return os.Setenv("LC_ALL", "C")
+}
+
+// apply already holds the host operation lock and completed fresh PAM in a
+// direct SSH session. Only prepare the empty entry point after rescue commits.
+func configureInstalledRescueSSH(m *hostops.Manifest, operator string, out io.Writer) error {
+	if err := confirmAuthSource(true, operator); err != nil {
+		return err
+	}
+	if err := setRescueSSHCommandEnvironment(); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	plan, err := rescue.PlanSSHWindow(ctx, m, rescue.SSHWindowSetupOptions{})
+	if err != nil {
+		return err
+	}
+	if err := plan.Apply(ctx); err != nil {
+		return err
+	}
+	fmt.Fprintln(out, plan.Description())
 	return nil
 }

@@ -10,9 +10,20 @@ import (
 )
 
 func TestConditionalFileEdit(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "editor.txt")
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	parentBefore, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "editor.txt")
 	initial := []byte("initial")
-	if err := os.WriteFile(path, initial, 0o640); err != nil {
+	if err := os.WriteFile(path, initial, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	old, err := os.Stat(path)
@@ -57,6 +68,9 @@ func TestConditionalFileEdit(t *testing.T) {
 	}
 	if info, err := os.Stat(path); err != nil || info.Size() != 0 || info.Mode().Perm() != old.Mode().Perm() {
 		t.Fatalf("replacement did not preserve permissions or truncate: %v %v", info, err)
+	}
+	if parent, err := os.Stat(dir); err != nil || !os.SameFile(parentBefore, parent) || parent.Mode() != parentBefore.Mode() {
+		t.Fatalf("editing a file changed the containing directory: %v %v", parent, err)
 	}
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
