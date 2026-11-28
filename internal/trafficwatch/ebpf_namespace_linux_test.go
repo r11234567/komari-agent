@@ -94,6 +94,35 @@ func TestAutomaticEBPFPublishesInterfaceTraffic(t *testing.T) {
 	// address map. Traffic to and from both still belongs to the same interface.
 	run("-n", node, "addr", "add", "192.0.2.9/24", "dev", "edge0")
 	run("-n", node, "addr", "add", "2001:db8::9/64", "dev", "edge0", "nodad")
+	// Keep a bound socket for each destination. ICMP port-unreachable packets
+	// can quote the entire UDP datagram and hide missing traffic in a test
+	// that only checks a lower bound.
+	receiver := `import pathlib,socket,sys,time
+sockets=[]
+for addr in sys.argv[2:]:
+    s=socket.socket(socket.AF_INET6 if ':' in addr else socket.AF_INET,socket.SOCK_DGRAM)
+    s.bind((addr,29122))
+    sockets.append(s)
+pathlib.Path(sys.argv[1]).touch()
+time.sleep(55)
+`
+	for _, fixture := range [][3]string{{node, "192.0.2.9", "2001:db8::9"}, {peer, "192.0.2.2", "2001:db8::2"}} {
+		ready := filepath.Join(state, fixture[0]+".ready")
+		cmd := exec.Command("ip", "netns", "exec", fixture[0], "python3", "-c", receiver, ready, fixture[1], fixture[2])
+		cmd.Stdout, cmd.Stderr = log, log
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+		for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+			if _, err := os.Stat(ready); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				fail("UDP receiver did not bind")
+			}
+		}
+	}
 	sender := `import socket,sys
 src,dst=sys.argv[1:]
 s=socket.socket(socket.AF_INET6 if ':' in src else socket.AF_INET,socket.SOCK_DGRAM)
@@ -131,7 +160,13 @@ for _ in range(10): s.sendto(b'x'*1000,(dst,29122))
 			unmatched += hour.Coverage.Unmatched
 		}
 		if rx >= directionMinimum && tx >= directionMinimum && unmatched >= 2*directionMinimum {
-			t.Logf("live while agent is running: RX=%d, TX=%d, unmatched=%d; per-direction test floor=%d bytes", rx, tx, unmatched, directionMinimum)
+			// Neighbor discovery is also IP traffic, but cannot explain a
+			// duplicate datagram burst (more than 10 kB per address family).
+			const neighborBudget = 2_000
+			if rx > directionMinimum+neighborBudget || tx > directionMinimum+neighborBudget || unmatched > rx+tx {
+				t.Fatalf("overcounted fixture: RX=%d TX=%d unmatched=%d", rx, tx, unmatched)
+			}
+			t.Logf("live while agent is running: RX=%d, TX=%d, unmatched=%d; per-direction payload and IP/UDP headers=%d bytes", rx, tx, unmatched, directionMinimum)
 			found = true
 			break
 		}
