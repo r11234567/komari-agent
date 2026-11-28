@@ -28,6 +28,13 @@ The important design split is:
 
 ## Common Build Conventions
 
+CI, Snapshot and stable releases read the same [platform list](../../scripts/ci/build-matrix.cjs)
+and use the same [binary build script](../../scripts/ci/build-targets.sh).
+Stable releases still sign each target separately. Update the platform list
+when changing support and keep the artifact upload and installer mappings in sync.
+The root [uninstaller](../../uninstall.sh) is canonical; keep the
+[historical raw URL](../../scripts/uninstall.sh) byte-identical.
+
 Binary names must remain compatible with the updater, installer scripts, and
 Dockerfile:
 

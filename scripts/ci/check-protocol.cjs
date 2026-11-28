@@ -27,7 +27,8 @@ function checkProtocol(root, resolveGo = false) {
   root = resolve(root);
   const submodule = resolve(root, SUBMODULE);
   assert.ok(existsSync(resolve(submodule, '.git')), 'protocol submodule is missing; run git submodule update --init --recursive');
-  assert.equal(realpathSync(git(submodule, 'rev-parse', '--show-toplevel')), realpathSync(submodule), 'protocol directory is not its own Git repository');
+  const canonical = p => (realpathSync.native ? realpathSync.native(p) : realpathSync(p));
+  assert.equal(canonical(git(submodule, 'rev-parse', '--show-toplevel')), canonical(submodule), 'protocol directory is not its own Git repository');
   const indexed = git(root, 'ls-files', '--stage', '--', SUBMODULE).match(/^160000 ([a-f0-9]{40}) 0\tthird_party\/komari-proto$/);
   assert.ok(indexed, 'protocol must be an unconflicted Git submodule in the index');
   assert.equal(git(root, 'config', '-f', '.gitmodules', '--get', `submodule.${SUBMODULE}.url`), URL, 'unexpected protocol repository');

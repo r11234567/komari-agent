@@ -21,6 +21,8 @@ concurrency:
 jobs:
   validate-ref:
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.targets.outputs.grouped }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -28,6 +30,9 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
+      - name: Read the supported build targets
+        id: targets
+        run: node scripts/ci/build-matrix.cjs >> "$GITHUB_OUTPUT"
       - name: Ensure snapshot target is main
         run: |
           if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
@@ -74,21 +79,13 @@ jobs:
           echo "Snapshot version: ${VERSION}"
 
   build-and-attach-binaries:
-    needs: prepare
+    needs: [prepare, validate-ref]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       max-parallel: 2
       matrix:
-        include:
-          - goos: linux
-            arches: amd64 arm64 386 arm loong64
-          - goos: windows
-            arches: amd64 arm64 386
-          - goos: darwin
-            arches: amd64 arm64
-          - goos: freebsd
-            arches: amd64 arm64 386 arm
+        include: ${{ fromJSON(needs.validate-ref.outputs.matrix) }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v7

@@ -13,10 +13,15 @@ jobs:
     permissions:
       contents: read
       actions: read
+    outputs:
+      matrix: ${{ steps.targets.outputs.grouped }}
     steps:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
+      - name: Read the supported build targets
+        id: targets
+        run: node scripts/ci/build-matrix.cjs >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@v6
         with:
           go-version-file: .go-version
@@ -27,6 +32,8 @@ jobs:
           mkdir -p ci-artifacts
           exec > >(tee ci-artifacts/protocol-and-release-policy.log) 2>&1
           trap 'echo "$?" > ci-artifacts/policy-exit.txt' EXIT
+          # Keep the historical raw uninstall URL compatible with the root script.
+          cmp uninstall.sh scripts/uninstall.sh
           node --test scripts/ci/release-policy.test.cjs scripts/ci/protocol-submodule.test.cjs
           node scripts/ci/check-protocol.cjs --resolve-go
       - name: Exercise release discovery with the actual Actions token and SDK
@@ -63,15 +70,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        include:
-          - goos: linux
-            arches: amd64 arm64 386 arm loong64
-          - goos: windows
-            arches: amd64 arm64 386
-          - goos: darwin
-            arches: amd64 arm64
-          - goos: freebsd
-            arches: amd64 arm64 386 arm
+        include: ${{ fromJSON(needs.protocol-and-release-policy.outputs.matrix) }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
