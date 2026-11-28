@@ -12,6 +12,77 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestEditPreservesNestedPathPermissions(t *testing.T) {
+	tests := []struct {
+		name                   string
+		file, parent, ancestor os.FileMode
+	}{
+		{"public script", 0o755, 0o755, 0o755},
+		{"private file in public path", 0o600, 0o755, 0o750},
+		{"public file in private path", 0o644, 0o700, 0o710},
+		{"group-shared file", 0o660, 0o770 | os.ModeSetgid, 0o750},
+		{"group-readable configuration", 0o640, 0o750 | os.ModeSetgid, 0o711},
+		{"read-only file in sticky directory", 0o444, 0o777 | os.ModeSticky, 0o755},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ancestor := filepath.Join(t.TempDir(), "outer")
+			parent := filepath.Join(ancestor, "inner")
+			path := filepath.Join(parent, "editor.txt")
+			if err := os.MkdirAll(parent, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			original := []byte("first version")
+			if err := os.WriteFile(path, original, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for name, mode := range map[string]os.FileMode{path: test.file, parent: test.parent, ancestor: test.ancestor} {
+				if err := os.Chmod(name, mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			type permissions struct {
+				mode     os.FileMode
+				uid, gid uint32
+			}
+			statPermissions := func(name string) permissions {
+				t.Helper()
+				info, err := os.Stat(name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				stat := info.Sys().(*syscall.Stat_t)
+				return permissions{info.Mode(), stat.Uid, stat.Gid}
+			}
+			names := []string{path, parent, ancestor}
+			baseline := make([]permissions, len(names))
+			for i, name := range names {
+				baseline[i] = statPermissions(name)
+			}
+			if baseline[0].mode != test.file || baseline[1].mode != test.parent|os.ModeDir ||
+				baseline[2].mode != test.ancestor|os.ModeDir {
+				t.Fatalf("fixture mode mismatch: %v", baseline)
+			}
+			expected := sha256.Sum256(original)
+			for _, replacement := range [][]byte{[]byte("different content"), nil} {
+				if err := replaceEditedFileSafe(path, replacement, expected[:]); err != nil {
+					t.Fatal(err)
+				}
+				actual, err := os.ReadFile(path)
+				if err != nil || !bytes.Equal(actual, replacement) {
+					t.Fatalf("unexpected saved content: %q %v", actual, err)
+				}
+				for i, name := range names {
+					if got := statPermissions(name); got != baseline[i] {
+						t.Fatalf("permissions of %s changed from %+v to %+v", name, baseline[i], got)
+					}
+				}
+				expected = sha256.Sum256(replacement)
+			}
+		})
+	}
+}
+
 func TestEditPreservesLinuxAccessACL(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "editor.txt")
