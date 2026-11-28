@@ -65,10 +65,11 @@ func TestHashMatchesProtocolVectors(t *testing.T) {
 		t.Fatal(err)
 	}
 	var vectors []struct {
-		Booleans             [5]int                 `json:"booleans"`
-		Mode                 reportv1.PrivilegeMode `json:"required_privilege_mode"`
-		RootExecutionAllowed bool                   `json:"root_execution_allowed"`
-		Hash                 string                 `json:"sha256"`
+		Booleans                 [5]int                 `json:"booleans"`
+		Mode                     reportv1.PrivilegeMode `json:"required_privilege_mode"`
+		RootExecutionAllowed     bool                   `json:"root_execution_allowed"`
+		TrafficMonitoringEnabled bool                   `json:"traffic_monitoring_enabled"`
+		Hash                     string                 `json:"sha256"`
 	}
 	if err := json.Unmarshal(data, &vectors); err != nil {
 		t.Fatal(err)
@@ -78,13 +79,14 @@ func TestHashMatchesProtocolVectors(t *testing.T) {
 	}
 	for i, vector := range vectors {
 		settings := Settings{
-			RemoteControlEnabled:  vector.Booleans[0] != 0,
-			WebSSHEnabled:         vector.Booleans[1] != 0,
-			ExecutionEnabled:      vector.Booleans[2] != 0,
-			EnableGPU:             vector.Booleans[3] != 0,
-			RescueHelperEnabled:   vector.Booleans[4] != 0,
-			RequiredPrivilegeMode: vector.Mode,
-			RootExecutionAllowed:  vector.RootExecutionAllowed,
+			RemoteControlEnabled:     vector.Booleans[0] != 0,
+			WebSSHEnabled:            vector.Booleans[1] != 0,
+			ExecutionEnabled:         vector.Booleans[2] != 0,
+			EnableGPU:                vector.Booleans[3] != 0,
+			RescueHelperEnabled:      vector.Booleans[4] != 0,
+			RequiredPrivilegeMode:    vector.Mode,
+			RootExecutionAllowed:     vector.RootExecutionAllowed,
+			TrafficMonitoringEnabled: vector.TrafficMonitoringEnabled,
 		}
 		if got := Hash(settings); got != vector.Hash {
 			t.Errorf("protocol vector %d: hash = %q, want %q", i, got, vector.Hash)

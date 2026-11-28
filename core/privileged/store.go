@@ -41,13 +41,14 @@ const (
 // state file leaves the Agent with the narrowest capabilities rather than
 // silently restoring something wider.
 type Settings struct {
-	RequiredPrivilegeMode reportv1.PrivilegeMode `json:"required_privilege_mode"`
-	RemoteControlEnabled  bool                   `json:"remote_control_enabled"`
-	WebSSHEnabled         bool                   `json:"webssh_enabled"`
-	ExecutionEnabled      bool                   `json:"execution_enabled"`
-	RootExecutionAllowed  bool                   `json:"root_execution_allowed"`
-	EnableGPU             bool                   `json:"enable_gpu"`
-	RescueHelperEnabled   bool                   `json:"rescue_helper_enabled"`
+	RequiredPrivilegeMode    reportv1.PrivilegeMode `json:"required_privilege_mode"`
+	RemoteControlEnabled     bool                   `json:"remote_control_enabled"`
+	WebSSHEnabled            bool                   `json:"webssh_enabled"`
+	ExecutionEnabled         bool                   `json:"execution_enabled"`
+	RootExecutionAllowed     bool                   `json:"root_execution_allowed"`
+	TrafficMonitoringEnabled bool                   `json:"traffic_monitoring_enabled,omitempty"`
+	EnableGPU                bool                   `json:"enable_gpu"`
+	RescueHelperEnabled      bool                   `json:"rescue_helper_enabled"`
 }
 
 // State is what this host persists about the privileged track.
@@ -263,13 +264,14 @@ func describePrivilege(mode reportv1.PrivilegeMode) string {
 
 func settingsFromProto(value *configv1.PrivilegedConfig) Settings {
 	return Settings{
-		RequiredPrivilegeMode: value.GetRequiredPrivilegeMode(),
-		RemoteControlEnabled:  value.GetRemoteControlEnabled(),
-		WebSSHEnabled:         value.GetWebsshEnabled(),
-		ExecutionEnabled:      value.GetExecutionEnabled(),
-		RootExecutionAllowed:  value.GetRootExecutionAllowed(),
-		EnableGPU:             value.GetEnableGpu(),
-		RescueHelperEnabled:   value.GetRescueHelperEnabled(),
+		RequiredPrivilegeMode:    value.GetRequiredPrivilegeMode(),
+		RemoteControlEnabled:     value.GetRemoteControlEnabled(),
+		WebSSHEnabled:            value.GetWebsshEnabled(),
+		ExecutionEnabled:         value.GetExecutionEnabled(),
+		RootExecutionAllowed:     value.GetRootExecutionAllowed(),
+		TrafficMonitoringEnabled: value.GetTrafficMonitoringEnabled(),
+		EnableGPU:                value.GetEnableGpu(),
+		RescueHelperEnabled:      value.GetRescueHelperEnabled(),
 	}
 }
 

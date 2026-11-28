@@ -104,7 +104,9 @@ type Client struct {
 	store          *runtimeconfig.Store
 	// privilegedStore is daemon-owned. Only a verified current v2 approval can
 	// activate a same-identity candidate; host actions remain unavailable.
-	privilegedStore *privileged.Store
+	privilegedStore           *privileged.Store
+	trafficMonitoring         atomic.Pointer[reportv1.TrafficMonitoringStatus]
+	reportedTrafficMonitoring atomic.Pointer[reportv1.TrafficMonitoringStatus]
 	// credentialStore holds the enrolled identity, including the panel signing
 	// keys this Agent pinned. It is what makes a delivered instruction
 	// attributable rather than merely well-formed.
@@ -386,6 +388,13 @@ func (c *Client) Run(ctx context.Context) error {
 				c.runTrafficEvidence(trafficCtx, identity, inbox)
 			}()
 			defer func() { stopTraffic(); <-evidenceDone }()
+		} else {
+			monitoringDone := make(chan struct{})
+			go func() {
+				defer close(monitoringDone)
+				c.runManagedTrafficMonitoring(trafficCtx, identity)
+			}()
+			defer func() { stopTraffic(); <-monitoringDone }()
 		}
 	}
 	// Renewal starts before configuration synchronization so an expired AT or
@@ -1194,7 +1203,7 @@ func (c *Client) runMetricStream(ctx context.Context) error {
 			// from the base interval rather than from an earlier failure streak.
 			streamRetry.Reset()
 			pending = nil
-			if !time.Now().Before(nextInfoReport) {
+			if !time.Now().Before(nextInfoReport) || c.trafficMonitoringReportPending() {
 				if streamErr = c.SubmitReport(ctx); streamErr != nil {
 					break
 				}
@@ -1276,7 +1285,7 @@ func (c *Client) runUnaryMetricLoop(ctx context.Context) error {
 			continue
 		}
 	metricsDone:
-		if !time.Now().Before(nextInfoReport) {
+		if !time.Now().Before(nextInfoReport) || c.trafficMonitoringReportPending() {
 			if err := c.SubmitReport(ctx); err != nil {
 				if permanentCredentialRejection(err) {
 					log.Printf("[FATAL] The enrollment service rejected refresh credentials. Stopping all probes and polling. Please re-enroll via 'komari-agent login'")
@@ -1352,10 +1361,24 @@ func (c *Client) SubmitReport(parent context.Context) error {
 	defer cancel()
 	report := monitoring.CollectReport().Proto(c.agentIDValue(), c.sequence.Add(1))
 	report.Metadata.Installation = installation.Observe(c.cfg, c.startupID, report.Metadata.GetCapabilities().GetPrivilegeMode())
+	if report.Metadata.Capabilities != nil {
+		report.Metadata.Capabilities.TrafficMonitoring = c.trafficMonitoringStatus()
+	}
 	req := connect.NewRequest(&reportv1.SubmitReportRequest{Report: report})
 	c.authorize(req.Header())
 	_, err := c.report.SubmitReport(ctx, req)
+	if err == nil {
+		c.reportedTrafficMonitoring.Store(report.Metadata.GetCapabilities().GetTrafficMonitoring())
+	}
 	return err
+}
+
+// Report status changes on the next metrics cycle without shortening the
+// ordinary basic-info reporting interval for nodes with a steady status.
+func (c *Client) trafficMonitoringReportPending() bool {
+	current := c.trafficMonitoring.Load()
+	previous := c.reportedTrafficMonitoring.Load()
+	return current != nil && (current.State != previous.GetState() || current.InterfaceName != previous.GetInterfaceName())
 }
 
 func (c *Client) SyncConfig(parent context.Context) error {
