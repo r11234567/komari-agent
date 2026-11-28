@@ -53,7 +53,7 @@ func TestTemporarySSHWindowNftables(t *testing.T) {
 		}
 	}
 	configPath := filepath.Join(dir, "test.temporary-ssh.json")
-	checkStatus("SSH_CONFIG_MISSING", configPath, 0)
+	checkStatus("SSH_FIREWALL_UNSUPPORTED", "no native nftables inet input", 0)
 	if err := os.WriteFile(configPath, []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -100,6 +100,7 @@ func TestTemporarySSHWindowNftables(t *testing.T) {
 	if err := config.apply(t.Context(), firewall); err != nil {
 		t.Fatal(err)
 	}
+	checkStatus("SSH_CONFIG_MISSING", configPath, 0)
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)

@@ -29,6 +29,7 @@ const sshWindowV6Set = "komari_rescue_ssh_v6"
 // The local administrator names the table and chain that contain the rescue
 // rules. The two sets are dedicated to this helper and start empty.
 type sshWindowConfig struct {
+	Backend   string `json:"backend,omitempty"`
 	Table     string `json:"table"`
 	Chain     string `json:"chain"`
 	Interface string `json:"interface"`
@@ -61,8 +62,9 @@ func loadSSHWindowConfig(manifest *hostops.Manifest) (sshWindowConfig, error) {
 	if err := hostops.ReadJSON(path, &config, true); err != nil {
 		return config, fmt.Errorf("read temporary SSH settings: %w", err)
 	}
-	if !sshNftIdentifier.MatchString(config.Table) || !sshNftIdentifier.MatchString(config.Chain) ||
-		config.Port == 0 || config.Port > 65535 || !validSSHWindowInterface(config.Interface) {
+	validBackend := config.Backend == "" && sshNftIdentifier.MatchString(config.Table) && sshNftIdentifier.MatchString(config.Chain) ||
+		config.Backend == sshWindowUFW && config.Table == "" && config.Chain == ""
+	if !validBackend || config.Port == 0 || config.Port > 65535 || !validSSHWindowInterface(config.Interface) {
 		return config, errors.New("invalid temporary SSH table, chain, interface or port")
 	}
 	config.statePath = strings.TrimSuffix(path, ".json") + "-state.json"
@@ -92,7 +94,7 @@ func (config sshWindowConfig) saveState(state sshWindowState) error {
 	return atomicWrite(config.statePath, data, 0o600)
 }
 
-func (grant *sshWindowGrant) receipt(active bool) *rescuev1.TemporarySSHAccess {
+func (config sshWindowConfig) receipt(grant *sshWindowGrant, active bool) *rescuev1.TemporarySSHAccess {
 	if grant == nil {
 		return nil
 	}
@@ -100,6 +102,9 @@ func (grant *sshWindowGrant) receipt(active bool) *rescuev1.TemporarySSHAccess {
 		Port: grant.Port, Granted: active, GrantedAt: timestamppb.New(grant.StartedAt),
 		ExpiresAt: timestamppb.New(grant.ExpiresAt), SourceIp: grant.Source.String(), GrantId: grant.ID,
 		ExpiryMechanism: rescuev1.ExpiryMechanism_EXPIRY_MECHANISM_NFTABLES_TIMEOUT,
+	}
+	if config.Backend == sshWindowUFW {
+		receipt.ExpiryMechanism = rescuev1.ExpiryMechanism_EXPIRY_MECHANISM_IPSET_TIMEOUT
 	}
 	if active && grant.ListenIP != "" {
 		receipt.SshdState = &rescuev1.SSHDaemonState{Running: true, Reachable: true,
@@ -119,6 +124,13 @@ func sshWindowStatus(ctx context.Context, manifest *hostops.Manifest, key string
 		code := "SSH_CONFIG_INVALID"
 		if errors.Is(err, os.ErrNotExist) {
 			code = "SSH_CONFIG_MISSING"
+			_, failureErr := checkSSHWindowFirewall(ctx)
+			var failure *sshWindowSetupError
+			if errors.As(failureErr, &failure) {
+				code, err = failure.code, failure
+			} else {
+				err = fmt.Errorf("%w; run komari-host setup-rescue-ssh --check on the node to see what setup needs", err)
+			}
 		}
 		status.SshWindowError = sshWindowDiagnostic(code, err)
 		return
@@ -131,6 +143,9 @@ func sshWindowStatus(ctx context.Context, manifest *hostops.Manifest, key string
 		if errors.Is(err, errSSHWindowRules) {
 			code = "SSH_NFT_RULES_INVALID"
 		}
+		if config.Backend == sshWindowUFW {
+			code = "SSH_UFW_CHECK_FAILED"
+		}
 		status.SshWindowError = sshWindowDiagnostic(code, err)
 		return
 	}
@@ -141,9 +156,9 @@ func sshWindowStatus(ctx context.Context, manifest *hostops.Manifest, key string
 	}
 	status.SshAccessPort = config.Port
 	if grant != nil && grant.Key == key {
-		status.SshAccess = grant.receipt(true)
+		status.SshAccess = config.receipt(grant, true)
 	} else if state.Current != nil && state.Current.Key == key {
-		status.SshAccess = state.Current.receipt(false)
+		status.SshAccess = config.receipt(state.Current, false)
 	}
 }
 
@@ -230,7 +245,7 @@ func (config sshWindowConfig) grant(ctx context.Context, session *rescuev1.Rescu
 	}
 	if state.Current != nil {
 		if state.Current.ID == session.GetSessionId() && active != nil {
-			receipt := active.receipt(true)
+			receipt := config.receipt(active, true)
 			receipt.SshdState = inspectSSHWindowListener(ctx, config, source)
 			return ActionResult{SSHAccess: receipt}, nil
 		}
@@ -265,16 +280,7 @@ func (config sshWindowConfig) grant(ctx context.Context, session *rescuev1.Rescu
 	if err := config.saveState(state); err != nil {
 		return result, err
 	}
-	set := sshWindowV6Set
-	if source.Is4() {
-		set = sshWindowV4Set
-	}
-	// Both dedicated sets and the new element commit together. The element
-	// comment lets a restarted helper distinguish a committed replacement
-	// from a failed transaction even if both requests use the same source.
-	batch := config.flushCommands() + fmt.Sprintf("add element inet %s %s { %s timeout %s comment %q }\n",
-		config.Table, set, source, durationForNft(duration), grant.ID)
-	applyErr := config.apply(ctx, batch)
+	applyErr := config.replaceKernelGrant(ctx, grant)
 	verify, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	snapshot, err = config.inspect(verify, true)
@@ -288,7 +294,7 @@ func (config sshWindowConfig) grant(ctx context.Context, session *rescuev1.Rescu
 	if active == nil || active.ID != grant.ID {
 		return result, errors.Join(errors.New("temporary SSH rule and timeout were not confirmed"), applyErr)
 	}
-	result.SSHAccess = active.receipt(true)
+	result.SSHAccess = config.receipt(active, true)
 	result.SSHAccess.SshdState = listener
 	return result, nil
 }
@@ -316,17 +322,17 @@ func (config sshWindowConfig) revoke(ctx context.Context, key, id string) (Actio
 		return ActionResult{}, err
 	}
 	if active != nil && active.Key == key && (id == "" || id == active.ID) {
-		applyErr := config.apply(ctx, config.flushCommands())
+		applyErr := config.clearKernelGrant(ctx)
 		verify, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		if remaining, err := config.inspect(verify, false); err != nil || remaining != nil {
 			return ActionResult{}, errors.Join(errors.New("temporary SSH removal was not confirmed"), applyErr, err)
 		}
 		logSSHWindow("revoked", config, active)
-		return ActionResult{SSHAccess: active.receipt(false)}, nil
+		return ActionResult{SSHAccess: config.receipt(active, false)}, nil
 	}
 	if state.Current != nil && state.Current.Key == key && state.Current.ID == id {
-		return ActionResult{SSHAccess: state.Current.receipt(false)}, nil
+		return ActionResult{SSHAccess: config.receipt(state.Current, false)}, nil
 	}
 	return ActionResult{}, nil
 }
