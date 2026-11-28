@@ -38,6 +38,8 @@ type sample struct {
 	RX, TX                  map[netip.Addr]uint64
 	RXOverflow, TXOverflow  uint64
 	Unknown                 uint64
+	UnknownIncluded         bool
+	InvalidIP               uint64
 	Partial                 bool
 	PeerPartial             bool
 }

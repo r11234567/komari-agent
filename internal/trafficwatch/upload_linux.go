@@ -15,7 +15,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// ReadUpload reads only a completed analyzer record from the handoff directory.
+// ReadUpload reads a sealed revision of an hour or incident from the handoff.
 func ReadUpload(root *os.Root, name string, enrolled, now time.Time) (*metrics.SubmitTrafficEvidenceRequest, error) {
 	base, ok := strings.CutSuffix(name, ".json")
 	if !ok {
@@ -78,10 +78,24 @@ func ReadUpload(root *os.Root, name string, enrolled, now time.Time) (*metrics.S
 		for name, count := range h.Services {
 			services[name] = evidenceBytes(count)
 		}
+		attributed := make(map[string]*metrics.TrafficEvidenceBytes, len(h.Attributed))
+		for name, count := range h.Attributed {
+			attributed[name] = evidenceBytes(count)
+		}
+		var coverage *metrics.TrafficEvidenceCoverage
+		if c := h.Coverage; c != nil {
+			coverage = &metrics.TrafficEvidenceCoverage{
+				Sampler: c.Sampler, InterfaceName: c.Interface, ObservedSince: evidenceTime(c.ObservedSince),
+				CoveredSeconds: c.CoveredSeconds, AttributionSources: c.Sources, Issues: c.Issues,
+				LatestIssues: c.LatestIssues, UnmatchedIpBytes: c.Unmatched,
+				ObservationScope: c.Scope, InvalidIpBytes: c.InvalidIP,
+			}
+		}
 		return &metrics.SubmitTrafficEvidenceRequest{Record: &metrics.SubmitTrafficEvidenceRequest_Hour{
 			Hour: &metrics.TrafficEvidenceHour{
 				HourUtc: timestamppb.New(h.Hour), Through: timestamppb.New(h.Through),
 				Observed: evidenceBytes(h.Observed), Services: services, Unexplained: evidenceBytes(h.Unexplained), Partial: h.Partial,
+				Coverage: coverage, AttributedServices: attributed,
 			},
 		}}, nil
 	}

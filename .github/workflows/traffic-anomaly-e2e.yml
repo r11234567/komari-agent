@@ -57,6 +57,11 @@ jobs:
       - name: Test policy, counters and incident retention
         if: matrix.image == 'native' && matrix.sampler == 'ebpf'
         run: bash scripts/ci/run-audit-check.sh traffic-anomaly-unit go test -race ./internal/trafficwatch
+      - name: Verify live automatic capture of IPv4 and IPv6 on TCX
+        if: matrix.image == 'native' && matrix.sampler == 'ebpf'
+        run: |
+          go test -c -o "$RUNNER_TEMP/traffic-watch.test" ./internal/trafficwatch
+          bash scripts/ci/run-audit-check.sh traffic-automatic-tcx sudo env KOMARI_TEST_TCX=1 "$RUNNER_TEMP/traffic-watch.test" -test.run='^TestAutomaticEBPFPublishesInterfaceTraffic$' -test.v
       - name: Build the actual Linux Agent
         run: CGO_ENABLED=0 go build -o "$RUNNER_TEMP/traffic-e2e/komari-agent" .
       - name: Capture real network flows on Ubuntu

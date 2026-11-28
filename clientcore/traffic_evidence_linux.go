@@ -6,6 +6,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -58,6 +60,20 @@ func (c *Client) sendTrafficEvidence(ctx context.Context, identity credentials.I
 		}
 	}
 	now := time.Now().UTC()
+	currentHour := "hour-" + now.Format("20060102T15") + ".json"
+	priority := func(name string) int {
+		switch {
+		case name == currentHour:
+			return 0
+		case strings.HasPrefix(name, "event-"):
+			return 1
+		default:
+			return 2
+		}
+	}
+	slices.SortStableFunc(entries, func(a, b os.DirEntry) int {
+		return priority(a.Name()) - priority(b.Name())
+	})
 	sent := 0
 	for _, entry := range entries {
 		if ctx.Err() != nil || sent == 12 {

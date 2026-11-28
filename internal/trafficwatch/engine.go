@@ -40,7 +40,7 @@ func (i *incident) add(o observation) {
 	if i.Start.IsZero() {
 		i.Start = o.Start
 	}
-	i.Partial = i.Partial || o.Partial || o.partial || o.PeerPartial || o.Unknown != 0 ||
+	i.Partial = i.Partial || o.Partial || o.partial || o.PeerPartial || o.InvalidIP != 0 || (o.Unknown != 0 && !o.UnknownIncluded) ||
 		(!i.End.IsZero() && !i.End.Equal(o.Start)) || o.RXOverflow != 0 || o.TXOverflow != 0
 	i.End = o.End
 	i.Complete = !o.End.Before(i.until)

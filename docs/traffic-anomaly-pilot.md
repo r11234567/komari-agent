@@ -133,3 +133,9 @@ StatsService 仅监听本机回环。配置的标签排除管理 API、阻断出
 真实网络回归位于 `scripts/ci/test-traffic-anomaly.py`。它启动实际二进制，在隔离 Linux 网络命名空间中运行 Xray 和流量工具，覆盖分路代理、IPv4/IPv6 入站、持续 TCP 出站和普通流量零取证文件。eBPF 矩阵覆盖原生 Ubuntu 24.04，以及 Debian 13、Rocky Linux 9、无 systemd 的 Alpine 3.22 容器。容器使用 runner 的 Linux 内核。Ubuntu 另跑一项 `nfpcapd` 兼容回归。
 
 内核探针源码位于 `internal/trafficwatch/ebpf/capture.c`。修改后在 Linux 用 `bash scripts/ci/build-traffic-ebpf.sh` 重新生成两种字节序的对象，默认使用 `clang-18`。常规 Go 构建使用嵌入的对象。
+
+eBPF 按 TCX 入/出方向统计所选以太网接口观察到的有效 IPv4/IPv6 字节，去除探针可见的以太网和 VLAN 头。本机地址列表仅用于诊断，不再限制 eBPF 收发总量；列表外计数是总量的子集。nfpcapd 仍使用配置的本机地址作为观测范围。其他网卡、非 IP 报文以及抓包钩子外的流量不在此口径内。
+
+每个 30 秒片封口后更新同一个小时文件，并原样交给现有上传器。重新启动时继续该小时的存档，重叠的片不会重复累计。可用 `KOMARI_TEST_TCX=1 go test ./internal/trafficwatch -run TestAutomaticEBPFPublishesInterfaceTraffic -v` 在有 TCX 和网络命名空间权限的隔离 Linux 环境验证实时输出。
+
+小时服务计数仍用于诊断；全局 Xray 计数和 systemd IPAccounting 无法独立证明逐字节与网卡流量吻合，因此不会被当作图表上已归因的字节。
