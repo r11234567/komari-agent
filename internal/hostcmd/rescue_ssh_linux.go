@@ -17,6 +17,7 @@ func setupRescueSSH(args []string, out io.Writer) error {
 	options := flag.NewFlagSet("setup-rescue-ssh", flag.ContinueOnError)
 	options.SetOutput(out)
 	manifestPath := options.String("manifest", "", "installed service manifest")
+	checkOnly := options.Bool("check", false, "diagnose compatibility without changing firewall rules or settings")
 	nftConfig := options.String("nft-config", "", "persistent nftables entry file (auto-detected by default)")
 	network := options.String("interface", "", "public interface when default routes are ambiguous")
 	port := options.Uint("port", 0, "local SSH port when more than one listener is present")
@@ -29,7 +30,7 @@ func setupRescueSSH(args []string, out io.Writer) error {
 		return errors.New("provide --manifest, an optional TCP port and both --table and --chain if overriding the input hook")
 	}
 	if os.Geteuid() != 0 {
-		return errors.New("temporary SSH setup requires root in a direct SSH session")
+		return errors.New("run temporary SSH setup with sudo; apply changes from a direct SSH session")
 	}
 	m, err := hostops.ReadManifest(*manifestPath)
 	if err != nil {
@@ -54,6 +55,11 @@ func setupRescueSSH(args []string, out io.Writer) error {
 	}
 	fmt.Fprintln(out, plan.Description())
 	if plan.Configured() {
+		fmt.Fprintln(out, "Existing temporary SSH settings and firewall entry point verified.")
+		return nil
+	}
+	if *checkOnly {
+		fmt.Fprintln(out, "Found an SSH listener and a compatible firewall entry point. To finish setup, rerun without --check from a direct SSH session.")
 		return nil
 	}
 	if _, err := authenticate(true); err != nil {

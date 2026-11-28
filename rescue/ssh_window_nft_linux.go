@@ -47,6 +47,9 @@ type sshWindowNftTable struct {
 // inspect checks the narrow rules linked to both sets. Their placement
 // relative to other rules is managed by the host's firewall configuration.
 func (config sshWindowConfig) inspect(ctx context.Context, requireHook bool) (*sshWindowElement, error) {
+	if config.Backend == sshWindowUFW {
+		return config.inspectUFW(ctx, requireHook)
+	}
 	output, stderr, err := platformCommand(ctx, "nft", "-j", "list", "table", "inet", config.Table)
 	if err != nil {
 		if !requireHook && strings.Contains(string(stderr), "No such file or directory") {
@@ -146,6 +149,27 @@ func (config sshWindowConfig) flushCommands() string {
 		config.Table, sshWindowV4Set, config.Table, sshWindowV6Set)
 }
 
+func (config sshWindowConfig) replaceKernelGrant(ctx context.Context, grant *sshWindowGrant) error {
+	if config.Backend == sshWindowUFW {
+		return config.replaceUFWGrant(ctx, grant)
+	}
+	set := sshWindowV6Set
+	if grant.Source.Is4() {
+		set = sshWindowV4Set
+	}
+	// The two dedicated sets and the new element commit together.
+	batch := config.flushCommands() + fmt.Sprintf("add element inet %s %s { %s timeout %s comment %q }\n",
+		config.Table, set, grant.Source, durationForNft(grant.ExpiresAt.Sub(grant.StartedAt)), grant.ID)
+	return config.apply(ctx, batch)
+}
+
+func (config sshWindowConfig) clearKernelGrant(ctx context.Context) error {
+	if config.Backend == sshWindowUFW {
+		return config.clearUFWGrant(ctx)
+	}
+	return config.apply(ctx, config.flushCommands())
+}
+
 func (config sshWindowConfig) apply(ctx context.Context, batch string) error {
 	command := exec.CommandContext(ctx, "nft", "-f", "-")
 	command.Stdin = strings.NewReader(batch)
@@ -200,6 +224,10 @@ func (config sshWindowConfig) reconcile(element *sshWindowElement) (sshWindowSta
 }
 
 func logSSHWindow(action string, config sshWindowConfig, grant *sshWindowGrant) {
-	log.Printf("temporary SSH %s grant=%s backend=nftables table=%s chain=%s interface=%s port=%d source=%s expires=%s",
-		action, grant.ID, config.Table, config.Chain, config.Interface, config.Port, grant.Source, grant.ExpiresAt.Format(time.RFC3339))
+	backend := config.Backend
+	if backend == "" {
+		backend = "nftables"
+	}
+	log.Printf("temporary SSH %s grant=%s backend=%s table=%s chain=%s interface=%s port=%d source=%s expires=%s",
+		action, grant.ID, backend, config.Table, config.Chain, config.Interface, config.Port, grant.Source, grant.ExpiresAt.Format(time.RFC3339))
 }

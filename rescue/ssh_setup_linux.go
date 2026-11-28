@@ -33,6 +33,9 @@ type SSHWindowSetup struct {
 func (s SSHWindowSetup) Configured() bool { return s.configured }
 
 func (s SSHWindowSetup) Description() string {
+	if s.config.Backend == sshWindowUFW {
+		return fmt.Sprintf("Temporary SSH: TCP %d on %s, UFW with kernel ipset timeouts", s.config.Port, s.config.Interface)
+	}
 	return fmt.Sprintf("Temporary SSH: TCP %d on %s, nftables inet %s/%s", s.config.Port, s.config.Interface, s.config.Table, s.config.Chain)
 }
 
@@ -52,12 +55,12 @@ func PlanSSHWindow(ctx context.Context, m *hostops.Manifest, options SSHWindowSe
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return setup, err
 	}
-	mechanism, err := detectFirewallMechanism(ctx)
+	backend, err := checkSSHWindowFirewall(ctx)
 	if err != nil {
 		return setup, err
 	}
-	if mechanism != mechanismNftablesSet {
-		return setup, fmt.Errorf("%s manages this firewall; automatic temporary SSH requires a native nftables input chain with kernel timeout sets", mechanism)
+	if backend == sshWindowUFW && (options.NftConfig != "" || options.Table != "" || options.Chain != "") {
+		return setup, errors.New("UFW is active; omit the nftables-specific --nft-config, --table and --chain options")
 	}
 	if options.Interface == "" {
 		devices, err := interfacesForMode(rescuev1.NetworkIsolationMode_NETWORK_ISOLATION_MODE_PUBLIC_INTERFACES)
@@ -72,6 +75,13 @@ func PlanSSHWindow(ctx context.Context, m *hostops.Manifest, options SSHWindowSe
 	port, err := discoverSSHPort(ctx, options.Interface, options.Port)
 	if err != nil {
 		return setup, err
+	}
+	if backend == sshWindowUFW {
+		setup.config = sshWindowConfig{Backend: sshWindowUFW, Interface: options.Interface, Port: port}
+		if _, err := setup.config.inspectUFW(ctx, true); err != nil {
+			return setup, err
+		}
+		return setup, nil
 	}
 	ruleset, err := readSSHNftRuleset(ctx)
 	if err != nil {
@@ -162,7 +172,7 @@ func discoverSSHPort(ctx context.Context, device string, explicit uint32) (uint3
 	return 0, errors.Join(fmt.Errorf("no SSH listener verified on %s; check sshd and its ListenAddress", device), readErr)
 }
 
-func selectSSHInputHook(ruleset sshNftRuleset, table, chain string) (string, string, error) {
+func sshInputHooks(ruleset sshNftRuleset) [][2]string {
 	var choices [][2]string
 	for _, entry := range ruleset.Entries {
 		c := entry.Chain
@@ -171,13 +181,23 @@ func selectSSHInputHook(ruleset sshNftRuleset, table, chain string) (string, str
 			!sshNftIdentifier.MatchString(c.Table) || !sshNftIdentifier.MatchString(c.Name) {
 			continue
 		}
-		if table == c.Table && chain == c.Name {
+		choices = append(choices, [2]string{c.Table, c.Name})
+	}
+	return choices
+}
+
+func selectSSHInputHook(ruleset sshNftRuleset, table, chain string) (string, string, error) {
+	choices := sshInputHooks(ruleset)
+	for _, c := range choices {
+		if table == c[0] && chain == c[1] {
 			return table, chain, nil
 		}
-		choices = append(choices, [2]string{c.Table, c.Name})
 	}
 	if table == "" && len(choices) == 1 {
 		return choices[0][0], choices[0][1], nil
+	}
+	if len(choices) == 0 {
+		return "", "", errors.New("no native nftables inet input filter is loaded; an iptables INPUT chain (including iptables-nft) is not a compatible entry point")
 	}
 	return "", "", fmt.Errorf("could not select an inet nftables input filter (%v); provide --table and --chain", choices)
 }
@@ -204,6 +224,12 @@ func (s SSHWindowSetup) Apply(ctx context.Context) error {
 	}
 	if err := hostops.TrustedPath(filepath.Dir(s.settings)); err != nil {
 		return err
+	}
+	if s.config.Backend == sshWindowUFW {
+		if err := s.config.prepareUFW(ctx); err != nil {
+			return err
+		}
+		return hostops.WriteJSON(s.settings, s.config, 0o600)
 	}
 	if err := hostops.TrustedPath(s.nftConfig); err != nil {
 		return err

@@ -115,6 +115,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y nftables iproute2
           bash scripts/ci/run-audit-check.sh temporary-ssh-window sudo env PATH="$PATH" GOTOOLCHAIN=local GOMODCACHE="$(go env GOMODCACHE)" GOCACHE="$(go env GOCACHE)" bash scripts/ci/test-temporary-ssh-window.sh
+      - name: Verify IPv4 and IPv6 SSH admission, expiry and reload with UFW
+        run: |
+          sudo apt-get install -y ufw ipset
+          bash scripts/ci/run-audit-check.sh temporary-ssh-ufw sudo env PATH="$PATH" GOTOOLCHAIN=local GOMODCACHE="$(go env GOMODCACHE)" GOCACHE="$(go env GOCACHE)" bash scripts/ci/test-temporary-ssh-ufw.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:

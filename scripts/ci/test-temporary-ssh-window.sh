@@ -2,6 +2,11 @@
 # Run with root in a Linux VM or a dedicated container with isolated networking.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+case "${1:-nftables}" in
+  nftables) test_name=TestTemporarySSHWindowNftables ;;
+  ufw) test_name=TestTemporarySSHWindowUFW ;;
+  *) exit 2 ;;
+esac
 exec unshare --net -- bash -eu -o pipefail -c '
   unshare --net -- sleep infinity &
   peer=$!
@@ -22,5 +27,5 @@ exec unshare --net -- bash -eu -o pipefail -c '
   nsenter -t "$peer" -n ip addr add 192.0.2.3/24 dev sshpeer
   nsenter -t "$peer" -n ip -6 addr add fd69:434f:4d41::2/64 dev sshpeer nodad
   nsenter -t "$peer" -n ip -6 addr add fd69:434f:4d41::3/64 dev sshpeer nodad
-  KOMARI_CREDENTIAL_ROOT_TEST=1 KOMARI_SSH_WINDOW_PEER_PID="$peer" go test -count=1 -timeout=1m -v ./rescue -run "^TestTemporarySSHWindowNftables$"
-'
+  KOMARI_CREDENTIAL_ROOT_TEST=1 KOMARI_SSH_WINDOW_PEER_PID="$peer" go test -count=1 -timeout=1m -v ./rescue -run "^$1$"
+' _ "$test_name"
