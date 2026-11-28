@@ -30,6 +30,9 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
       - name: Read the supported build targets
         id: targets
         run: node scripts/ci/build-matrix.cjs >> "$GITHUB_OUTPUT"

@@ -3,6 +3,7 @@
 The Komari Agent [GitHub Actions workflows](../../.github/workflows) use the
 compiler pinned in [.go-version](../../.go-version). The minimum compiler for
 consumers is declared in [go.mod](../../go.mod).
+JavaScript build matrix and release policy checks use [.node-version](../../.node-version).
 
 The important design split is:
 
