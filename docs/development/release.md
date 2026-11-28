@@ -1,7 +1,8 @@
 # Workflow Design Notes
 
-This directory contains the GitHub Actions workflows for Komari Agent. Keep this
-document updated when changing release, snapshot, or Docker publishing behavior.
+The Komari Agent [GitHub Actions workflows](../../.github/workflows) use the
+compiler pinned in [.go-version](../../.go-version). The minimum compiler for
+consumers is declared in [go.mod](../../go.mod).
 
 The important design split is:
 
