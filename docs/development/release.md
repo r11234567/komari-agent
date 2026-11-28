@@ -3,6 +3,7 @@
 The Komari Agent [GitHub Actions workflows](../../.github/workflows) use the
 compiler pinned in [.go-version](../../.go-version). The minimum compiler for
 consumers is declared in [go.mod](../../go.mod).
+JavaScript build matrix and release policy checks use [.node-version](../../.node-version).
 
 The important design split is:
 
@@ -27,6 +28,13 @@ The important design split is:
 | `generate-release-notes.yml` | Published GitHub release, manual dispatch | Generated release notes | Skips prerelease release events |
 
 ## Common Build Conventions
+
+CI, Snapshot and stable releases read the same [platform list](../../scripts/ci/build-matrix.cjs)
+and use the same [binary build script](../../scripts/ci/build-targets.sh).
+Stable releases still sign each target separately. Update the platform list
+when changing support and keep the artifact upload and installer mappings in sync.
+The root [uninstaller](../../uninstall.sh) is canonical; keep the
+[historical raw URL](../../scripts/uninstall.sh) byte-identical.
 
 Binary names must remain compatible with the updater, installer scripts, and
 Dockerfile:

@@ -13,10 +13,18 @@ jobs:
     if: ${{ !github.event.release.prerelease || contains(github.event.release.tag_name, '-dev.') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      matrix: ${{ steps.targets.outputs.individual }}
     steps:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+      - name: Read the supported build targets
+        id: targets
+        run: node scripts/ci/build-matrix.cjs >> "$GITHUB_OUTPUT"
       - name: Require successful CI for the exact release commit
         uses: actions/github-script@v9
         with:
@@ -65,18 +73,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        exclude:
-          - goos: windows
-            goarch: arm
-          - goos: darwin
-            goarch: 386
-          - goos: darwin
-            goarch: arm
-        include:
-          - goos: linux
-            goarch: loong64
-        goos: [windows, linux, darwin, freebsd]
-        goarch: [amd64, arm64, 386, arm]
+        include: ${{ fromJSON(needs.signing-preflight.outputs.matrix) }}
 
     steps:
       - name: Checkout code
@@ -89,37 +86,23 @@ jobs:
         with:
           go-version-file: .go-version
 
-      - name: Build binary
+      - name: Build Agent, rescue and Host
         env:
           GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 0
+          TARGET_ARCHES: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
           VERSION: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
           mkdir -p ci-artifacts
-          exec > >(tee ci-artifacts/build.log) 2>&1
           trap 'echo "$?" > ci-artifacts/build-exit.txt' EXIT
-          BINARY_NAME=komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            BINARY_NAME=${BINARY_NAME}.exe
-          elif [ "${{ matrix.goos }}" = "darwin" ]; then
-            # macOS binaries typically do not have a file extension
-            true
-          fi
-          go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}" -o $BINARY_NAME
-
-          RESCUE_BINARY_NAME=komari-agent-rescue-${{ matrix.goos }}-${{ matrix.goarch }}
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            RESCUE_BINARY_NAME=${RESCUE_BINARY_NAME}.exe
-          fi
-          go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}" -o $RESCUE_BINARY_NAME ./cmd/komari-agent-rescue
-
-          HOST_BINARY_NAME=komari-host-${{ matrix.goos }}-${{ matrix.goarch }}
-          if [ "${{ matrix.goos }}" = "windows" ]; then HOST_BINARY_NAME=${HOST_BINARY_NAME}.exe; fi
-          go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/internal/hostcmd.ReleaseVersion=${VERSION}" -o "$HOST_BINARY_NAME" ./cmd/komari-host
-          sha256sum "$BINARY_NAME" > "$BINARY_NAME.sha256"
-          sha256sum "$HOST_BINARY_NAME" > "$HOST_BINARY_NAME.sha256"
+          bash scripts/ci/build-targets.sh
+          extension=""
+          if [[ "$GOOS" == windows ]]; then extension=.exe; fi
+          suffix="$GOOS-$TARGET_ARCHES$extension"
+          dir="build/$GOOS-$TARGET_ARCHES"
+          mv "$dir/komari-agent-$suffix" "$dir/komari-agent-rescue-$suffix" "$dir/komari-host-$suffix" .
+          mv "$dir/komari-agent-$suffix.sha256" "$dir/komari-host-$suffix.sha256" .
 
       - name: Sign exact Agent, Host and helper release manifests
         env:
