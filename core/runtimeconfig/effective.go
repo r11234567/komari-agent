@@ -30,6 +30,7 @@ func CurrentPolicy() (*hostops.Policy, error) {
 }
 func PolicyAllows(settings privileged.Settings, p *hostops.Policy) bool {
 	return p != nil && int32(settings.RequiredPrivilegeMode) == p.PrivilegeMode &&
+		(!settings.TrafficMonitoringEnabled || settings.RequiredPrivilegeMode == reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT) &&
 		(!settings.RemoteControlEnabled || p.AllowRemoteControl && !p.ForceDenyRemoteControl) &&
 		(!settings.WebSSHEnabled || p.AllowWebSSH) && (!settings.ExecutionEnabled || p.AllowExecution) &&
 		(!settings.EnableGPU || p.AllowGPU) && (!settings.RescueHelperEnabled || p.AllowRescueHelper && !p.ForceDenyRescueHelper && p.HelperInstalled && p.HelperAuthorized)
@@ -58,7 +59,7 @@ func Inspect(config *flags_pkg.Config, runtimeStore *Store, privilegedStore *pri
 		result.Privileged = privilegedStore.Effective()
 		result.Source = "applied privileged snapshot intersected with signed pending restrictions"
 	}
-	for _, field := range []string{"remote_control_enabled", "webssh_enabled", "execution_enabled", "root_execution_allowed", "enable_gpu", "rescue_helper_enabled", "required_privilege_mode"} {
+	for _, field := range []string{"remote_control_enabled", "webssh_enabled", "execution_enabled", "root_execution_allowed", "traffic_monitoring_enabled", "enable_gpu", "rescue_helper_enabled", "required_privilege_mode"} {
 		result.Sources[field] = result.Source
 	}
 	if config.ServiceManifestFile != "" {
@@ -95,6 +96,7 @@ func Inspect(config *flags_pkg.Config, runtimeStore *Store, privilegedStore *pri
 				s.WebSSHEnabled = s.WebSSHEnabled && target.WebSSHEnabled
 				s.ExecutionEnabled = s.ExecutionEnabled && target.ExecutionEnabled
 				s.RootExecutionAllowed = s.RootExecutionAllowed && target.RootExecutionAllowed
+				s.TrafficMonitoringEnabled = s.TrafficMonitoringEnabled && target.TrafficMonitoringEnabled
 				s.EnableGPU = s.EnableGPU && target.EnableGPU
 				s.RescueHelperEnabled = s.RescueHelperEnabled && target.RescueHelperEnabled
 				result.Sources["host_transition_ceiling"] = fmt.Sprintf("protected host revision r%d", p.HostRevision)

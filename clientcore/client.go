@@ -104,7 +104,8 @@ type Client struct {
 	store          *runtimeconfig.Store
 	// privilegedStore is daemon-owned. Only a verified current v2 approval can
 	// activate a same-identity candidate; host actions remain unavailable.
-	privilegedStore *privileged.Store
+	privilegedStore   *privileged.Store
+	trafficMonitoring atomic.Pointer[reportv1.TrafficMonitoringStatus]
 	// credentialStore holds the enrolled identity, including the panel signing
 	// keys this Agent pinned. It is what makes a delivered instruction
 	// attributable rather than merely well-formed.
@@ -386,6 +387,13 @@ func (c *Client) Run(ctx context.Context) error {
 				c.runTrafficEvidence(trafficCtx, identity, inbox)
 			}()
 			defer func() { stopTraffic(); <-evidenceDone }()
+		} else {
+			monitoringDone := make(chan struct{})
+			go func() {
+				defer close(monitoringDone)
+				c.runManagedTrafficMonitoring(trafficCtx, identity)
+			}()
+			defer func() { stopTraffic(); <-monitoringDone }()
 		}
 	}
 	// Renewal starts before configuration synchronization so an expired AT or
@@ -1352,6 +1360,9 @@ func (c *Client) SubmitReport(parent context.Context) error {
 	defer cancel()
 	report := monitoring.CollectReport().Proto(c.agentIDValue(), c.sequence.Add(1))
 	report.Metadata.Installation = installation.Observe(c.cfg, c.startupID, report.Metadata.GetCapabilities().GetPrivilegeMode())
+	if report.Metadata.Capabilities != nil {
+		report.Metadata.Capabilities.TrafficMonitoring = c.trafficMonitoringStatus()
+	}
 	req := connect.NewRequest(&reportv1.SubmitReportRequest{Report: report})
 	c.authorize(req.Header())
 	_, err := c.report.SubmitReport(ctx, req)

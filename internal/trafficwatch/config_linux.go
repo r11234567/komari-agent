@@ -43,8 +43,12 @@ var (
 	unitName  = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.@-]{0,95}\.service$`)
 )
 
+func defaultThresholds() thresholds {
+	return thresholds{Fast: 300_000_000, Slow: 1_000_000_000, Sustained: 1_500_000_000}
+}
+
 func LoadConfig(path string) (Config, error) {
-	cfg := Config{Thresholds: thresholds{Fast: 300_000_000, Slow: 1_000_000_000, Sustained: 1_500_000_000}}
+	cfg := Config{Thresholds: defaultThresholds()}
 	body, err := readBoundedFile(path, 64<<10)
 	if err != nil {
 		return cfg, err

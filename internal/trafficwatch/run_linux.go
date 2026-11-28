@@ -17,9 +17,13 @@ import (
 	"github.com/komari-monitor/komari-agent/core/statelock"
 )
 
-// Run starts the explicitly configured local pilot. The monitoring Agent does
-// not start this command or share its privileges or credentials with it.
 func Run(ctx context.Context, cfg Config) error {
+	return RunWithReady(ctx, cfg, nil)
+}
+
+// RunWithReady reports when the kernel sampler has attached. The manual
+// collector uses Run and does not need a readiness callback.
+func RunWithReady(ctx context.Context, cfg Config, ready func()) error {
 	if err := cfg.validate(); err != nil {
 		return err
 	}
@@ -51,6 +55,9 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	defer source.Close()
 	log.Printf("Traffic sampler ebpf attached to %s", cfg.Interface)
+	if ready != nil {
+		ready()
+	}
 	return runSampler(ctx, cfg, source, nil, nil)
 }
 
