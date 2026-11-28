@@ -14,9 +14,9 @@ import (
 func RegisterLocalFlags(fs *pflag.FlagSet, config *Config) {
 	fs.StringVarP(&config.Token, "token", "t", "", "API token")
 	fs.StringVarP(&config.Endpoint, "endpoint", "e", "", "API endpoint")
-	fs.StringVar(&config.AutoDiscoveryKey, "auto-discovery", "", "Auto discovery key for the agent")
-	fs.StringVar(&config.ServerName, "server-name", "", "Server display name used for the first auto-discovery registration")
-	fs.BoolVar(&config.DisableAutoUpdate, "disable-auto-update", false, "Disable automatic updates")
+	fs.StringVar(&config.AutoDiscoveryKey, "auto-discovery", "", "Read an existing legacy enrollment file only; use login for new enrollment")
+	fs.StringVar(&config.ServerName, "server-name", "", "Accepted for legacy configurations only")
+	fs.BoolVar(&config.DisableAutoUpdate, "disable-auto-update", false, "Accepted for legacy configurations only; update installed agents with komari-host")
 	fs.BoolVar(&config.DisableRemoteControl, "disable-remote-control", false, "Locally deny all remote control; online approval cannot override this restriction")
 	fs.BoolVarP(&config.IgnoreUnsafeCert, "ignore-unsafe-cert", "u", false, "Ignore unsafe certificate errors")
 	fs.IntVarP(&config.ReconnectInterval, "reconnect-interval", "c", 5, "Reconnect interval in seconds")

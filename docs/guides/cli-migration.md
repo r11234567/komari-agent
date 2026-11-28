@@ -1,5 +1,7 @@
 # CLI 与配置所有权
 
+自动注册端点已退役；`--auto-discovery` 只读取旧安装已有的 `auto-discovery.json`。新安装不要传这个参数。迁移时先备份已有凭据和服务参数；使用该服务的账户运行 `komari-agent login` 完成浏览器审批，核对凭据文件存在后移除旧服务参数并重启，验证节点在线。迁移完成前不要删除旧文件。
+
 配置查询统一使用 `komari-agent config show [--json]`。输出脱敏磁盘快照、文件时间、有效值来源、本机保护策略、host applied 摘要、helper 的受验证观察和回执数量；不启动 daemon，不写状态，不读取或输出私钥，不把查询进程身份当成 daemon 身份，也不将离线 pending 当成服务端当前 desired。
 
 | 入口/字段 | 当前行为 |

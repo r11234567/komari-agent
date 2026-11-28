@@ -247,21 +247,6 @@ func checkSupported(settings Settings, actual reportv1.PrivilegeMode) error {
 	return nil
 }
 
-func describePrivilege(mode reportv1.PrivilegeMode) string {
-	switch mode {
-	case reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_ROOT:
-		return "root"
-	case reportv1.PrivilegeMode_PRIVILEGE_MODE_LINUX_NON_ROOT:
-		return "a non-root user"
-	case reportv1.PrivilegeMode_PRIVILEGE_MODE_WINDOWS_ADMINISTRATOR:
-		return "an administrator"
-	case reportv1.PrivilegeMode_PRIVILEGE_MODE_WINDOWS_STANDARD_USER:
-		return "a standard user"
-	default:
-		return "an unprivileged account"
-	}
-}
-
 func settingsFromProto(value *configv1.PrivilegedConfig) Settings {
 	return Settings{
 		RequiredPrivilegeMode:    value.GetRequiredPrivilegeMode(),

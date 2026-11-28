@@ -548,10 +548,6 @@ func removeUploadFileLocked(uploadID string) error {
 	return nil
 }
 
-func cancelFileUpload(args map[string]interface{}) (json.RawMessage, error) {
-	return cancelFileUploadScoped("", args)
-}
-
 func cancelFileUploadScoped(scope string, args map[string]interface{}) (json.RawMessage, error) {
 	uploadID := strings.TrimSpace(argString(args, "upload_id"))
 	if uploadID == "" {

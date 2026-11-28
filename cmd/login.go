@@ -488,15 +488,6 @@ func printInstructionTo(out io.Writer, instruction enrollment.Instruction) {
 	fmt.Fprintln(out, "\nWaiting for approval...")
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
-}
-
 func init() {
 	loginCmd.Flags().BoolVar(&loginNoPin, "no-pin", false, "Skip pinning the panel signing keys during enrollment")
 	trustRefreshCmd.Flags().String("public-key", "", "Verified panel Ed25519 public key in base64")

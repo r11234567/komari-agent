@@ -82,14 +82,29 @@ if ($RuntimeIdentity -notin @("root-or-administrator", "service-account")) {
 if ($ServiceName -notmatch '^[a-zA-Z0-9][a-zA-Z0-9_.-]*$') {
     throw "Invalid service name: $ServiceName"
 }
-if (-not $IsAdministrator) {
-    Log-Error "Administrator privileges are required to install or uninstall the Agent service."
-    exit 1
-}
 if ([string]::IsNullOrWhiteSpace($InstallDir)) {
     $InstallDir = Join-Path $env:ProgramFiles "Komari"
 }
 $InstallDir = [IO.Path]::GetFullPath($InstallDir)
+
+if (-not $UninstallOnly) {
+    for ($Index = 0; $Index -lt $KomariArgs.Count; $Index++) {
+        if ($KomariArgs[$Index] -like '--auto-discovery=?*' -or
+            ($KomariArgs[$Index] -eq '--auto-discovery' -and $Index + 1 -lt $KomariArgs.Count -and $KomariArgs[$Index + 1])) {
+            $LegacyDiscoveryPath = if ($env:AGENT_AUTO_DISCOVERY_FILE) { $env:AGENT_AUTO_DISCOVERY_FILE.Trim() }
+                else { Join-Path $InstallDir 'auto-discovery.json' }
+            $LegacyDiscoveryFile = Get-Item -LiteralPath $LegacyDiscoveryPath -ErrorAction SilentlyContinue
+            if (-not $LegacyDiscoveryFile -or $LegacyDiscoveryFile.PSIsContainer -or $LegacyDiscoveryFile.Length -le 0) {
+                throw 'Legacy auto-discovery cannot register a node. Remove --auto-discovery and enroll using komari-agent login.'
+            }
+            break
+        }
+    }
+}
+if (-not $IsAdministrator) {
+    Log-Error "Administrator privileges are required to install or uninstall the Agent service."
+    exit 1
+}
 
 switch ($env:PROCESSOR_ARCHITECTURE) {
     "AMD64" { $Arch = "amd64" }
@@ -509,8 +524,8 @@ try {
     & $Nssm set $ServiceName AppExit Default Restart | Out-Null
     Assert-NativeCommand "Configuring restart behavior for $ServiceName"
 
-    $AgentReady = (Test-Path -LiteralPath $CredentialsPath) -or -not [string]::IsNullOrWhiteSpace($AgentToken) -or
-        (@($KomariArgs | Where-Object { $_ -eq '--auto-discovery' -or $_ -like '--auto-discovery=?*' -or $_ -like '--token=?*' -or
+    $AgentReady = (Test-Path -LiteralPath $CredentialsPath) -or -not [string]::IsNullOrWhiteSpace($AgentToken) -or $LegacyDiscoveryRequested -or
+        (@($KomariArgs | Where-Object { $_ -like '--token=?*' -or
             $_ -like '-t=?*' -or $_ -eq '--config' -or $_ -like '--config=?*' }).Count -gt 0)
     if ($AgentReady) {
         try { Start-ServiceAndWait $ServiceName }

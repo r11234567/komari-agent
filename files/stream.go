@@ -351,10 +351,6 @@ func pruneUploadLifecyclesLocked(now time.Time) {
 	}
 }
 
-func parseUploadStreamSpec(args map[string]interface{}) (uploadStreamSpec, error) {
-	return parseUploadStreamSpecScoped("", args)
-}
-
 func parseUploadStreamSpecScoped(scope string, args map[string]interface{}) (uploadStreamSpec, error) {
 	spec := uploadStreamSpec{
 		WorkspaceID: scope,
